@@ -218,9 +218,10 @@ export default function TabProvider({
         isNewSessionRef.current = true;
         isStreamingRef.current = false;
         setIsLoading(false);
-        setSystemStatus(null);  // Clear system status for new conversation
+        setSessionState('idle');  // Reset session state for new conversation
+        setSystemStatus(null);
         setAgentError(null);
-        setUnifiedLogs([]); // Clear logs for new conversation
+        setUnifiedLogs([]);
         setLogs([]);
         // Clear pending prompts to prevent stale UI
         setPendingPermission(null);
@@ -970,7 +971,8 @@ export default function TabProvider({
                         console.warn(`[TabProvider ${tabId}] Stop timeout - forcing UI recovery`);
                         isStreamingRef.current = false;
                         setIsLoading(false);
-                        setSystemStatus(null);  // Clear system status on timeout
+                        setSessionState('idle');  // Reset session state on timeout
+                        setSystemStatus(null);
                     }
                     stopTimeoutRef.current = null;
                 }, 5000);
@@ -982,7 +984,8 @@ export default function TabProvider({
             // 请求失败也强制恢复 UI
             isStreamingRef.current = false;
             setIsLoading(false);
-            setSystemStatus(null);  // Clear system status on error
+            setSessionState('idle');  // Reset session state on error
+            setSystemStatus(null);
             return false;
         }
     }, [tabId]);
@@ -1036,8 +1039,9 @@ export default function TabProvider({
             isNewSessionRef.current = false; // Allow SSE replays again
             isStreamingRef.current = false;  // Stop any streaming state
             setMessages(loadedMessages);
-            setIsLoading(false);  // Ensure loading state is cleared
-            setSystemStatus(null);  // Clear system status when loading historical session
+            setIsLoading(false);
+            setSessionState('idle');  // Reset session state when loading historical session
+            setSystemStatus(null);
             setAgentError(null);
             // Update current session ID to reflect the loaded session
             setCurrentSessionId(targetSessionId);
