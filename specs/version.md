@@ -71,7 +71,13 @@ description: |
 - 修复 AI 回复完成后 Loading 指示器和停止按钮卡住（补全 9 种结束场景的 sessionState 重置）
 - 修复发送消息后不自动滚动到底部
 - 修复系统任务（如 Compact）期间显示停止按钮的误导
+- 修复进程泄露问题（SDK/MCP 子进程随应用关闭正确清理）
 - 优化文件预览性能（React.lazy + useMemo 缓存）
+
+### 10. 架构优化
+- 应用退出支持 Cmd+Q 和 Dock 右键退出的进程清理（RunEvent::ExitRequested）
+- 进程清理函数重构，统一 SIGTERM → SIGKILL 两阶段关闭
+- 启动时清理扩展至 SDK 和 MCP 子进程
 
 **详见**: [specs/prd/prd_0.1.4.md](./prd/prd_0.1.4.md)
 
