@@ -152,8 +152,8 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
         currentGroup = [];
       }
       groupedBlocks.push(block);
-    } else if (block.type === 'thinking' || block.type === 'tool_use') {
-      // Add to current group
+    } else if (block.type === 'thinking' || block.type === 'tool_use' || block.type === 'server_tool_use') {
+      // Add to current group (server_tool_use is treated like tool_use for display)
       currentGroup.push(block);
     }
   }
@@ -172,8 +172,9 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     if (block.type === 'thinking') {
       return !block.isComplete;
     }
-    if (block.type === 'tool_use') {
+    if (block.type === 'tool_use' || block.type === 'server_tool_use') {
       // Tool is incomplete if it doesn't have a result yet
+      // server_tool_use is treated the same as tool_use for streaming state
       const subagentRunning = block.tool?.subagentCalls?.some((call) => call.isLoading);
       return Boolean(block.tool?.isLoading) || Boolean(subagentRunning) || !block.tool?.result;
     }

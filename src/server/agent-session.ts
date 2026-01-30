@@ -80,7 +80,7 @@ type SubagentToolCall = {
 };
 
 type ContentBlock = {
-  type: 'text' | 'tool_use' | 'thinking';
+  type: 'text' | 'tool_use' | 'thinking' | 'server_tool_use';
   text?: string;
   tool?: ToolUseState;
   thinking?: string;
@@ -1148,6 +1148,31 @@ function handleToolUseStart(tool: {
     }
   });
   // Increment tool count for this turn
+  currentTurnToolCount++;
+}
+
+/**
+ * Handle server_tool_use content block start
+ * server_tool_use is a tool executed by the API provider (e.g., 智谱 GLM-4.7's webReader)
+ * Unlike tool_use (client-side MCP tools), these run on the server and results come back in the stream
+ */
+function handleServerToolUseStart(tool: {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  streamIndex: number;
+}): void {
+  const message = ensureAssistantMessage();
+  const contentArray = ensureContentArray(message);
+  contentArray.push({
+    type: 'server_tool_use',
+    tool: {
+      ...tool,
+      inputJson: JSON.stringify(tool.input, null, 2), // Server tools come with complete input
+      parsedInput: tool.input as unknown as ToolInput
+    }
+  });
+  // Server tools also count towards tool usage
   currentTurnToolCount++;
 }
 
@@ -2336,6 +2361,25 @@ async function startStreamingSession(): Promise<void> {
               broadcast('chat:tool-use-start', toolPayload);
               handleToolUseStart(toolPayload);
             }
+          } else if (streamEvent.content_block.type === 'server_tool_use') {
+            // Server-side tool use (e.g., 智谱 GLM-4.7's webReader, analyze_image)
+            // These are executed by the API provider, not locally
+            const serverToolBlock = streamEvent.content_block as {
+              type: 'server_tool_use';
+              id: string;
+              name: string;
+              input: Record<string, unknown>;
+            };
+            streamIndexToToolId.set(streamEvent.index, serverToolBlock.id);
+            const toolPayload = {
+              id: serverToolBlock.id,
+              name: serverToolBlock.name,
+              input: serverToolBlock.input || {},
+              streamIndex: streamEvent.index
+            };
+            // Server tools are always top-level (no subagent concept)
+            broadcast('chat:server-tool-use-start', toolPayload);
+            handleServerToolUseStart(toolPayload);
           } else if (
             (streamEvent.content_block.type === 'web_search_tool_result' ||
               streamEvent.content_block.type === 'web_fetch_tool_result' ||

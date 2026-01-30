@@ -550,6 +550,40 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:server-tool-use-start': {
+                // Server-side tool use (e.g., 智谱 GLM-4.7's webReader, analyze_image)
+                // These are executed by the API provider, not locally
+                if (isNewSessionRef.current) {
+                    console.log('[TabProvider] Skipping server-tool-use-start (new session, stale event)');
+                    break;
+                }
+                const tool = data as ToolUse;
+                // Server tools come with complete input, no streaming
+                const toolSimple: ToolUseSimple = {
+                    ...tool,
+                    inputJson: JSON.stringify(tool.input, null, 2),
+                    parsedInput: tool.input as unknown as ToolInput,
+                    isLoading: true
+                };
+                setMessages(prev => {
+                    const toolBlock: ContentBlock = {
+                        type: 'server_tool_use',
+                        tool: toolSimple
+                    };
+                    const last = prev[prev.length - 1];
+                    if (last?.role === 'assistant') {
+                        const content = typeof last.content === 'string'
+                            ? [{ type: 'text' as const, text: last.content }]
+                            : last.content;
+                        return [...prev.slice(0, -1), { ...last, content: [...content, toolBlock] }];
+                    }
+                    isStreamingRef.current = true;
+                    setIsLoading(true);
+                    return [...prev, { id: Date.now().toString(), role: 'assistant', content: [toolBlock], timestamp: new Date() }];
+                });
+                break;
+            }
+
             case 'chat:tool-input-delta': {
                 const { toolId, delta } = data as { index: number; toolId: string; delta: string };
                 setMessages(prev => {
@@ -596,13 +630,14 @@ export default function TabProvider({
                         }
                     }
 
-                    // Check tool block
+                    // Check tool block (both tool_use and server_tool_use)
+                    const isToolBlock = (b: ContentBlock) => b.type === 'tool_use' || b.type === 'server_tool_use';
                     const toolIdx = toolId
-                        ? contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === toolId)
-                        : contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.streamIndex === index);
+                        ? contentArray.findIndex(b => isToolBlock(b) && b.tool?.id === toolId)
+                        : contentArray.findIndex(b => isToolBlock(b) && b.tool?.streamIndex === index);
                     if (toolIdx !== -1) {
                         const block = contentArray[toolIdx];
-                        if (block.type === 'tool_use' && block.tool?.inputJson) {
+                        if (isToolBlock(block) && block.tool?.inputJson) {
                             let parsedInput: ToolInput | undefined;
                             try {
                                 parsedInput = JSON.parse(block.tool.inputJson);
@@ -630,10 +665,12 @@ export default function TabProvider({
                     const last = prev[prev.length - 1];
                     if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
                     const contentArray = last.content;
-                    const idx = contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === payload.toolUseId);
+                    // Find tool block (both tool_use and server_tool_use)
+                    const isToolBlock = (b: ContentBlock) => b.type === 'tool_use' || b.type === 'server_tool_use';
+                    const idx = contentArray.findIndex(b => isToolBlock(b) && b.tool?.id === payload.toolUseId);
                     if (idx === -1) return prev;
                     const block = contentArray[idx];
-                    if (block.type !== 'tool_use' || !block.tool) return prev;
+                    if (!isToolBlock(block) || !block.tool) return prev;
 
                     const updated = [...contentArray];
                     if (eventName === 'chat:tool-result-delta') {
