@@ -1098,26 +1098,63 @@ function ensureContentArray(message: MessageWire): ContentBlock[] {
 /**
  * Check if text is a decorative wrapper from third-party APIs (e.g., 智谱 GLM-4.7)
  * These APIs wrap server_tool_use with decorative text blocks that shouldn't be displayed
+ *
+ * IMPORTANT: This function must be very precise to avoid filtering legitimate content.
+ * We require MULTIPLE specific markers to be present before filtering.
+ *
+ * @returns { filtered: boolean, reason?: string } - reason is for debugging
+ */
+function checkDecorativeToolText(text: string): { filtered: boolean; reason?: string } {
+  // Safety: never filter very short or very long text
+  // Decorative blocks are typically 100-2000 chars
+  if (!text || text.length < 50 || text.length > 5000) {
+    return { filtered: false };
+  }
+
+  const trimmed = text.trim();
+
+  // Pattern 1: 智谱 GLM-4.7 tool invocation wrapper
+  // Must have ALL of these markers (very specific combination):
+  // - "🌐 Z.ai Built-in Tool:" or "Z.ai Built-in Tool:"
+  // - "**Input:**" (markdown bold)
+  // - Either "```json" or "Executing on server"
+  const hasZaiToolMarker = trimmed.includes('Z.ai Built-in Tool:');
+  const hasInputMarker = trimmed.includes('**Input:**');
+  const hasJsonBlock = trimmed.includes('```json') || trimmed.includes('Executing on server');
+
+  if (hasZaiToolMarker && hasInputMarker && hasJsonBlock) {
+    return { filtered: true, reason: 'zhipu-tool-invocation-wrapper' };
+  }
+
+  // Pattern 2: 智谱 GLM-4.7 tool output wrapper
+  // Must have ALL of these markers:
+  // - Starts with "**Output:**"
+  // - Contains "_result_summary:" (specific to Zhipu's format)
+  // - Contains JSON-like content (starts with "[" or "{")
+  if (trimmed.startsWith('**Output:**') && trimmed.includes('_result_summary:')) {
+    // Additional check: should contain JSON-like structure
+    const hasJsonContent = trimmed.includes('[{') || trimmed.includes('{"');
+    if (hasJsonContent) {
+      return { filtered: true, reason: 'zhipu-tool-output-wrapper' };
+    }
+  }
+
+  return { filtered: false };
+}
+
+/**
+ * Legacy wrapper for backward compatibility
+ * @deprecated Use checkDecorativeToolText for more detailed info
  */
 function isDecorativeToolText(text: string): boolean {
-  const trimmed = text.trim();
-  // 智谱 GLM-4.7 adds decorative text before server_tool_use
-  // e.g., "**🌐 Z.ai Built-in Tool: webReader**\n\n**Input:**\n```json\n{...}\n```\n\n*Executing on server...*"
-  if (trimmed.includes('🌐 Z.ai Built-in Tool:') || trimmed.includes('Z.ai Built-in Tool:')) {
-    return true;
-  }
-  // 智谱 GLM-4.7 adds decorative text for tool output
-  // e.g., "**Output:**\n**webReader_result_summary:** [...]"
-  if (trimmed.startsWith('**Output:**') && trimmed.includes('_result_summary:')) {
-    return true;
-  }
-  return false;
+  return checkDecorativeToolText(text).filtered;
 }
 
 function appendTextChunk(chunk: string): void {
   // Filter out decorative text from third-party APIs (e.g., 智谱 GLM-4.7)
-  if (isDecorativeToolText(chunk)) {
-    console.log('[agent] Filtered decorative tool text from third-party API');
+  const decorativeCheck = checkDecorativeToolText(chunk);
+  if (decorativeCheck.filtered) {
+    console.log(`[agent] Filtered decorative text (${decorativeCheck.reason}), length=${chunk.length}`);
     return;
   }
 
@@ -2334,11 +2371,12 @@ async function startStreamingSession(): Promise<void> {
               appendToolResultDelta(sdkMessage.parent_tool_use_id, streamEvent.delta.text);
             } else {
               // Filter out decorative text from third-party APIs before broadcasting
-              if (!isDecorativeToolText(streamEvent.delta.text)) {
+              const decorativeCheck = checkDecorativeToolText(streamEvent.delta.text);
+              if (!decorativeCheck.filtered) {
                 broadcast('chat:message-chunk', streamEvent.delta.text);
                 appendTextChunk(streamEvent.delta.text);
               } else {
-                console.log('[agent] Filtered decorative tool text from stream');
+                console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
               }
             }
           } else if (streamEvent.delta.type === 'thinking_delta') {
