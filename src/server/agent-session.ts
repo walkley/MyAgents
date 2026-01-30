@@ -1435,6 +1435,21 @@ function handleMessageStopped(): void {
 function handleMessageError(error: string): void {
   isStreamingMessage = false;
   setSessionState('idle');
+
+  // Don't persist expected termination signals as errors
+  // These occur during normal session switching or app shutdown
+  const isExpectedTermination =
+    error.includes('SIGTERM') ||
+    error.includes('SIGKILL') ||
+    error.includes('SIGINT') ||
+    error.includes('process terminated') ||
+    error.includes('AbortError');
+
+  if (isExpectedTermination) {
+    console.log('[agent] Skipping error persistence for expected termination:', error);
+    return;
+  }
+
   messages.push({
     id: String(messageSequence++),
     role: 'assistant',
