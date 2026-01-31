@@ -238,3 +238,38 @@ fn find_available_port() -> Option<u16> {
 fn is_port_available(port: u16) -> bool {
     std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
 }
+
+// ============= Platform Info Command =============
+
+/// Command: Get platform identifier (matches build target naming)
+/// Returns: darwin-aarch64, darwin-x86_64, windows-x86_64, linux-x86_64, etc.
+#[tauri::command]
+pub fn cmd_get_platform() -> String {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "darwin-aarch64".to_string();
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "darwin-x86_64".to_string();
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "windows-x86_64".to_string();
+
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return "windows-aarch64".to_string();
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "linux-x86_64".to_string();
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "linux-aarch64".to_string();
+
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    return "unknown".to_string();
+}

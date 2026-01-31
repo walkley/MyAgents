@@ -67,6 +67,8 @@ pub fn run() {
             updater::check_and_download_update,
             updater::restart_app,
             updater::test_update_connectivity,
+            // Platform info
+            commands::cmd_get_platform,
         ])
         .setup(|app| {
             // Initialize logging for all builds

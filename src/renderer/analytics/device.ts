@@ -4,6 +4,7 @@
  */
 
 import { getVersion } from '@tauri-apps/api/app';
+import { invoke } from '@tauri-apps/api/core';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 const DEVICE_ID_KEY = 'myagents_device_id';
@@ -11,7 +12,7 @@ const DEVICE_ID_KEY = 'myagents_device_id';
 // 缓存的版本号
 let cachedAppVersion: string | null = null;
 
-// 缓存的平台信息
+// 缓存的平台信息（异步检测结果）
 let cachedPlatform: string | null = null;
 
 /**
@@ -33,52 +34,45 @@ export function getDeviceId(): string {
 }
 
 /**
- * 检测运行平台（内部实现）
- * 返回: mac_arm | mac_intel | win_64 | linux | unknown
+ * 异步检测运行平台（使用 Tauri Rust 命令）
+ * 返回与打包一致的平台标识:
+ * - darwin-aarch64 (macOS ARM64)
+ * - darwin-x86_64 (macOS Intel)
+ * - windows-x86_64 (Windows x64)
+ * - linux-x86_64 (Linux x64)
  */
-function detectPlatform(): string {
+async function detectPlatformAsync(): Promise<string> {
   try {
-    const platform = navigator.platform.toLowerCase();
-    const userAgent = navigator.userAgent.toLowerCase();
-
-    if (platform.includes('mac') || platform.includes('darwin')) {
-      // 检测 Apple Silicon
-      // 方法1: 检查 userAgent 中的 ARM 标识
-      if (userAgent.includes('arm64') || userAgent.includes('aarch64')) {
-        return 'mac_arm';
-      }
-      // 方法2: 使用 userAgentData API (如果可用)
-      const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
-      if (uaData?.platform === 'macOS') {
-        // 在 macOS 上，如果没有明确的 ARM 标识，尝试通过 WebGL 检测
-        // Apple Silicon 的 GPU 通常包含 "Apple" 字样
-        try {
-          const canvas = document.createElement('canvas');
-          const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-          if (gl) {
-            const debugInfo = (gl as WebGLRenderingContext).getExtension('WEBGL_debug_renderer_info');
-            if (debugInfo) {
-              const renderer = (gl as WebGLRenderingContext).getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-              if (renderer && typeof renderer === 'string' && renderer.includes('Apple')) {
-                return 'mac_arm';
-              }
-            }
-          }
-        } catch {
-          // WebGL 检测失败，fallback
-        }
-      }
-      return 'mac_intel';
+    if (isTauriEnvironment()) {
+      // 调用 Rust 命令获取编译时的平台信息（最准确）
+      const platform = await invoke<string>('cmd_get_platform');
+      return platform;
     }
 
-    if (platform.includes('win')) {
-      return 'win_64';
-    }
+    // 非 Tauri 环境（浏览器开发模式）- 使用 navigator 作为 fallback
+    return detectPlatformFallback();
+  } catch {
+    return detectPlatformFallback();
+  }
+}
 
-    if (platform.includes('linux')) {
-      return 'linux';
-    }
+/**
+ * 同步检测平台（浏览器 fallback，不精确）
+ */
+function detectPlatformFallback(): string {
+  try {
+    const navPlatform = navigator.platform.toLowerCase();
 
+    if (navPlatform.includes('mac') || navPlatform.includes('darwin')) {
+      // 浏览器环境无法准确检测架构，默认返回 x86_64
+      return 'darwin-x86_64';
+    }
+    if (navPlatform.includes('win')) {
+      return 'windows-x86_64';
+    }
+    if (navPlatform.includes('linux')) {
+      return 'linux-x86_64';
+    }
     return 'unknown';
   } catch {
     return 'unknown';
@@ -86,12 +80,22 @@ function detectPlatform(): string {
 }
 
 /**
- * 获取运行平台（带缓存）
- * 首次调用时检测并缓存，后续调用直接返回缓存值
+ * 预加载平台信息（应用启动时调用）
+ */
+export async function preloadPlatform(): Promise<void> {
+  if (!cachedPlatform) {
+    cachedPlatform = await detectPlatformAsync();
+  }
+}
+
+/**
+ * 获取运行平台（同步，返回缓存值）
+ * 注意：必须先调用 preloadPlatform() 才能返回准确值
  */
 export function getPlatform(): string {
+  // 如果缓存不存在，使用同步 fallback（不精确）
   if (!cachedPlatform) {
-    cachedPlatform = detectPlatform();
+    cachedPlatform = detectPlatformFallback();
   }
   return cachedPlatform;
 }
