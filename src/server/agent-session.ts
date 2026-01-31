@@ -2852,8 +2852,20 @@ async function startStreamingSession(): Promise<void> {
           console.warn('[agent] Result message has no usage data, token statistics may be incomplete');
         }
 
+        // Calculate duration for analytics
+        const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
+
         console.log('[agent][sdk] Broadcasting chat:message-complete');
-        broadcast('chat:message-complete', null);
+        // Include usage data for frontend analytics tracking
+        broadcast('chat:message-complete', {
+          model: currentTurnUsage.model,
+          input_tokens: currentTurnUsage.inputTokens,
+          output_tokens: currentTurnUsage.outputTokens,
+          cache_read_tokens: currentTurnUsage.cacheReadTokens,
+          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
+          tool_count: currentTurnToolCount,
+          duration_ms: durationMs,
+        });
         handleMessageComplete();
       }
     }
