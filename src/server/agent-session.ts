@@ -424,13 +424,14 @@ function loadProxyEnvVars(): Record<string, string> {
  * Convert McpServerDefinition to SDK mcpServers format
  *
  * Execution strategy:
- * - Builtin MCP (isBuiltin: true): Use bundled bun to execute, packages cached in ~/.bun/
- * - Custom MCP: Execute user-specified command directly (npx/uvx/node/python etc.)
+ * - For npx commands: Uses bundled bun (bun x), fallback to npx if bun unavailable
+ * - For other commands: Uses user-specified command directly (node/python etc.)
+ * - Injects proxy environment variables from app config
  *
  * This approach:
- * - Ensures builtin MCP works without Node.js dependency
- * - Lets users use their preferred tools for custom MCP
- * - Shares bun cache globally (~/.bun/install/cache/)
+ * - Zero external dependencies: bundled bun ensures MCP works without Node.js
+ * - Fallback to npx for environments where bun is unavailable
+ * - Custom MCP can use any user-preferred tools
  */
 function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
   // Use memory cache if set (even if empty - user explicitly disabled all MCP)
@@ -463,16 +464,33 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     }
 
     if (server.type === 'stdio' && server.command) {
-      const args = server.args || [];
+      let command = server.command;
+      let args = server.args || [];
 
-      // Use npx for all stdio MCP servers (same as Claude Desktop/Cursor)
-      // This ensures compatibility and shares npm cache (~/.npm/_npx/)
-      // User needs Node.js installed, but this is the standard approach
-      console.log(`[agent] MCP ${server.id}: Using npx ${args.join(' ')}`);
+      // For npx commands, try to use bundled bun (bun x is npx-compatible)
+      // This ensures the app works without requiring Node.js/npm
+      if (command === 'npx') {
+        const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+        const runtime = getBundledRuntimePath();
+
+        if (isBunRuntime(runtime)) {
+          // Use bundled bun: bun x @package@version <args>
+          command = runtime;
+          args = ['x', ...args];
+          console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+        } else {
+          // Fallback to npx with -y flag for auto-confirm
+          args = ['-y', ...args];
+          console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+        }
+      }
+
+      // Log full command for debugging
+      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
 
       result[server.id] = {
-        command: 'npx',
-        args: ['-y', ...args],  // -y auto-confirms install
+        command,
+        args,
         env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
       };
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
