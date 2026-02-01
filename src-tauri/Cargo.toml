@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.1.8"
+version = "0.1.9"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -32,6 +32,7 @@ tauri-plugin-localhost = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 reqwest = { version = "0.13.1", features = ["stream"] }
 futures-util = "0.3.31"
 tokio = { version = "1.49.0", features = ["rt", "sync", "time"] }

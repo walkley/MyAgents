@@ -139,6 +139,31 @@ try {
         throw "请先安装缺失的依赖"
     }
 
+    # 检查构建必需文件
+    $bunBinaryPath = "src-tauri\binaries\bun-x86_64-pc-windows-msvc.exe"
+    Write-Host "  检查 bundled bun... " -NoNewline
+    if (Test-Path $bunBinaryPath) {
+        Write-Host "OK" -ForegroundColor Green
+    } else {
+        Write-Host "MISSING" -ForegroundColor Red
+        Write-Host "    请先运行 .\setup_windows.ps1 下载 Bun 二进制" -ForegroundColor Yellow
+        $depOk = $false
+    }
+
+    $gitInstallerPath = "src-tauri\nsis\Git-Installer.exe"
+    Write-Host "  检查 Git installer... " -NoNewline
+    if (Test-Path $gitInstallerPath) {
+        Write-Host "OK" -ForegroundColor Green
+    } else {
+        Write-Host "MISSING" -ForegroundColor Red
+        Write-Host "    请先运行 .\setup_windows.ps1 下载 Git 安装包" -ForegroundColor Yellow
+        $depOk = $false
+    }
+
+    if (-not $depOk) {
+        throw "缺少构建必需文件，请运行 .\setup_windows.ps1"
+    }
+
     Write-Host "  OK - 依赖检查通过" -ForegroundColor Green
     Write-Host ""
 

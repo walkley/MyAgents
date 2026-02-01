@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledRuntimePath, getBundledBunDir, isBunRuntime } from './utils/runtime';
+import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
 
 import type { ToolInput } from '../renderer/types/chat';
@@ -212,7 +212,9 @@ const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     description: '浏览器自动化能力，支持网页浏览、截图、表单填写等',
     type: 'stdio',
     command: 'npx',
-    args: ['@playwright/mcp@latest'],
+    // Use --isolated to avoid conflicts with existing Chrome browser sessions
+    // Each session will use a fresh profile in memory
+    args: ['@playwright/mcp@latest', '--isolated'],
     env: {},
     isBuiltin: true,
   },
@@ -371,8 +373,17 @@ function buildSettingSources(): ('user' | 'project')[] {
 
 /**
  * Convert McpServerDefinition to SDK mcpServers format
- * Now runs MCP from local install directory (~/.myagents/mcp/<serverId>/)
- * If not installed locally, falls back to npx (but this may cause stdout pollution)
+ *
+ * Execution strategy:
+ * - For npx commands: Uses bundled bun (bun x), fallback to npx if bun unavailable
+ * - For other commands: Uses user-specified command directly (node/python etc.)
+ * - Does NOT inject proxy env vars (follows Claude Code's approach)
+ *   Child process inherits environment naturally from shell
+ *
+ * This approach:
+ * - Zero external dependencies: bundled bun ensures MCP works without Node.js
+ * - Fallback to npx for environments where bun is unavailable
+ * - Custom MCP can use any user-preferred tools
  */
 function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
   // Use memory cache if set (even if empty - user explicitly disabled all MCP)
@@ -393,10 +404,6 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     return {};
   }
 
-  const { existsSync, readFileSync } = require('fs');
-  const { join } = require('path');
-  const mcpBaseDir = join(getMyAgentsUserDir(), 'mcp');
-
   const result: Record<string, SdkMcpServerConfig> = {};
 
   for (const server of servers) {
@@ -406,77 +413,44 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     }
 
     if (server.type === 'stdio' && server.command) {
-      const serverDir = join(mcpBaseDir, server.id);
-      const args = server.args || [];
+      let command = server.command;
+      let args = server.args || [];
 
-      // Extract package name from args (e.g., "@playwright/mcp@latest" -> "@playwright/mcp")
-      const packageName = args[0] || '';
-      const packageNameClean = packageName.replace(/@(latest|[\d.]+)$/, '');
+      // For npx commands, try to use bundled bun (bun x is npx-compatible)
+      // This ensures the app works without requiring Node.js/npm
+      if (command === 'npx') {
+        const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+        const runtime = getBundledRuntimePath();
 
-      // Check if package is installed locally
-      const localNodeModules = join(serverDir, 'node_modules');
-      const localPkgJson = join(localNodeModules, ...packageNameClean.split('/'), 'package.json');
-
-      if (existsSync(localPkgJson)) {
-        // Package is installed locally - find entry point and run with node
-        try {
-          const pkgInfo = JSON.parse(readFileSync(localPkgJson, 'utf-8'));
-          let entryPoint = '';
-
-          // Try bin first (for CLI tools)
-          if (pkgInfo.bin) {
-            const binPath = typeof pkgInfo.bin === 'string'
-              ? pkgInfo.bin
-              : Object.values(pkgInfo.bin)[0] as string;
-            entryPoint = join(localNodeModules, ...packageNameClean.split('/'), binPath);
-          } else if (pkgInfo.main) {
-            entryPoint = join(localNodeModules, ...packageNameClean.split('/'), pkgInfo.main);
-          }
-
-          if (entryPoint && existsSync(entryPoint)) {
-            // Use shared utility to get bundled bun or fallback runtime
-            const runtimePath = getBundledRuntimePath();
-            console.log(`[agent] MCP ${server.id}: Using local install at ${entryPoint} with runtime ${runtimePath}`);
-
-            result[server.id] = {
-              command: runtimePath,
-              args: [entryPoint],
-              env: buildCrossPlatformEnv(server.env),
-            };
-            continue;
-          }
-        } catch (e) {
-          console.warn(`[agent] MCP ${server.id}: Failed to read local package:`, e);
+        if (isBunRuntime(runtime)) {
+          // Use bundled bun: bun x @package@version <args>
+          command = runtime;
+          args = ['x', ...args];
+          console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+        } else {
+          // Fallback to npx with -y flag for auto-confirm
+          args = ['-y', ...args];
+          console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
         }
       }
 
-      // Fallback: package not installed locally
-      // Use bundled bun with bunx (bun's npx equivalent) - no Node.js required
-      const runtimePath = getBundledRuntimePath();
-      console.warn(`[agent] MCP ${server.id}: NOT installed locally, using fallback with ${runtimePath}`);
+      // Log full command for debugging
+      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
 
-      // For bun, use "bun x" (bunx) to run packages without installing
-      // For node fallback, this won't work but we log a clear error
-      if (isBunRuntime(runtimePath)) {
-        result[server.id] = {
-          command: runtimePath,
-          args: ['x', ...args],
-          env: buildCrossPlatformEnv(server.env),
-        };
-      } else {
-        // Node fallback - try npx but may fail if not installed
-        console.error(`[agent] MCP ${server.id}: No bun available, npx fallback may fail without Node.js`);
-        const argsWithY = args.includes('-y') ? args : ['-y', ...args];
-        result[server.id] = {
-          command: 'npx',
-          args: argsWithY,
-          env: buildCrossPlatformEnv({
-            npm_config_loglevel: 'error',
-            npm_config_update_notifier: 'false',
-            ...server.env,
-          }),
-        };
+      // Build MCP config - follow Claude Code's approach:
+      // Don't pass explicit env vars, let child process inherit naturally
+      // This avoids issues with proxy env vars affecting WebSocket connections
+      const mcpConfig: SdkMcpServerConfig = {
+        command,
+        args,
+      };
+
+      // Only add env if server has custom env vars defined
+      if (server.env && Object.keys(server.env).length > 0) {
+        mcpConfig.env = server.env;
       }
+
+      result[server.id] = mcpConfig;
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
       result[server.id] = {
         type: server.type,
@@ -2279,6 +2253,8 @@ async function startStreamingSession(): Promise<void> {
         executable: 'bun',
         env,
         stderr: (message: string) => {
+          // Always log stderr to help diagnose subprocess issues (especially on older Windows)
+          console.error('[sdk-stderr]', message);
           if (process.env.DEBUG === '1') {
             broadcast('chat:debug-message', message);
           }
@@ -2882,7 +2858,19 @@ async function startStreamingSession(): Promise<void> {
     const errorStack = error instanceof Error ? error.stack : String(error);
     console.error('[agent] session error:', errorMessage);
     console.error('[agent] session error stack:', errorStack);
-    broadcast('chat:message-error', errorMessage);
+
+    // Enhanced error diagnostics for Windows subprocess failures
+    let userFacingError = errorMessage;
+    if (errorMessage.includes('process exited with code 1') && process.platform === 'win32') {
+      console.error('[agent] Windows subprocess failure detected. Possible causes:');
+      console.error('[agent] 1. Git for Windows not installed (most common)');
+      console.error('[agent] 2. Git Bash not in PATH');
+      console.error('[agent] 3. CLAUDE_CODE_GIT_BASH_PATH environment variable not set');
+      console.error('[agent] Windows version:', process.env.OS || 'unknown');
+      userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
+    }
+
+    broadcast('chat:message-error', userFacingError);
     handleMessageError(errorMessage);
     setSessionState('error');
   } finally {

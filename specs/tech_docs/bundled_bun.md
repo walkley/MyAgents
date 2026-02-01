@@ -195,6 +195,27 @@ DEBUG=1 open MyAgents.app
 | 120s 超时 | 健康检查失败 | 查看 `[bun-err]` 日志定位根因 |
 | `ProcessTransport is not ready for writing` | TypeScript 侧无法找到 bundled bun | 检查 `buildClaudeSessionEnv()` 中的路径检测逻辑 |
 | MCP 安装失败 | 包管理器未找到 | 检查 `getPackageManagerPath()` 日志，确认内置 bun 路径正确 |
+| `Claude Code process exited with code 1` (Windows) | 缺少 Git for Windows | 安装 Git for Windows（安装程序会自动安装）|
+
+### Windows Git 依赖说明
+
+**已知问题**：Windows 上出现 `Claude Code process exited with code 1` 错误，通常是因为缺少 Git for Windows。
+
+**根因**：Claude Agent SDK 在 Windows 上需要 Git Bash 来执行 shell 命令。
+
+**解决方案**：
+- **自动安装**：NSIS 安装程序内置 Git for Windows，自动检测并安装
+- **手动安装**：https://git-scm.com/downloads/win
+- **环境变量**：若 Git 已安装但不在 PATH，设置 `CLAUDE_CODE_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe`
+
+**构建说明**：
+- Git 安装包需放置在 `src-tauri/nsis/Git-Installer.exe`
+- 下载地址：https://git-scm.com/downloads/win
+- 当前版本：Git for Windows 2.52.0
+
+**诊断方法**：
+1. 查看日志中的 `[sdk-stderr]` 输出
+2. 检查是否有 `requires git-bash` 相关错误信息
 
 ## 注意事项
 

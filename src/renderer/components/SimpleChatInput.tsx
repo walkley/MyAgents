@@ -56,7 +56,7 @@ interface SimpleChatInputProps {
   onWorkspaceRefresh?: () => void;
 }
 
-const LINE_HEIGHT = 24; // px per line
+const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
 const MAX_LINES_COLLAPSED = 3;
 const MAX_LINES_EXPANDED = 12;
 const MAX_IMAGES = 5;
@@ -1016,7 +1016,18 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
       {/* Input container */}
       <div className="pointer-events-auto relative w-full max-w-3xl">
-        <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] shadow-xl">
+        <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl">
+          {/* Clickable area for focus - covers input area but not toolbar */}
+          <div
+            className="cursor-text"
+            onClick={(e) => {
+              // Only focus if not clicking on a button or interactive element
+              const target = e.target as HTMLElement;
+              if (!target.closest('button') && !target.closest('input') && target.tagName !== 'TEXTAREA') {
+                textareaRef.current?.focus();
+              }
+            }}
+          >
           {/* Image attachments preview */}
           {images.length > 0 && (
             <div className="flex gap-2 px-4 pt-3 pb-1 overflow-x-auto">
@@ -1051,7 +1062,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
               onPaste={handlePaste}
               placeholder="输入消息，使用 @ 引用文件，/ 使用技能..."
               rows={1}
-              className="block w-full resize-none bg-transparent pr-8 text-[14px] leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
+              className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
                 minHeight: `${LINE_HEIGHT}px`,
                 maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : MAX_LINES_COLLAPSED)}px`,
@@ -1120,11 +1131,11 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
               />
             )}
 
-            {/* Expand/Collapse button */}
+            {/* Expand/Collapse button - larger click area */}
             <button
               type="button"
               onClick={toggleExpand}
-              className="absolute right-4 top-3 rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
               title={isExpanded ? '收起' : '展开'}
             >
               {isExpanded ? (
@@ -1133,6 +1144,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                 <ChevronUp className="h-4 w-4" />
               )}
             </button>
+          </div>
           </div>
 
           {/* Toolbar row */}
@@ -1310,8 +1322,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   title="工具"
                 >
                   <Wrench className="h-3.5 w-3.5" />
+                  <span>工具</span>
                   {workspaceMcpEnabled.length > 0 && (
-                    <span className="text-[9px] text-[var(--ink-muted)]">
+                    <span className="text-[11px] text-[var(--ink-muted)]">
                       {workspaceMcpEnabled.length}
                     </span>
                   )}

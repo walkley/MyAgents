@@ -7,7 +7,6 @@ import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
-import SystemInfoPanel from '@/components/SystemInfoPanel';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useTabState } from '@/context/TabContext';
@@ -72,7 +71,6 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   // PERFORMANCE: inputValue is now managed internally by SimpleChatInput
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
-  const [showSystemInfo, setShowSystemInfo] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
@@ -440,11 +438,11 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   }, [onNewSession, resetSession]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-[var(--paper-strong)] text-[var(--ink)] md:flex-row">
+    <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-strong)] text-[var(--ink)] md:flex-row">
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
         {/* Compact header - single row */}
         <div className="flex h-12 flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {onBack && (
               <button
                 type="button"
@@ -455,7 +453,12 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                 <ArrowLeft className="h-4 w-4" />
               </button>
             )}
-            {/* Removed Session text as per PRD 0.0.8 requirement */}
+            {/* Project name */}
+            {agentDir && (
+              <span className="text-sm font-medium text-[var(--ink)]">
+                {agentDir.split(/[/\\]/).filter(Boolean).pop()}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {/* New Session button - before History */}
@@ -506,14 +509,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                 >
                   Logs
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setShowSystemInfo(true)}
-                  className="rounded-lg px-2.5 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                >
-                  System Info
-                </button>
-              </>
+                </>
             )}
             {/* Workspace toggle button - only show when workspace is hidden */}
             {!showWorkspace && (
@@ -635,39 +631,6 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
             onInsertReference={(paths) => chatInputRef.current?.insertReferences(paths)}
           />
-        </div>
-      )}
-
-      {showSystemInfo && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-          style={{ padding: '5vh 3vw' }}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setShowSystemInfo(false);
-            }
-          }}
-        >
-          <div className="glass-panel flex h-full w-full max-w-4xl flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="flex flex-shrink-0 items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
-              <div>
-                <div className="text-[13px] font-semibold text-[var(--ink)]">System Info</div>
-                <div className="text-[11px] text-[var(--ink-muted)]">
-                  Init details for the current session.
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowSystemInfo(false)}
-                className="action-button px-3 py-1 text-[11px] font-semibold"
-              >
-                Close
-              </button>
-            </div>
-            <div className="flex-1 overflow-auto overscroll-contain px-5 py-4">
-              <SystemInfoPanel info={systemInitInfo} showHeader={false} />
-            </div>
-          </div>
         </div>
       )}
 

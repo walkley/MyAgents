@@ -70,6 +70,40 @@ try {
         Write-Host "OK - Bun runtime ready" -ForegroundColor Green
     }
 
+    function Get-GitInstaller {
+        # Git for Windows version - update this when upgrading
+        # Also update version comment in: src-tauri/nsis/installer.nsi (search "Current version: Git for Windows")
+        # Download page: https://git-scm.com/downloads/win
+        $GitVersion = "2.52.0"
+        $GitUrl = "https://github.com/git-for-windows/git/releases/download/v$GitVersion.windows.1/Git-$GitVersion-64-bit.exe"
+
+        $NsisDir = Join-Path $ProjectDir "src-tauri\nsis"
+        if (-not (Test-Path $NsisDir)) {
+            New-Item -ItemType Directory -Path $NsisDir -Force | Out-Null
+        }
+
+        $GitFile = Join-Path $NsisDir "Git-Installer.exe"
+
+        Write-Host "下载 Git for Windows (v$GitVersion)..." -ForegroundColor Blue
+
+        if (-not (Test-Path $GitFile)) {
+            Write-Host "  下载 Git 安装包..." -ForegroundColor Cyan
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $GitUrl -OutFile $GitFile -UseBasicParsing -TimeoutSec 300
+                Write-Host "  OK - Git installer downloaded" -ForegroundColor Green
+            } catch {
+                Write-Host "  下载失败: $_" -ForegroundColor Red
+                Write-Host "  请手动下载: $GitUrl" -ForegroundColor Yellow
+                Write-Host "  并保存到: $GitFile" -ForegroundColor Yellow
+                throw "Git installer download failed"
+            }
+        } else {
+            Write-Host "  OK - Git installer (already exists)" -ForegroundColor Green
+        }
+        Write-Host "OK - Git installer ready" -ForegroundColor Green
+    }
+
     function Test-MSVC {
         Write-Host "  检查 MSVC Build Tools... " -NoNewline
 
@@ -95,7 +129,7 @@ try {
     }
 
     # Main
-    Write-Host "Step 1/5: 检查依赖" -ForegroundColor Blue
+    Write-Host "Step 1/6: 检查依赖" -ForegroundColor Blue
     $Missing = $false
 
     if (-not (Test-Dependency "Node.js" "node --version" "https://nodejs.org")) { $Missing = $true }
@@ -112,10 +146,13 @@ try {
         exit 1
     }
 
-    Write-Host "`nStep 2/5: 下载 Bun 运行时" -ForegroundColor Blue
+    Write-Host "`nStep 2/6: 下载 Bun 运行时" -ForegroundColor Blue
     Get-BunBinary
 
-    Write-Host "`nStep 3/5: 安装前端依赖" -ForegroundColor Blue
+    Write-Host "`nStep 3/6: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
+    Get-GitInstaller
+
+    Write-Host "`nStep 4/6: 安装前端依赖" -ForegroundColor Blue
     & bun install
     if ($LASTEXITCODE -ne 0) {
         Write-Host "前端依赖安装失败" -ForegroundColor Red
@@ -125,7 +162,7 @@ try {
     }
     Write-Host "OK - 前端依赖安装完成" -ForegroundColor Green
 
-    Write-Host "`nStep 4/5: 下载 Rust 依赖" -ForegroundColor Blue
+    Write-Host "`nStep 5/6: 下载 Rust 依赖" -ForegroundColor Blue
     Write-Host "  正在下载 Rust 依赖包，请稍候..." -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectDir "src-tauri")
     & cargo fetch
@@ -139,7 +176,7 @@ try {
     Pop-Location
     Write-Host "OK - Rust 依赖下载完成" -ForegroundColor Green
 
-    Write-Host "`nStep 5/5: 初始化完成!" -ForegroundColor Blue
+    Write-Host "`nStep 6/6: 初始化完成!" -ForegroundColor Blue
     Write-Host "`n=========================================" -ForegroundColor Green
     Write-Host "  开发环境准备就绪!" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Green

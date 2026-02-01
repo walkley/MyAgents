@@ -54,6 +54,8 @@ interface MonacoEditorProps {
     language?: string;
     readOnly?: boolean;
     className?: string;
+    /** Auto focus the editor when mounted */
+    autoFocus?: boolean;
 }
 
 export default function MonacoEditor({
@@ -61,7 +63,8 @@ export default function MonacoEditor({
     onChange,
     language = 'plaintext',
     readOnly = false,
-    className = ''
+    className = '',
+    autoFocus = false
 }: MonacoEditorProps) {
     const handleChange = useCallback((newValue: string | undefined) => {
         onChange(newValue ?? '');
@@ -128,9 +131,14 @@ export default function MonacoEditor({
 
     // Force apply theme after mount to ensure it takes effect
     // This handles the case where beforeMount's defineTheme might not sync immediately
-    const handleOnMount = useCallback((_editor: unknown, monacoInstance: Monaco) => {
+    // Also handles autoFocus if requested
+    const handleOnMount = useCallback((editor: monaco.editor.IStandaloneCodeEditor, monacoInstance: Monaco) => {
         monacoInstance.editor.setTheme(CUSTOM_THEME_NAME);
-    }, []);
+        if (autoFocus) {
+            // Use setTimeout to ensure editor is fully ready
+            setTimeout(() => editor.focus(), 0);
+        }
+    }, [autoFocus]);
 
     // Monaco editor options optimized for performance
     const options = useMemo(() => ({

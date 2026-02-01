@@ -20,7 +20,8 @@ interface MessageListProps {
 }
 
 // Enable CSS scroll anchoring for smoother streaming experience
-const containerClasses = 'flex-1 overflow-y-auto px-3 py-3 scroll-anchor-auto';
+// overscroll-none completely prevents scroll chaining (works even without scrollbar)
+const containerClasses = 'flex-1 overflow-y-auto overscroll-none px-3 py-3 scroll-anchor-auto';
 
 // Fun streaming status messages - randomly picked for each AI response
 const STREAMING_MESSAGES = [

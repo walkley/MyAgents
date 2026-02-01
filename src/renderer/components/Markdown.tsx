@@ -239,42 +239,72 @@ interface MarkdownProps {
   compact?: boolean;
   /** Preserve single newlines as line breaks (useful for user messages in chat) */
   preserveNewlines?: boolean;
+  /** Skip preprocessing (for rendering complete documents like file preview) */
+  raw?: boolean;
 }
 
 /**
- * Preprocess markdown content for better streaming compatibility
- * - Ensures headers have proper line breaks before them
- * - Ensures headers have a space after the # symbols
- * - Ensures list items are on separate lines
- * - Handles edge cases during streaming
+ * Preprocess markdown content for better streaming compatibility.
+ *
+ * Markdown Priority (highest to lowest):
+ * 1. Code blocks (``` ```) - content is literal, no parsing
+ * 2. Inline code (` `) - content is literal, no parsing
+ * 3. Everything else (headers, lists, emphasis, etc.)
+ *
+ * This function respects the priority by:
+ * 1. Extracting and protecting code blocks and inline code
+ * 2. Applying format fixes to the remaining content
+ * 3. Restoring the protected code
  */
 function preprocessContent(content: string): string {
   if (!content) return '';
 
+  // Step 1: Extract and protect code blocks and inline code
+  const protected_: string[] = [];
   let processed = content;
 
-  // 1. Ensure headers have a blank line before them (except at the start)
-  // Only match when header is immediately after non-newline text
-  // "text## Header" -> "text\n\n## Header"
-  processed = processed.replace(/([^\n])(#{1,6})(\s*)/g, '$1\n\n$2 ');
+  // Protect fenced code blocks (``` ... ```)
+  processed = processed.replace(/```[\s\S]*?```/g, (match) => {
+    protected_.push(match);
+    return `\x00CODE${protected_.length - 1}\x00`;
+  });
 
-  // 2. Ensure headers at the start of lines have a space after # (if missing)
+  // Protect inline code (` ... `) - handle both single and multiple backticks
+  processed = processed.replace(/`[^`]+`/g, (match) => {
+    protected_.push(match);
+    return `\x00CODE${protected_.length - 1}\x00`;
+  });
+
+  // Step 2: Apply format fixes to unprotected content
+
+  // 2a. Ensure headers have a blank line before them (except at the start)
+  // "text## Header" -> "text\n\n## Header"
+  // But NOT "## Title" (already correct - don't break multi-hash headers)
+  processed = processed.replace(/([^\n#])(#{1,6}\s+)(?=\S)/g, '$1\n\n$2');
+
+  // 2b. Ensure headers at the start of lines have a space after # (if missing)
   // "##Title" -> "## Title" (only at line start)
   processed = processed.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2');
 
-  // 3. Fix unordered list items at LINE START ONLY
-  // "-item" -> "- item" (only when dash is at start of line with no space after)
+  // 2c. Fix unordered list items at LINE START ONLY
+  // "-item" -> "- item"
   processed = processed.replace(/^-([^\s\-\n])/gm, '- $1');
 
-  // 4. Fix ordered list items at LINE START ONLY  
-  // "1.item" -> "1. item" (only when number+dot is at start of line with no space after)
+  // 2d. Fix ordered list items at LINE START ONLY
+  // "1.item" -> "1. item"
   processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
+
+  // Step 3: Restore protected code blocks and inline code
+  processed = processed.replace(/\x00CODE(\d+)\x00/g, (_, index) => {
+    return protected_[parseInt(index, 10)];
+  });
 
   return processed;
 }
 
-export default function Markdown({ children, compact = false, preserveNewlines = false }: MarkdownProps) {
-  const processedContent = preprocessContent(children);
+export default function Markdown({ children, compact = false, preserveNewlines = false, raw = false }: MarkdownProps) {
+  // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
+  const processedContent = raw ? children : preprocessContent(children);
 
   return (
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>

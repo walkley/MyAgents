@@ -48,6 +48,7 @@ src-tauri/target/
 src-tauri/binaries/
 src-tauri/resources/server-dist.js
 src-tauri/resources/claude-agent-sdk
+src-tauri/nsis/Git-Installer.exe
 
 # Test coverage
 coverage/

@@ -5,7 +5,6 @@ import { tmpdir } from 'os';
 import AdmZip from 'adm-zip';
 import {
   BUILTIN_SLASH_COMMANDS,
-  parseYamlFrontmatter,
   parseSkillFrontmatter,
   extractCommandName,
   parseFullSkillContent,
@@ -79,7 +78,6 @@ import {
   getMcpServers,
   resetSession,
 } from './agent-session';
-import { getPackageManagerPath } from './utils/runtime';
 import { getHomeDirOrNull } from './utils/platform';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
@@ -106,6 +104,31 @@ type ImagePayload = {
 };
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
+
+/**
+ * Runtime download URLs for common MCP commands
+ */
+const RUNTIME_DOWNLOAD_URLS: Record<string, { name: string; url: string }> = {
+  'node': { name: 'Node.js', url: 'https://nodejs.org/' },
+  'npx': { name: 'Node.js', url: 'https://nodejs.org/' },
+  'npm': { name: 'Node.js', url: 'https://nodejs.org/' },
+  'python': { name: 'Python', url: 'https://www.python.org/downloads/' },
+  'python3': { name: 'Python', url: 'https://www.python.org/downloads/' },
+  'deno': { name: 'Deno', url: 'https://deno.land/' },
+  'uv': { name: 'uv (Python 包管理器)', url: 'https://docs.astral.sh/uv/' },
+  'uvx': { name: 'uv (Python 包管理器)', url: 'https://docs.astral.sh/uv/' },
+};
+
+/**
+ * Get download info for a command
+ */
+function getCommandDownloadInfo(command: string): { runtimeName?: string; downloadUrl?: string } {
+  const info = RUNTIME_DOWNLOAD_URLS[command];
+  if (info) {
+    return { runtimeName: info.name, downloadUrl: info.url };
+  }
+  return {};
+}
 
 type SendMessagePayload = {
   text?: string;
@@ -1825,188 +1848,160 @@ async function main() {
         }
       }
 
-      // POST /api/mcp/check - Check if MCP package is installed locally
-      if (pathname === '/api/mcp/check' && request.method === 'POST') {
+      // POST /api/mcp/enable - Validate and enable MCP server
+      // For preset MCP (npx): warmup bun cache
+      // For custom MCP: check if command exists
+      if (pathname === '/api/mcp/enable' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
-            serverId: string;
-            args?: string[];
+            server: McpServerDefinition;
           };
 
-          const { existsSync, readFileSync } = await import('fs');
-          const { join } = await import('path');
-
-          const homeDir = getHomeDirOrNull() || '';
-          const serverDir = join(homeDir, '.myagents', 'mcp', payload.serverId);
-
-          // Extract package name from args
-          const args = payload.args || [];
-          const packageName = args[0] || '';
-          const packageNameClean = packageName.replace(/@(latest|[\d.]+)$/, '');
-
-          // Check if package is installed
-          const localPkgJson = join(serverDir, 'node_modules', ...packageNameClean.split('/'), 'package.json');
-
-          if (existsSync(localPkgJson)) {
-            try {
-              const pkgInfo = JSON.parse(readFileSync(localPkgJson, 'utf-8'));
-              return jsonResponse({
-                installed: true,
-                serverId: payload.serverId,
-                version: pkgInfo.version,
-                installDir: serverDir,
-              });
-            } catch {
-              return jsonResponse({ installed: false, serverId: payload.serverId });
-            }
+          const server = payload.server;
+          if (!server) {
+            return jsonResponse({ success: false, error: 'Missing server' }, 400);
           }
 
-          return jsonResponse({ installed: false, serverId: payload.serverId });
-        } catch (error) {
-          console.error('[api/mcp/check] Error:', error);
-          return jsonResponse({ installed: false, error: String(error) }, 500);
-        }
-      }
+          console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${server.command}`);
 
-      // POST /api/mcp/install - Install an MCP package to local directory
-      if (pathname === '/api/mcp/install' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as {
-            serverId: string;
-            command: string;
-            args?: string[];
-          };
-
-          if (!payload.command || !payload.serverId) {
-            return jsonResponse({ success: false, error: 'Missing command or serverId' }, 400);
+          // SSE/HTTP types: directly enable, no validation needed
+          if (server.type === 'sse' || server.type === 'http') {
+            return jsonResponse({ success: true });
           }
 
-          const { spawn } = await import('child_process');
-          const { getShellEnv } = await import('./utils/shell');
-          const { existsSync, mkdirSync, writeFileSync, readFileSync } = await import('fs');
-          const { join } = await import('path');
+          // stdio type: validate command
+          if (server.type === 'stdio' && server.command) {
+            const command = server.command;
 
-          // Determine MCP install directory (cross-platform)
-          const homeDir = getHomeDirOrNull() || '';
-          const mcpBaseDir = join(homeDir, '.myagents', 'mcp');
-          const serverDir = join(mcpBaseDir, payload.serverId);
+            // Preset MCP (isBuiltin: true) with npx → warmup with bundled bun
+            if (server.isBuiltin && command === 'npx') {
+              const { getBundledRuntimePath, isBunRuntime } = await import('./utils/runtime');
+              const runtime = getBundledRuntimePath();
 
-          console.log(`[api/mcp/install] Installing ${payload.serverId} to ${serverDir}`);
-
-          // Create directory if not exists
-          if (!existsSync(serverDir)) {
-            mkdirSync(serverDir, { recursive: true });
-          }
-
-          // Extract package name from args (e.g., "@playwright/mcp@latest" -> "@playwright/mcp")
-          const args = payload.args || [];
-          const packageName = args[0] || '';
-          // Remove @version suffix for package.json entry
-          const packageNameClean = packageName.replace(/@(latest|[\d.]+)$/, '');
-
-          // Create package.json if not exists
-          const pkgJsonPath = join(serverDir, 'package.json');
-          if (!existsSync(pkgJsonPath)) {
-            writeFileSync(pkgJsonPath, JSON.stringify({
-              name: `mcp-${payload.serverId}`,
-              version: '1.0.0',
-              private: true,
-              type: 'module'
-            }, null, 2));
-          }
-
-          // Use bundled bun or fallback to system package manager
-          // This removes the Node.js dependency for MCP installation
-          const pkgManager = getPackageManagerPath();
-          const installCmd = pkgManager.command;
-          const installArgs = pkgManager.installArgs(packageName);
-
-          // Use robust shell environment
-          const env: NodeJS.ProcessEnv = {
-            ...getShellEnv(),
-            // npm-specific config (ignored by bun but harmless)
-            npm_config_yes: 'true',
-            npm_config_loglevel: 'error',
-            npm_config_fund: 'false',
-            npm_config_audit: 'false',
-          };
-
-          console.log(`[api/mcp/install] Using ${pkgManager.type}: ${installCmd} ${installArgs.join(' ')} in ${serverDir}`);
-
-          return new Promise<Response>((resolve) => {
-            const proc = spawn(installCmd, installArgs, {
-              cwd: serverDir,
-              shell: false, // Use direct path, no shell needed
-              timeout: 120000, // 2 min timeout for install
-              env,
-            });
-
-            let stdout = '';
-            let stderr = '';
-
-            proc.stdout?.on('data', (data) => { stdout += data; });
-            proc.stderr?.on('data', (data) => { stderr += data; });
-
-            proc.on('error', (err) => {
-              console.error('[api/mcp/install] Process error:', err);
-              resolve(jsonResponse({
-                success: false,
-                error: err.message
-              }, 500));
-            });
-
-            proc.on('close', (code) => {
-              console.log(`[api/mcp/install] ${pkgManager.type} install exited with code ${code}`);
-
-              if (code === 0) {
-                // Find the installed package's entry point
-                let entryPoint = '';
-                try {
-                  const installedPkgJson = join(serverDir, 'node_modules', ...packageNameClean.split('/'), 'package.json');
-                  if (existsSync(installedPkgJson)) {
-                    const pkgInfo = JSON.parse(readFileSync(installedPkgJson, 'utf-8'));
-                    // Try bin first, then main
-                    if (pkgInfo.bin) {
-                      const binName = typeof pkgInfo.bin === 'string' ? pkgInfo.bin : Object.values(pkgInfo.bin)[0];
-                      entryPoint = join(serverDir, 'node_modules', ...packageNameClean.split('/'), binName as string);
-                    } else if (pkgInfo.main) {
-                      entryPoint = join(serverDir, 'node_modules', ...packageNameClean.split('/'), pkgInfo.main);
-                    }
+              if (!isBunRuntime(runtime)) {
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'runtime_error',
+                    message: '内置运行时不可用',
                   }
-                } catch (e) {
-                  console.warn('[api/mcp/install] Could not determine entry point:', e);
-                }
+                });
+              }
 
-                resolve(jsonResponse({
-                  success: true,
-                  serverId: payload.serverId,
-                  installDir: serverDir,
-                  entryPoint,
-                  packageName: packageNameClean,
-                  output: stdout
-                }));
-              } else {
-                console.error(`[api/mcp/install] Failed: ${stderr}`);
+              // Warmup: run bun x <package> --help to download and cache
+              const args = server.args || [];
+              console.log(`[api/mcp/enable] Warming up cache: ${runtime} x ${args.join(' ')}`);
+
+              const { spawn } = await import('child_process');
+              const { getShellEnv } = await import('./utils/shell');
+
+              return new Promise<Response>((resolve) => {
+                const proc = spawn(runtime, ['x', ...args, '--help'], {
+                  env: getShellEnv(),
+                  timeout: 120000, // 2 min timeout
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                });
+
+                let stderr = '';
+                proc.stderr?.on('data', (data) => { stderr += data; });
+
+                proc.on('error', (err) => {
+                  console.error('[api/mcp/enable] Warmup error:', err);
+                  resolve(jsonResponse({
+                    success: false,
+                    error: {
+                      type: 'warmup_failed',
+                      message: `预热失败: ${err.message}`,
+                    }
+                  }));
+                });
+
+                proc.on('close', (code) => {
+                  console.log(`[api/mcp/enable] Warmup exited with code ${code}`);
+                  // Code 0 or 1 is acceptable (--help may return 1 for some packages)
+                  // Check stderr for real errors (package not found, network issues, etc.)
+                  const stderrLower = stderr.toLowerCase();
+                  const errorKeywords = [
+                    '404',           // HTTP 404 not found
+                    'not found',     // Package not found
+                    'enotfound',     // DNS resolution failed
+                    'etimedout',     // Connection timeout
+                    'econnrefused',  // Connection refused
+                    'econnreset',    // Connection reset
+                    'err!',          // npm error indicator
+                    'error:',        // General error prefix
+                  ];
+                  const hasError = errorKeywords.some(kw => stderrLower.includes(kw));
+
+                  if (hasError) {
+                    // Determine error type based on stderr content
+                    const isNetworkError = ['enotfound', 'etimedout', 'econnrefused', 'econnreset'].some(
+                      kw => stderrLower.includes(kw)
+                    );
+                    resolve(jsonResponse({
+                      success: false,
+                      error: {
+                        type: isNetworkError ? 'warmup_failed' : 'package_not_found',
+                        message: isNetworkError
+                          ? '网络连接失败，请检查网络设置'
+                          : '包不存在或无法下载，请检查包名',
+                      }
+                    }));
+                  } else {
+                    resolve(jsonResponse({ success: true }));
+                  }
+                });
+              });
+            }
+
+            // Custom MCP or non-npx command → check if command exists
+            const { spawn } = await import('child_process');
+            const checkCmd = process.platform === 'win32' ? 'where' : 'which';
+
+            return new Promise<Response>((resolve) => {
+              const proc = spawn(checkCmd, [command], { stdio: 'ignore' });
+
+              proc.on('error', () => {
                 resolve(jsonResponse({
                   success: false,
-                  error: stderr || `${pkgManager.type} install exited with code ${code}`,
-                  debug: {
-                    path: env.PATH,
-                    cwd: serverDir,
-                    code,
-                    stdout,
-                    stderr
+                  error: {
+                    type: 'command_not_found',
+                    command,
+                    message: `命令 "${command}" 未找到`,
+                    ...getCommandDownloadInfo(command),
                   }
-                }, 500));
-              }
+                }));
+              });
+
+              proc.on('close', (code) => {
+                if (code === 0) {
+                  resolve(jsonResponse({ success: true }));
+                } else {
+                  resolve(jsonResponse({
+                    success: false,
+                    error: {
+                      type: 'command_not_found',
+                      command,
+                      message: `命令 "${command}" 未找到`,
+                      ...getCommandDownloadInfo(command),
+                    }
+                  }));
+                }
+              });
             });
-          });
+          }
+
+          // Default: allow
+          return jsonResponse({ success: true });
         } catch (error) {
-          console.error('[api/mcp/install] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Installation failed' },
-            500
-          );
+          console.error('[api/mcp/enable] Error:', error);
+          return jsonResponse({
+            success: false,
+            error: {
+              type: 'unknown',
+              message: error instanceof Error ? error.message : '启用失败',
+            }
+          }, 500);
         }
       }
 
@@ -2289,6 +2284,7 @@ async function main() {
             scope: 'user' | 'project';
             path: string;
             folderName: string;
+            author?: string;
           }> = [];
 
           const scanSkills = (dir: string, scopeType: 'user' | 'project') => {
@@ -2301,13 +2297,14 @@ async function main() {
                 if (!existsSync(skillMdPath)) continue;
 
                 const content = readFileSync(skillMdPath, 'utf-8');
-                const { name, description } = parseSkillFrontmatter(content);
+                const { name, description, author } = parseSkillFrontmatter(content);
                 skills.push({
                   name: name || folder.name,
                   description: description || '',
                   scope: scopeType,
                   path: skillMdPath,
                   folderName: folder.name,
+                  author,
                 });
               }
             } catch (scanError) {
@@ -3006,6 +3003,7 @@ async function main() {
             description: string;
             scope: 'user' | 'project';
             path: string;
+            author?: string;
           }> = [];
 
           const scanCommands = (dir: string, scopeType: 'user' | 'project') => {
@@ -3024,6 +3022,7 @@ async function main() {
                   description: frontmatter.description || '',
                   scope: scopeType,
                   path: filePath,
+                  author: frontmatter.author,
                 });
               }
             } catch (scanError) {

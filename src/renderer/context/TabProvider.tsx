@@ -27,6 +27,11 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, stopTabSidecar, isTauri } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
+import {
+    notifyMessageComplete,
+    notifyPermissionRequest,
+    notifyAskUserQuestion,
+} from '@/services/notificationService';
 
 // File-modifying tools that should trigger workspace refresh
 // These tools can create, modify, or delete files in the workspace
@@ -742,6 +747,9 @@ export default function TabProvider({
                 // send it, leaving blocks stuck in loading state.
                 markIncompleteBlocksAsFinished('completed');
 
+                // Send system notification if user is not focused on the app
+                notifyMessageComplete();
+
                 // Track message_complete event with usage data
                 const completePayload = data as {
                     model?: string;
@@ -935,6 +943,8 @@ export default function TabProvider({
                         toolName: payload.toolName,
                         input: payload.input || '',
                     });
+                    // Send system notification if user is not focused on the app
+                    notifyPermissionRequest(payload.toolName);
                 }
                 break;
             }
@@ -949,6 +959,8 @@ export default function TabProvider({
                         requestId: payload.requestId,
                         questions: payload.questions,
                     });
+                    // Send system notification if user is not focused on the app
+                    notifyAskUserQuestion();
                 }
                 break;
             }

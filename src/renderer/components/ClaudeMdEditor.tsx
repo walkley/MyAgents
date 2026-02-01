@@ -11,6 +11,8 @@ import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useM
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabStateOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
+import Markdown from '@/components/Markdown';
+import MonacoEditor from '@/components/MonacoEditor';
 
 interface ClaudeMdEditorProps {
     agentDir: string;
@@ -224,9 +226,9 @@ const ClaudeMdEditor = forwardRef<ClaudeMdEditorRef, ClaudeMdEditorProps>(
                 )}
 
                 {/* Content Area */}
-                <div className="flex-1 overflow-auto p-6">
+                <div className="flex-1 overflow-hidden">
                     {!exists && !isEditing ? (
-                        <div className="flex h-full flex-col items-center justify-center gap-4">
+                        <div className="flex h-full flex-col items-center justify-center gap-4 p-6">
                             <FileText className="h-16 w-16 text-[var(--ink-muted)]/30" />
                             <div className="text-center">
                                 <p className="text-sm font-medium text-[var(--ink-muted)]">
@@ -246,24 +248,22 @@ const ClaudeMdEditor = forwardRef<ClaudeMdEditorRef, ClaudeMdEditorProps>(
                             </button>
                         </div>
                     ) : isEditing ? (
-                        <textarea
-                            value={editContent}
-                            onChange={(e) => setEditContent(e.target.value)}
-                            className="h-full w-full resize-none rounded-xl border border-[var(--line)] bg-[var(--paper)] p-4 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
-                            placeholder="# Project Configuration&#10;&#10;Enter your project-specific instructions for Claude here..."
-                            autoFocus
-                        />
+                        <div className="h-full bg-[var(--paper)]">
+                            <MonacoEditor
+                                value={editContent}
+                                onChange={setEditContent}
+                                language="markdown"
+                            />
+                        </div>
                     ) : (
-                        <div
-                            className="h-full w-full cursor-pointer overflow-auto rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)]/50 p-4 font-mono text-sm transition-colors hover:border-[var(--ink-muted)]/50"
-                            onClick={handleEdit}
-                            title="点击编辑"
-                        >
+                        <div className="h-full overflow-auto bg-[var(--paper-reading)] p-6">
                             {content ? (
-                                <pre className="m-0 whitespace-pre-wrap text-[var(--ink)]">{content}</pre>
+                                <div className="prose prose-stone max-w-none dark:prose-invert">
+                                    <Markdown raw>{content}</Markdown>
+                                </div>
                             ) : (
-                                <span className="text-[var(--ink-muted)]/60">
-                                    点击编辑，添加项目配置说明...
+                                <span className="text-sm text-[var(--ink-muted)]/60">
+                                    （无内容）
                                 </span>
                             )}
                         </div>

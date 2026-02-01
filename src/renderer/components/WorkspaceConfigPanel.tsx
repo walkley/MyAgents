@@ -161,7 +161,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                 <ChevronLeft className="h-5 w-5" />
                             </button>
                         )}
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[var(--accent-warm)] to-[var(--accent-cool)] shadow-lg">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--ink)] shadow-lg">
                             <Settings className="h-5 w-5 text-white" />
                         </div>
                         <div>
@@ -221,6 +221,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                     onSelectSkill={handleSelectSkill}
                                     onSelectCommand={handleSelectCommand}
                                     refreshKey={refreshKey}
+                                    onClose={onClose}
                                 />
                             )}
                         </>

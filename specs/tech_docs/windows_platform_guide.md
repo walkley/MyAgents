@@ -246,6 +246,33 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 
 ---
 
+## ⚠️ Windows 依赖项
+
+### Git for Windows（必需）
+
+**为什么需要**：Claude Agent SDK 在 Windows 上需要 Git Bash 来执行 shell 命令。
+
+**自动安装**：NSIS 安装程序内置 Git for Windows，自动检测并安装（无需网络）。
+
+**构建要求**：构建前需将 Git 安装包放置在 `src-tauri/nsis/Git-Installer.exe`
+
+**手动安装**：https://git-scm.com/downloads/win
+
+**环境变量**：若 Git 已安装但不在 PATH 中，可设置：
+```powershell
+$env:CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
+```
+
+### 排查 `exit code 1` 错误
+
+1. **检查日志**：查找 `[sdk-stderr]` 输出
+2. **常见原因**：`requires git-bash` 表示缺少 Git
+3. **解决方案**：安装 Git for Windows 或设置 `CLAUDE_CODE_GIT_BASH_PATH`
+
+**详见**：[bundled_bun.md](./bundled_bun.md) 中的 Windows Git 依赖说明
+
+---
+
 ## 📚 相关文档
 
 - [Windows 构建指南](../guides/windows_build_guide.md)

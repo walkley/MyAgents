@@ -2,8 +2,8 @@
  * GlobalSkillsPanel - User-level Skills & Commands management for Settings page
  * Refactored to reuse SkillDetailPanel and CommandDetailPanel for consistent UX
  */
-import { Plus, Sparkles, Terminal, ChevronRight, Loader2, ChevronLeft } from 'lucide-react';
-import { useCallback, useEffect, useState, useRef, useMemo } from 'react';
+import { Plus, Sparkles, Terminal, Loader2, ChevronLeft } from 'lucide-react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
@@ -12,6 +12,7 @@ import type { SkillDetailPanelRef } from './SkillDetailPanel';
 import CommandDetailPanel from './CommandDetailPanel';
 import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import { CreateDialog, NewSkillChooser } from './SkillDialogs';
+import { SkillCard, CommandCard } from './SkillsCommandsList';
 import type { SkillItem, CommandItem } from '../../shared/skillsTypes';
 
 type ViewState =
@@ -324,24 +325,13 @@ export default function GlobalSkillsPanel() {
                     </button>
                 </div>
                 {skills.length > 0 ? (
-                    <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-3">
                         {skills.map(skill => (
-                            <div
+                            <SkillCard
                                 key={skill.folderName}
+                                skill={skill}
                                 onClick={() => setViewState({ type: 'skill-detail', name: skill.folderName })}
-                                className="group flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
-                            >
-                                <div className="flex min-w-0 flex-1 items-center gap-3">
-                                    <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--paper-contrast)]">
-                                        <Sparkles className="h-4 w-4 text-[var(--ink-muted)]" />
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate font-medium text-[var(--ink)]">{skill.name}</div>
-                                        <p className="truncate text-xs text-[var(--ink-muted)]">{skill.description || '暂无描述'}</p>
-                                    </div>
-                                </div>
-                                <ChevronRight className="h-4 w-4 flex-shrink-0 text-[var(--ink-muted)]" />
-                            </div>
+                            />
                         ))}
                     </div>
                 ) : (
@@ -369,24 +359,13 @@ export default function GlobalSkillsPanel() {
                     </button>
                 </div>
                 {commands.length > 0 ? (
-                    <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-3">
                         {commands.map(cmd => (
-                            <div
+                            <CommandCard
                                 key={cmd.fileName}
+                                command={cmd}
                                 onClick={() => setViewState({ type: 'command-detail', name: cmd.fileName })}
-                                className="group flex cursor-pointer items-center justify-between rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
-                            >
-                                <div className="flex min-w-0 flex-1 items-center gap-3">
-                                    <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--paper-contrast)]">
-                                        <Terminal className="h-4 w-4 text-[var(--ink-muted)]" />
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate font-medium text-[var(--ink)]">{cmd.name}</div>
-                                        <p className="truncate text-xs text-[var(--ink-muted)]">{cmd.description || '暂无描述'}</p>
-                                    </div>
-                                </div>
-                                <ChevronRight className="h-4 w-4 flex-shrink-0 text-[var(--ink-muted)]" />
-                            </div>
+                            />
                         ))}
                     </div>
                 ) : (

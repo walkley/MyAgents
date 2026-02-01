@@ -407,7 +407,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
   const hasTrace = (tool.subagentCalls?.length ?? 0) > 0;
 
   return (
-    <div className="flex flex-col gap-3 text-sm">
+    <div className="flex flex-col gap-3 text-sm select-none">
       {/* 1. 统计栏 (第一行，可展开 Trace) */}
       <div ref={statsBarRef}>
         {isRunning && tool.taskStartTime && tool.taskStats ? (
@@ -438,7 +438,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
       {input.prompt && (
         <div className="rounded-lg bg-[var(--accent-cool)]/10 p-3">
           <CollapsibleContent maxLines={DEFAULT_MAX_LINES}>
-            <div className="italic text-[var(--ink-secondary)]">
+            <div className="italic text-[var(--ink-secondary)] select-text">
               &ldquo;{input.prompt}&rdquo;
             </div>
           </CollapsibleContent>
@@ -449,7 +449,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
       {textContent && (
         <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 p-3">
           <CollapsibleContent maxLines={DEFAULT_MAX_LINES}>
-            <div className="text-sm text-[var(--ink)]">
+            <div className="text-sm text-[var(--ink)] select-text">
               <Markdown>{textContent}</Markdown>
             </div>
           </CollapsibleContent>
