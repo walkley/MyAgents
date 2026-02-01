@@ -257,11 +257,6 @@ export default function SkillsCommandsList({
         );
     }
 
-    // When scope is 'project', skills/commands already only contain project-level items
-    // When scope is 'user', they only contain user-level items
-    const displaySkills = skills;
-    const displayCommands = commands;
-
     return (
         <div className="h-full overflow-auto p-6">
             {/* Skills Section */}
@@ -273,7 +268,7 @@ export default function SkillsCommandsList({
                             {scope === 'project' ? '项目技能' : '技能 Skills'}
                         </h3>
                         <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {displaySkills.length}
+                            {skills.length}
                         </span>
                     </div>
                     <button
@@ -287,9 +282,9 @@ export default function SkillsCommandsList({
                 </div>
 
                 {/* Skills List */}
-                {displaySkills.length > 0 ? (
+                {skills.length > 0 ? (
                     <div className="grid grid-cols-2 gap-3">
-                        {displaySkills.map(skill => (
+                        {skills.map(skill => (
                             <SkillCard
                                 key={`${skill.scope}-${skill.folderName}`}
                                 skill={skill}
@@ -327,7 +322,7 @@ export default function SkillsCommandsList({
                             {scope === 'project' ? '项目指令' : '指令 Commands'}
                         </h3>
                         <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {displayCommands.length}
+                            {commands.length}
                         </span>
                     </div>
                     <button
@@ -341,9 +336,9 @@ export default function SkillsCommandsList({
                 </div>
 
                 {/* Commands List */}
-                {displayCommands.length > 0 ? (
+                {commands.length > 0 ? (
                     <div className="grid grid-cols-2 gap-3">
-                        {displayCommands.map(cmd => (
+                        {commands.map(cmd => (
                             <CommandCard
                                 key={`${cmd.scope}-${cmd.fileName}`}
                                 command={cmd}
