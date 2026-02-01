@@ -206,6 +206,9 @@ Function PageReinstall
   ${EndIf}
   ${IfThen} $R0 == "" ${|} StrCpy $R4 "$(unknown)" ${|}
 
+  ; MyAgents: Save old version string before comparison overwrites $R0
+  StrCpy $R5 $R0
+
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
   ; Reinstalling the same version

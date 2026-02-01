@@ -3,7 +3,7 @@
 
 LangString addOrReinstall ${LANG_ENGLISH} "Overwrite Upgrade"
 LangString alreadyInstalled ${LANG_ENGLISH} "Already Installed"
-LangString alreadyInstalledLong ${LANG_ENGLISH} "MyAgents $R0 is already installed. You are about to install MyAgents ${VERSION}.$\n$\nYou can proceed with the upgrade directly."
+LangString alreadyInstalledLong ${LANG_ENGLISH} "MyAgents $R5 is already installed. You are about to install MyAgents ${VERSION}.$\n$\nYou can proceed with the upgrade directly."
 LangString appRunning ${LANG_ENGLISH} "${PRODUCTNAME} is running! Please close it first then try again."
 LangString appRunningOkKill ${LANG_ENGLISH} "${PRODUCTNAME} is running.$\nClick $\"OK$\" to terminate it."
 LangString chooseMaintenanceOption ${LANG_ENGLISH} "Select the operation you want to perform."
@@ -15,7 +15,7 @@ LangString failedToKillApp ${LANG_ENGLISH} "Failed to terminate ${PRODUCTNAME}. 
 LangString installingWebview2 ${LANG_ENGLISH} "Installing WebView2..."
 LangString newerVersionInstalled ${LANG_ENGLISH} "A newer version of ${PRODUCTNAME} is already installed! It is not recommended to install an older version. If you really want to install, it is recommended to uninstall the current version first. Select your operation:"
 LangString older ${LANG_ENGLISH} "older"
-LangString olderOrUnknownVersionInstalled ${LANG_ENGLISH} "MyAgents $R0 is already installed. You are about to install MyAgents ${VERSION}.$\n$\nYou can proceed with the upgrade directly."
+LangString olderOrUnknownVersionInstalled ${LANG_ENGLISH} "MyAgents $R5 is already installed. You are about to install MyAgents ${VERSION}.$\n$\nYou can proceed with the upgrade directly."
 LangString silentDowngrades ${LANG_ENGLISH} "Downgrades are disabled for this installer and cannot continue in silent mode. Please use the graphical installer.$\n$\n"
 LangString unableToUninstall ${LANG_ENGLISH} "Unable to uninstall!"
 LangString uninstallApp ${LANG_ENGLISH} "Uninstall ${PRODUCTNAME}"
