@@ -278,9 +278,9 @@ export default function SkillsCommandsList({
 
                 {/* Project Skills */}
                 {scope === 'project' && projectSkills.length > 0 && (
-                    <div className="mb-4">
-                        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
-                        <div className="space-y-2">
+                    <div className="mb-6">
+                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
+                        <div className="grid grid-cols-2 gap-3">
                             {projectSkills.map(skill => (
                                 <SkillCard
                                     key={`${skill.scope}-${skill.folderName}`}
@@ -295,10 +295,10 @@ export default function SkillsCommandsList({
                 {/* User Skills */}
                 {userSkills.length > 0 && (
                     <div>
-                        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
+                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
                             {scope === 'project' ? '用户级 (全局)' : '用户技能'}
                         </h4>
-                        <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-3">
                             {userSkills.map(skill => (
                                 <SkillCard
                                     key={`${skill.scope}-${skill.folderName}`}
@@ -341,9 +341,9 @@ export default function SkillsCommandsList({
 
                 {/* Project Commands */}
                 {scope === 'project' && projectCommands.length > 0 && (
-                    <div className="mb-4">
-                        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
-                        <div className="space-y-2">
+                    <div className="mb-6">
+                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
+                        <div className="grid grid-cols-2 gap-3">
                             {projectCommands.map(cmd => (
                                 <CommandCard
                                     key={`${cmd.scope}-${cmd.fileName}`}
@@ -358,10 +358,10 @@ export default function SkillsCommandsList({
                 {/* User Commands */}
                 {userCommands.length > 0 && (
                     <div>
-                        <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
+                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
                             {scope === 'project' ? '用户级 (全局)' : '用户指令'}
                         </h4>
-                        <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-3">
                             {userCommands.map(cmd => (
                                 <CommandCard
                                     key={`${cmd.scope}-${cmd.fileName}`}
@@ -432,58 +432,56 @@ export default function SkillsCommandsList({
     );
 }
 
-// Skill Card Component
-function SkillCard({ skill, onClick }: { skill: SkillItem; onClick: () => void }) {
+// Skill Card Component - Card style with title badge
+// Exported for reuse in GlobalSkillsPanel
+export function SkillCard({ skill, onClick }: { skill: SkillItem; onClick: () => void }) {
     return (
         <div
-            className="group flex items-center justify-between rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm cursor-pointer"
+            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
             onClick={onClick}
         >
-            <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--paper-contrast)]">
-                    <Sparkles className="h-5 w-5 text-[var(--ink-muted)]" />
-                </div>
-                <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                        <span className="truncate font-medium text-[var(--ink)]">{skill.name}</span>
-                        <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
-                            skill
-                        </span>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
-                        {skill.description || '暂无描述'}
-                    </p>
-                </div>
+            {/* Title with badge */}
+            <div className="mb-2 flex items-center gap-1.5">
+                <h4 className="truncate text-[15px] font-semibold text-[var(--ink)]">
+                    {skill.name}
+                </h4>
+                <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
             </div>
-            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+            {/* Description - 2 lines */}
+            <p className="mb-3 line-clamp-2 flex-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                {skill.description || '暂无描述'}
+            </p>
+            {/* Footer - only show content when author exists, but maintain height */}
+            <div className="flex h-4 items-center text-xs text-[var(--ink-muted)]/70">
+                {skill.author && <span>{skill.author}</span>}
+            </div>
         </div>
     );
 }
 
-// Command Card Component
-function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
+// Command Card Component - Card style with title badge
+// Exported for reuse in GlobalSkillsPanel
+export function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
     return (
         <div
-            className="group flex items-center justify-between rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm cursor-pointer"
+            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
             onClick={onClick}
         >
-            <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--paper-contrast)]">
-                    <Terminal className="h-5 w-5 text-[var(--ink-muted)]" />
-                </div>
-                <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                        <span className="truncate font-medium text-[var(--ink)]">{command.name}</span>
-                        <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
-                            command
-                        </span>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
-                        {command.description || '暂无描述'}
-                    </p>
-                </div>
+            {/* Title with badge */}
+            <div className="mb-2 flex items-center gap-1.5">
+                <h4 className="truncate text-[15px] font-semibold text-[var(--ink)]">
+                    {command.name}
+                </h4>
+                <Terminal className="h-4 w-4 shrink-0 text-sky-500" />
             </div>
-            <ChevronRight className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />
+            {/* Description - 2 lines */}
+            <p className="mb-3 line-clamp-2 flex-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                {command.description || '暂无描述'}
+            </p>
+            {/* Footer - only show content when author exists, but maintain height */}
+            <div className="flex h-4 items-center text-xs text-[var(--ink-muted)]/70">
+                {command.author && <span>{command.author}</span>}
+            </div>
         </div>
     );
 }

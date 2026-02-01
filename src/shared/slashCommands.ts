@@ -20,6 +20,7 @@ export interface SlashCommand {
 export interface SkillFrontmatter {
     name: string;
     description: string;
+    author?: string;
     // Advanced options
     'disable-model-invocation'?: boolean;
     'user-invocable'?: boolean;
@@ -35,6 +36,7 @@ export interface SkillFrontmatter {
 export interface CommandFrontmatter {
     name?: string;
     description: string;
+    author?: string;
 }
 
 // Built-in Claude Code slash commands with descriptions
@@ -64,14 +66,35 @@ function extractFrontmatter(content: string): { frontmatterStr: string; body: st
 }
 
 /**
- * Parse YAML frontmatter from a markdown file to extract description
+ * Extract author from parsed YAML object
+ * Checks both top-level (author, Author) and nested (metadata.author, metadata.Author)
+ */
+function extractAuthor(parsed: Record<string, unknown>): string | undefined {
+    // Check top-level author/Author
+    if (typeof parsed.author === 'string') return parsed.author;
+    if (typeof parsed.Author === 'string') return parsed.Author;
+
+    // Check nested metadata.author/Author
+    const metadata = parsed.metadata as Record<string, unknown> | undefined;
+    if (metadata && typeof metadata === 'object') {
+        if (typeof metadata.author === 'string') return metadata.author;
+        if (typeof metadata.Author === 'string') return metadata.Author;
+    }
+
+    return undefined;
+}
+
+/**
+ * Parse YAML frontmatter from a markdown file to extract description and author
  * For custom commands (.claude/commands/*.md)
+ * Author can be at top-level (author/Author) or nested (metadata.author/Author)
  * Format:
  * ---
  * description: Some description here
+ * author: author-name
  * ---
  */
-export function parseYamlFrontmatter(content: string): { description?: string } {
+export function parseYamlFrontmatter(content: string): { description?: string; author?: string } {
     try {
         const extracted = extractFrontmatter(content);
         if (!extracted) {
@@ -82,7 +105,8 @@ export function parseYamlFrontmatter(content: string): { description?: string } 
             return {};
         }
         return {
-            description: typeof parsed.description === 'string' ? parsed.description : undefined
+            description: typeof parsed.description === 'string' ? parsed.description : undefined,
+            author: extractAuthor(parsed)
         };
     } catch (e) {
         console.warn('Failed to parse YAML frontmatter:', e);
@@ -91,25 +115,35 @@ export function parseYamlFrontmatter(content: string): { description?: string } 
 }
 
 /**
- * Parse YAML frontmatter from a SKILL.md file to extract name and description
+ * Parse YAML frontmatter from a SKILL.md file to extract name, description and author
  * Skills use 'name' and 'description' fields in frontmatter
+ * Author can be at top-level (author/Author) or nested (metadata.author/Author)
  * Format:
  * ---
  * name: skill-name
  * description: "What this skill does and when to use it"
+ * author: author-name
+ * ---
+ * or:
+ * ---
+ * name: skill-name
+ * metadata:
+ *   author: author-name
  * ---
  */
-export function parseSkillFrontmatter(content: string): { name?: string; description?: string } {
+export function parseSkillFrontmatter(content: string): { name?: string; description?: string; author?: string } {
     try {
         const extracted = extractFrontmatter(content);
         let name: string | undefined;
         let description: string | undefined;
+        let author: string | undefined;
 
         if (extracted) {
             const parsed = yamlLoad(extracted.frontmatterStr) as Record<string, unknown> | null;
             if (parsed && typeof parsed === 'object') {
                 name = typeof parsed.name === 'string' ? parsed.name : undefined;
                 description = typeof parsed.description === 'string' ? parsed.description : undefined;
+                author = extractAuthor(parsed);
             }
         }
 
@@ -122,7 +156,7 @@ export function parseSkillFrontmatter(content: string): { name?: string; descrip
             }
         }
 
-        return { name, description };
+        return { name, description, author };
     } catch (e) {
         console.warn('Failed to parse skill frontmatter:', e);
         return {};
@@ -213,6 +247,11 @@ export function parseFullCommandContent(content: string): {
         }
         if (typeof parsed.description === 'string') {
             frontmatter.description = parsed.description;
+        }
+        // Extract author from top-level or nested metadata
+        const author = extractAuthor(parsed);
+        if (author) {
+            frontmatter.author = author;
         }
 
         // If name is not in frontmatter, try to extract from first # heading in body

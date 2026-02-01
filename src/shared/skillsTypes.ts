@@ -15,6 +15,7 @@ export interface SkillItem {
     scope: 'user' | 'project';
     path: string;
     folderName: string;
+    author?: string;
 }
 
 /**
@@ -26,6 +27,7 @@ export interface CommandItem {
     description: string;
     scope: 'user' | 'project';
     path: string;
+    author?: string;
 }
 
 /**

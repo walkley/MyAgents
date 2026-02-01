@@ -5,7 +5,6 @@ import { tmpdir } from 'os';
 import AdmZip from 'adm-zip';
 import {
   BUILTIN_SLASH_COMMANDS,
-  parseYamlFrontmatter,
   parseSkillFrontmatter,
   extractCommandName,
   parseFullSkillContent,
@@ -2285,6 +2284,7 @@ async function main() {
             scope: 'user' | 'project';
             path: string;
             folderName: string;
+            author?: string;
           }> = [];
 
           const scanSkills = (dir: string, scopeType: 'user' | 'project') => {
@@ -2297,13 +2297,14 @@ async function main() {
                 if (!existsSync(skillMdPath)) continue;
 
                 const content = readFileSync(skillMdPath, 'utf-8');
-                const { name, description } = parseSkillFrontmatter(content);
+                const { name, description, author } = parseSkillFrontmatter(content);
                 skills.push({
                   name: name || folder.name,
                   description: description || '',
                   scope: scopeType,
                   path: skillMdPath,
                   folderName: folder.name,
+                  author,
                 });
               }
             } catch (scanError) {
@@ -3002,6 +3003,7 @@ async function main() {
             description: string;
             scope: 'user' | 'project';
             path: string;
+            author?: string;
           }> = [];
 
           const scanCommands = (dir: string, scopeType: 'user' | 'project') => {
@@ -3020,6 +3022,7 @@ async function main() {
                   description: frontmatter.description || '',
                   scope: scopeType,
                   path: filePath,
+                  author: frontmatter.author,
                 });
               }
             } catch (scanError) {
