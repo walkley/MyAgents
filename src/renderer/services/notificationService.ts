@@ -91,21 +91,21 @@ async function notify(title: string, body?: string): Promise<void> {
  * Notify that AI has completed a response
  */
 export function notifyMessageComplete(): void {
-    void notify('MyAgents', 'AI 已完成回复');
+    void notify('MyAgents - 任务完成', '请您查看结果');
 }
 
 /**
  * Notify that AI is requesting permission
  */
 export function notifyPermissionRequest(toolName: string): void {
-    void notify('MyAgents - 权限请求', `AI 请求使用 ${toolName}`);
+    void notify('MyAgents - 权限请求', `AI 请求使用工具 - ${toolName}`);
 }
 
 /**
  * Notify that AI is asking user a question
  */
 export function notifyAskUserQuestion(): void {
-    void notify('MyAgents - 需要您的输入', 'AI 正在等待您的回答');
+    void notify('MyAgents - 需求确认', 'AI 等待您的确认相关信息');
 }
 
 /**
