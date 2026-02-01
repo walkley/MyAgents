@@ -14,6 +14,10 @@ import { isTauriEnvironment } from '../utils/browserMock';
 // Track if we've already requested permission this session
 let permissionRequested = false;
 
+// Throttle notifications to avoid notification bombing
+let lastNotifyTime = 0;
+const NOTIFY_THROTTLE_MS = 3000; // 3 seconds between notifications
+
 /**
  * Check if user focus is away from the current window/tab
  * Returns true if notification should be sent
@@ -62,6 +66,13 @@ async function notify(title: string, body?: string): Promise<void> {
     if (!shouldNotify()) {
         return;
     }
+
+    // Throttle: avoid notification bombing when multiple events fire rapidly
+    const now = Date.now();
+    if (now - lastNotifyTime < NOTIFY_THROTTLE_MS) {
+        return;
+    }
+    lastNotifyTime = now;
 
     // Ensure we have permission
     const hasPermission = await ensurePermission();
