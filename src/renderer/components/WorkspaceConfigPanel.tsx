@@ -221,6 +221,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                     onSelectSkill={handleSelectSkill}
                                     onSelectCommand={handleSelectCommand}
                                     refreshKey={refreshKey}
+                                    onClose={onClose}
                                 />
                             )}
                         </>

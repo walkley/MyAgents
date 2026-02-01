@@ -21,6 +21,8 @@ interface SkillsCommandsListProps {
     onSelectSkill: (name: string, scope: 'user' | 'project', isNewSkill?: boolean) => void;
     onSelectCommand: (name: string, scope: 'user' | 'project') => void;
     refreshKey?: number;
+    /** Callback to close parent modal (used when navigating to Settings) */
+    onClose?: () => void;
 }
 
 export default function SkillsCommandsList({
@@ -28,7 +30,8 @@ export default function SkillsCommandsList({
     agentDir,
     onSelectSkill,
     onSelectCommand,
-    refreshKey = 0
+    refreshKey = 0,
+    onClose
 }: SkillsCommandsListProps) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -242,12 +245,14 @@ export default function SkillsCommandsList({
         }
     }, [deleteTarget, loadData, api]);
 
-    // Open Settings tab with Skills section
+    // Open Settings tab with Skills section (close modal first if in modal context)
     const handleOpenUserSkills = useCallback(() => {
+        // Close parent modal first so user can see the Settings page
+        onClose?.();
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
             detail: { section: 'skills' }
         }));
-    }, []);
+    }, [onClose]);
 
     if (loading) {
         return (
