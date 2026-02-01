@@ -1131,11 +1131,11 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
               />
             )}
 
-            {/* Expand/Collapse button */}
+            {/* Expand/Collapse button - larger click area */}
             <button
               type="button"
               onClick={toggleExpand}
-              className="absolute right-4 top-3 rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
               title={isExpanded ? '收起' : '展开'}
             >
               {isExpanded ? (

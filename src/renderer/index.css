@@ -169,6 +169,12 @@
   --duration-slow: 300ms;
 }
 
+/* Prevent scroll chaining at root level */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   font-family: var(--font-body);
   color: var(--ink);

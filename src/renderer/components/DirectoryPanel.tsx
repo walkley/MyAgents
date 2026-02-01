@@ -946,7 +946,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
     <div
       ref={panelRef}
       tabIndex={0}
-      className={`flex flex-col border-l border-[var(--line)] bg-[var(--paper-strong)] outline-none ${isNarrowMode && isCollapsed ? 'h-12' : 'h-full'
+      className={`flex flex-col border-l border-[var(--line)] bg-[var(--paper-strong)] outline-none overscroll-none ${isNarrowMode && isCollapsed ? 'h-12' : 'h-full'
         }`}
     >
       {/* Title bar - aligned with left panel header */}
@@ -967,7 +967,25 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
               <PanelRightClose className="h-4 w-4" />
             </button>
           )}
-          {/* Collapse toggle button - only in narrow mode */}
+          <span className="text-base font-semibold text-[var(--ink)]">项目工作区</span>
+        </div>
+        {/* Right side buttons */}
+        <div className="flex items-center gap-1">
+          {onOpenConfig && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenConfig();
+              }}
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              title="打开项目设置"
+            >
+              <Settings className="h-4 w-4" />
+              项目设置
+            </button>
+          )}
+          {/* Collapse toggle button - only in narrow mode, positioned at far right */}
           {isNarrowMode && (
             <button
               type="button"
@@ -975,29 +993,13 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                 e.stopPropagation();
                 setIsCollapsed(!isCollapsed);
               }}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
               title={isCollapsed ? '展开工作区' : '折叠工作区'}
             >
               <ChevronUp className={`h-4 w-4 transition-transform ${isCollapsed ? 'rotate-180' : ''}`} />
             </button>
           )}
-          <span className="text-base font-semibold text-[var(--ink)]">项目工作区</span>
         </div>
-        {/* 项目设置 button on right */}
-        {onOpenConfig && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenConfig();
-            }}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-            title="打开项目设置"
-          >
-            <Settings className="h-4 w-4" />
-            项目设置
-          </button>
-        )}
       </div>
 
       {/* Collapsible content - hidden in narrow mode when collapsed */}
@@ -1037,7 +1039,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
           {/* Tree container */}
           <div
             ref={treeContainerRef}
-            className={`min-h-0 flex-1 overflow-hidden ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
+            className={`min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
             onContextMenu={handleTreeContainerContextMenu}
             onDragEnter={handleTreeDragEnter}
             onDragOver={handleTreeDragOver}
@@ -1072,7 +1074,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                 indent={16}
                 height={treeHeight}
                 width="100%"
-                className="overscroll-contain"
+                className="overscroll-none"
               >
                 {({ node, style }) => {
                   const data = node.data as DirectoryTreeNode;

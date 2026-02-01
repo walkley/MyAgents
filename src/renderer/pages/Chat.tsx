@@ -438,11 +438,11 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   }, [onNewSession, resetSession]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-[var(--paper-strong)] text-[var(--ink)] md:flex-row">
+    <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-strong)] text-[var(--ink)] md:flex-row">
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
         {/* Compact header - single row */}
         <div className="flex h-12 flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {onBack && (
               <button
                 type="button"
@@ -453,7 +453,12 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                 <ArrowLeft className="h-4 w-4" />
               </button>
             )}
-            {/* Removed Session text as per PRD 0.0.8 requirement */}
+            {/* Project name */}
+            {agentDir && (
+              <span className="text-sm font-medium text-[var(--ink)]">
+                {agentDir.split(/[/\\]/).filter(Boolean).pop()}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {/* New Session button - before History */}
