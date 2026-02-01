@@ -97,7 +97,11 @@
           "SimpChinese",
           "English"
         ],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "customLanguageFiles": {
+          "SimpChinese": "nsis/languages/SimpChinese.nsh",
+          "English": "nsis/languages/English.nsh"
+        }
       }
     }
   },
