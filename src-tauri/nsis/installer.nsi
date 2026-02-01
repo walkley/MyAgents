@@ -645,7 +645,9 @@ Section GitForWindows
         Delete "$TEMP\Git-Installer.exe"
         DetailPrint "$(gitDownloading)"
         ; Use PowerShell to download - handles HTTPS and redirects properly
-        nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ''https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe'' -OutFile ''$TEMP\Git-Installer.exe'' -UseBasicParsing }"'
+        ; Note: To update Git version, change the URL below (current: v2.52.0)
+        ; Download URL format: https://github.com/git-for-windows/git/releases/download/v{VERSION}.windows.1/Git-{VERSION}-64-bit.exe
+        nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ''https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe'' -OutFile (Join-Path $env:TEMP ''Git-Installer.exe'') -UseBasicParsing -TimeoutSec 300 }"'
         Pop $0
         ; Check if download succeeded (file exists and has content)
         IfFileExists "$TEMP\Git-Installer.exe" 0 git_download_failed
