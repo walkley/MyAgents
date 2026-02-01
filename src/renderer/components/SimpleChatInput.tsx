@@ -1310,8 +1310,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   title="工具"
                 >
                   <Wrench className="h-3.5 w-3.5" />
+                  <span>工具</span>
                   {workspaceMcpEnabled.length > 0 && (
-                    <span className="text-[9px] text-[var(--ink-muted)]">
+                    <span className="text-[11px] text-[var(--ink-muted)]">
                       {workspaceMcpEnabled.length}
                     </span>
                   )}
