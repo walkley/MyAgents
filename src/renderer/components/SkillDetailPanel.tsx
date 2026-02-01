@@ -12,6 +12,8 @@ import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as gl
 import { useTabStateOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import Markdown from '@/components/Markdown';
+import MonacoEditor from '@/components/MonacoEditor';
 import type { SkillFrontmatter, SkillDetail, SkillDetailResponse, ApiSuccessResponse } from '../../shared/skillsTypes';
 import { sanitizeFolderName } from '../../shared/utils';
 
@@ -97,7 +99,6 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         // 输入框 refs 用于焦点控制
         const nameInputRef = useRef<HTMLInputElement>(null);
         const descriptionInputRef = useRef<HTMLTextAreaElement>(null);
-        const bodyInputRef = useRef<HTMLTextAreaElement>(null);
         // 跟踪进入编辑模式时应聚焦的字段
         const [focusField, setFocusField] = useState<'name' | 'description' | 'body' | null>(null);
 
@@ -187,9 +188,9 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
             setIsEditing(true);
         }, []);
 
-        // 处理进入编辑模式后的焦点
+        // 处理进入编辑模式后的焦点（仅处理 name 和 description，body 由 MonacoEditor autoFocus 处理）
         useEffect(() => {
-            if (isEditing && focusField) {
+            if (isEditing && focusField && focusField !== 'body') {
                 // 使用 setTimeout 确保 DOM 已更新
                 const timer = setTimeout(() => {
                     switch (focusField) {
@@ -198,9 +199,6 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             break;
                         case 'description':
                             descriptionInputRef.current?.focus();
-                            break;
-                        case 'body':
-                            bodyInputRef.current?.focus();
                             break;
                     }
                     setFocusField(null);
@@ -442,7 +440,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 key="view"
                                 type="button"
                                 onClick={() => handleEdit('name')}
-                                className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
                             >
                                 <Edit2 className="h-4 w-4" />
                                 编辑
@@ -460,8 +458,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             <div className={`w-full rounded-lg border px-4 py-2.5 ${
                                 isEditing
                                     ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
-                                    : 'cursor-pointer border-[var(--line)] bg-[var(--paper-contrast)]/30 transition-colors hover:border-[var(--ink-muted)]/50'
-                            }`} onClick={!isEditing ? () => handleEdit('name') : undefined}>
+                                    : 'border-[var(--line)] bg-[var(--paper-reading)]'
+                            }`}>
                                 {isEditing ? (
                                     <input
                                         ref={nameInputRef}
@@ -472,8 +470,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         className="w-full border-none bg-transparent p-0 text-sm leading-relaxed text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
                                     />
                                 ) : (
-                                    <span className={`block text-sm leading-relaxed ${skillName ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}`}>
-                                        {skillName || '点击编辑名称...'}
+                                    <span className={`block select-text text-sm leading-relaxed ${skillName ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}`}>
+                                        {skillName || '（未设置）'}
                                     </span>
                                 )}
                             </div>
@@ -486,9 +484,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 className={`w-full rounded-lg border px-4 py-2.5 ${
                                     isEditing
                                         ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
-                                        : 'cursor-pointer border-[var(--line)] bg-[var(--paper-contrast)]/30 transition-colors hover:border-[var(--ink-muted)]/50'
+                                        : 'border-[var(--line)] bg-[var(--paper-reading)]'
                                 }`}
-                                onClick={!isEditing ? () => handleEdit('description') : undefined}
                             >
                                 {/* Fixed height container: min 1 line, max 4 lines (22px line-height * 4 = 88px) */}
                                 <div className="max-h-[88px] min-h-[22px] overflow-y-auto">
@@ -514,9 +511,9 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             }}
                                         />
                                     ) : (
-                                        <div className="whitespace-pre-wrap text-sm leading-[22px]">
+                                        <div className="select-text whitespace-pre-wrap text-sm leading-[22px]">
                                             <span className={description ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}>
-                                                {description || '点击编辑描述...'}
+                                                {description || '（未设置）'}
                                             </span>
                                         </div>
                                     )}
@@ -528,28 +525,28 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                         <div>
                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">技能内容 (Instructions)</label>
                             <div
-                                className={`overflow-hidden rounded-lg border px-4 py-3 ${
+                                className={`overflow-hidden rounded-lg border ${
                                     isEditing
-                                        ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
-                                        : 'cursor-pointer border-[var(--line)] bg-[var(--paper-contrast)]/30 transition-colors hover:border-[var(--ink-muted)]/50'
+                                        ? 'border-[var(--line)] bg-[var(--paper)]'
+                                        : 'border-[var(--line)] bg-[var(--paper-reading)]'
                                 }`}
                                 style={{ height: 'max(300px, calc(100vh - 420px))' }}
-                                onClick={!isEditing ? () => handleEdit('body') : undefined}
                             >
                                 {isEditing ? (
-                                    <textarea
-                                        ref={bodyInputRef}
+                                    <MonacoEditor
                                         value={body}
-                                        onChange={(e) => setBody(e.target.value)}
-                                        placeholder="在这里编写技能的详细指令..."
-                                        className="h-full w-full resize-none overflow-auto border-none bg-transparent p-0 font-mono text-sm leading-[22px] text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
+                                        onChange={setBody}
+                                        language="markdown"
+                                        autoFocus={focusField === 'body'}
                                     />
                                 ) : (
-                                    <div className="h-full overflow-auto">
+                                    <div className="h-full overflow-auto p-4">
                                         {body ? (
-                                            <pre className="m-0 whitespace-pre-wrap font-mono text-sm leading-[22px] text-[var(--ink)]">{body}</pre>
+                                            <div className="prose prose-stone max-w-none dark:prose-invert">
+                                                <Markdown raw>{body}</Markdown>
+                                            </div>
                                         ) : (
-                                            <span className="font-mono text-sm text-[var(--ink-muted)]/60">点击编辑技能内容...</span>
+                                            <span className="text-sm text-[var(--ink-muted)]/60">点击编辑技能内容...</span>
                                         )}
                                     </div>
                                 )}
