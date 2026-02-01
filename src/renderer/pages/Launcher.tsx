@@ -261,7 +261,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError, onOp
                     </div>
 
                     {/* Workspaces List */}
-                    <div className="flex-1 overflow-y-auto px-6 pb-6">
+                    <div className="flex-1 overflow-y-auto overscroll-contain px-6 pb-6">
                         {isLoading ? (
                             <div className="flex flex-col items-center justify-center py-16">
                                 <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]/50" />

@@ -1157,7 +1157,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             </div>
 
             {/* Right content area */}
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto overscroll-contain">
                 {/* Skills section uses wider layout */}
                 {activeSection === 'skills' && (
                     <div className="px-8 py-8">
@@ -1748,7 +1748,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                 </div>
 
                                 {/* Content - Scrollable */}
-                                <div className="flex-1 overflow-y-auto px-6 py-5">
+                                <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-5">
                                     {/* Transport Type Selector */}
                                     <div className="mb-5">
                                         <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>

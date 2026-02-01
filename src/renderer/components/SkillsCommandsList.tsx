@@ -263,7 +263,7 @@ export default function SkillsCommandsList({
     }
 
     return (
-        <div className="h-full overflow-auto p-6">
+        <div className="h-full overflow-auto overscroll-contain p-6">
             {/* Skills Section */}
             <div className="mb-8">
                 <div className="mb-4 flex items-center justify-between">
