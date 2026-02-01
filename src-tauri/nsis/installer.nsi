@@ -640,10 +640,10 @@ Section GitForWindows
       ; Skip if in update mode (Git should already be installed)
       ${If} $UpdateMode <> 1
         ; Download Git for Windows installer
-        ; Using a stable version (2.47.1)
+        ; Using stable version 2.52.0
         Delete "$TEMP\Git-Installer.exe"
         DetailPrint "$(gitDownloading)"
-        NSISdl::download "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe" "$TEMP\Git-Installer.exe"
+        NSISdl::download "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe" "$TEMP\Git-Installer.exe"
         Pop $0
         ${If} $0 == "success"
           DetailPrint "$(gitDownloadSuccess)"
