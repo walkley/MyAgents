@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledRuntimePath, getBundledBunDir } from './utils/runtime';
+import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
 
 import type { ToolInput } from '../renderer/types/chat';
@@ -465,28 +465,16 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     if (server.type === 'stdio' && server.command) {
       const args = server.args || [];
 
-      if (server.isBuiltin) {
-        // Builtin MCP: Use bundled bun with "bun x" (like npx)
-        // Packages are cached in ~/.bun/install/cache/ (global, shared)
-        const bunPath = getBundledRuntimePath();
-        console.log(`[agent] MCP ${server.id}: Using bundled bun (${bunPath}) with args: bun x ${args.join(' ')}`);
+      // Use npx for all stdio MCP servers (same as Claude Desktop/Cursor)
+      // This ensures compatibility and shares npm cache (~/.npm/_npx/)
+      // User needs Node.js installed, but this is the standard approach
+      console.log(`[agent] MCP ${server.id}: Using npx ${args.join(' ')}`);
 
-        result[server.id] = {
-          command: bunPath,
-          args: ['x', ...args],
-          env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
-        };
-      } else {
-        // Custom MCP: Execute user-specified command directly
-        // User is responsible for ensuring the command is available (npx/uvx/node/python etc.)
-        console.log(`[agent] MCP ${server.id}: Using user command: ${server.command} ${args.join(' ')}`);
-
-        result[server.id] = {
-          command: server.command,
-          args: args,
-          env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
-        };
-      }
+      result[server.id] = {
+        command: 'npx',
+        args: ['-y', ...args],  // -y auto-confirms install
+        env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
+      };
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
       result[server.id] = {
         type: server.type,
