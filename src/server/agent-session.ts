@@ -402,11 +402,16 @@ function loadProxyEnvVars(): Record<string, string> {
     // Set both uppercase and lowercase for maximum compatibility
     // Some tools check HTTP_PROXY, others check http_proxy
     // PLAYWRIGHT_MCP_PROXY_SERVER is specific to @playwright/mcp for browser proxy
+    // NO_PROXY ensures local connections (like Playwright's WebSocket to Chrome) bypass proxy
+    const noProxy = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+
     return {
       HTTP_PROXY: proxyUrl,
       HTTPS_PROXY: proxyUrl,
       http_proxy: proxyUrl,
       https_proxy: proxyUrl,
+      NO_PROXY: noProxy,
+      no_proxy: noProxy,
       PLAYWRIGHT_MCP_PROXY_SERVER: proxyUrl,
     };
   } catch (e) {
