@@ -11,11 +11,7 @@ try {
     $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
     Set-Location $ProjectDir
 
-    # Bun version for bundling
-    # Note: 1.3.x may have compatibility issues with older Windows (10 1909)
-    # Using 1.2.x for better compatibility. If issues persist, try 1.1.43
-    # See: https://github.com/oven-sh/bun/issues/8496
-    $BunVersion = "1.2.15"
+    $BunVersion = "1.3.6"
 
     Write-Host "`n=========================================" -ForegroundColor Blue
     Write-Host "  MyAgents Windows 开发环境初始化" -ForegroundColor Green

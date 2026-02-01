@@ -246,27 +246,28 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 
 ---
 
-## ⚠️ Windows 10 兼容性
+## ⚠️ Windows 依赖项
 
-### 最低支持版本
+### Git for Windows（必需）
 
-**官方支持**：Windows 10 1809+（Build 17763）
+**为什么需要**：Claude Agent SDK 在 Windows 上需要 Git Bash 来执行 shell 命令。
 
-**已知问题**：Windows 10 1909 等旧版本可能出现 `Claude Code process exited with code 1` 错误。
+**自动安装**：NSIS 安装程序会自动检测并安装 Git for Windows（如果未安装）。
 
-### 排查步骤
+**手动安装**：https://git-scm.com/downloads/win
 
-1. **确认 Windows 版本**：`winver` 查看版本号
-2. **检查日志**：查找 `[sdk-stderr]` 和 `[agent] Windows subprocess failure` 相关日志
-3. **尝试降级 Bun**：先试 1.2.15，若仍有问题再降到 1.1.43
+**环境变量**：若 Git 已安装但不在 PATH 中，可设置：
+```powershell
+$env:CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
+```
 
-### 建议
+### 排查 `exit code 1` 错误
 
-- **开发测试**：在 Windows 10 22H2 或 Windows 11 上测试
-- **最终用户**：建议升级到 Windows 10 22H2+ 或 Windows 11
-- **Bun 版本**：首选 1.2.15，备选 1.1.43
+1. **检查日志**：查找 `[sdk-stderr]` 输出
+2. **常见原因**：`requires git-bash` 表示缺少 Git
+3. **解决方案**：安装 Git for Windows 或设置 `CLAUDE_CODE_GIT_BASH_PATH`
 
-**详见**：[bundled_bun.md](./bundled_bun.md) 中的 Windows 兼容性说明
+**详见**：[bundled_bun.md](./bundled_bun.md) 中的 Windows Git 依赖说明
 
 ---
 

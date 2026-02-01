@@ -195,25 +195,22 @@ DEBUG=1 open MyAgents.app
 | 120s 超时 | 健康检查失败 | 查看 `[bun-err]` 日志定位根因 |
 | `ProcessTransport is not ready for writing` | TypeScript 侧无法找到 bundled bun | 检查 `buildClaudeSessionEnv()` 中的路径检测逻辑 |
 | MCP 安装失败 | 包管理器未找到 | 检查 `getPackageManagerPath()` 日志，确认内置 bun 路径正确 |
-| `Claude Code process exited with code 1` (Windows) | Bun 版本与 Windows 不兼容 | 使用 Bun 1.1.43（参见下方 Windows 兼容性说明）|
+| `Claude Code process exited with code 1` (Windows) | 缺少 Git for Windows | 安装 Git for Windows（安装程序会自动安装）|
 
-### Windows 10 兼容性说明
+### Windows Git 依赖说明
 
-**已知问题**：Bun 1.3.x 在 Windows 10 1909 等旧版本上可能出现 `Claude Code process exited with code 1` 错误，但在 Windows 11 上正常。
+**已知问题**：Windows 上出现 `Claude Code process exited with code 1` 错误，通常是因为缺少 Git for Windows。
 
-**根因分析**：
-- Bun 官方声称支持 Windows 10 1809+，但缺少 CI 验证（[bun#8496](https://github.com/oven-sh/bun/issues/8496)）
-- 较新 Bun 版本可能使用旧 Windows 不支持的 API
-- Claude Agent SDK 的子进程在初始化阶段就失败
+**根因**：Claude Agent SDK 在 Windows 上需要 Git Bash 来执行 shell 命令。
 
 **解决方案**：
-- 首选 Bun 1.2.15（1.2.x 系列稳定版本）
-- 若仍有问题，降级到 Bun 1.1.43
-- 建议用户升级到 Windows 10 22H2 或 Windows 11
+- **自动安装**：NSIS 安装程序会自动检测并安装 Git for Windows
+- **手动安装**：https://git-scm.com/downloads/win
+- **环境变量**：若 Git 已安装但不在 PATH，设置 `CLAUDE_CODE_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe`
 
 **诊断方法**：
 1. 查看日志中的 `[sdk-stderr]` 输出
-2. 检查 `[agent] Windows subprocess failure detected` 相关日志
+2. 检查是否有 `requires git-bash` 相关错误信息
 
 ## 注意事项
 

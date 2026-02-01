@@ -28,3 +28,12 @@ LangString webview2Downloading ${LANG_SIMPCHINESE} "正在下载 WebView2 引导
 LangString webview2InstallError ${LANG_SIMPCHINESE} "错误：WebView2 安装失败，错误代码：$1"
 LangString webview2InstallSuccess ${LANG_SIMPCHINESE} "成功安装 WebView2"
 LangString deleteAppData ${LANG_SIMPCHINESE} "删除应用程序数据"
+
+; Git for Windows installation
+LangString gitDownloading ${LANG_SIMPCHINESE} "正在下载 Git for Windows..."
+LangString gitDownloadSuccess ${LANG_SIMPCHINESE} "Git 下载成功"
+LangString gitDownloadError ${LANG_SIMPCHINESE} "错误：下载 Git 失败 - $0"
+LangString gitInstalling ${LANG_SIMPCHINESE} "正在安装 Git for Windows..."
+LangString gitInstallSuccess ${LANG_SIMPCHINESE} "成功安装 Git"
+LangString gitInstallError ${LANG_SIMPCHINESE} "错误：Git 安装失败，错误代码：$1"
+LangString gitAbortError ${LANG_SIMPCHINESE} "Git 安装失败！应用程序需要 Git 才能正常运行。请手动安装 Git：https://git-scm.com/downloads/win"

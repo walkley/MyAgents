@@ -614,6 +614,71 @@ Section WebView2
   ${EndIf}
 SectionEnd
 
+; MyAgents: Git for Windows installation section
+; Claude Agent SDK requires Git Bash on Windows
+Section GitForWindows
+  ; Check if Git is already installed
+  ; Method 1: Check registry
+  ReadRegStr $4 HKLM "SOFTWARE\GitForWindows" "InstallPath"
+  ${If} $4 == ""
+    ; Try 32-bit registry on 64-bit system
+    ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\GitForWindows" "InstallPath"
+  ${EndIf}
+
+  ; Method 2: Check common installation paths if registry check failed
+  ${If} $4 == ""
+    IfFileExists "$PROGRAMFILES64\Git\bin\bash.exe" git_found 0
+    IfFileExists "$PROGRAMFILES\Git\bin\bash.exe" git_found 0
+    IfFileExists "$LOCALAPPDATA\Programs\Git\bin\bash.exe" git_found 0
+    Goto git_not_found
+
+    git_found:
+      Goto git_done
+
+    git_not_found:
+      ; Git not found, need to install
+      ; Skip if in update mode (Git should already be installed)
+      ${If} $UpdateMode <> 1
+        ; Download Git for Windows installer
+        ; Using a stable version (2.47.1)
+        Delete "$TEMP\Git-Installer.exe"
+        DetailPrint "$(gitDownloading)"
+        NSISdl::download "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe" "$TEMP\Git-Installer.exe"
+        Pop $0
+        ${If} $0 == "success"
+          DetailPrint "$(gitDownloadSuccess)"
+
+          ; Install Git silently
+          DetailPrint "$(gitInstalling)"
+          ; /VERYSILENT - No user interaction
+          ; /NORESTART - Don't restart
+          ; /NOCANCEL - No cancel button
+          ; /SP- - Don't show "This will install..." dialog
+          ; /CLOSEAPPLICATIONS - Close apps using files
+          ; /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh,scalar" - Include useful components
+          ExecWait '"$TEMP\Git-Installer.exe" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh"' $1
+          Delete "$TEMP\Git-Installer.exe"
+          ${If} $1 = 0
+            DetailPrint "$(gitInstallSuccess)"
+          ${Else}
+            DetailPrint "$(gitInstallError)"
+            ; Don't abort - user can install Git manually later
+            MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
+          ${EndIf}
+        ${Else}
+          DetailPrint "$(gitDownloadError)"
+          ; Don't abort - user can install Git manually later
+          MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
+        ${EndIf}
+      ${EndIf}
+  ${Else}
+    ; Git found in registry
+    Goto git_done
+  ${EndIf}
+
+  git_done:
+SectionEnd
+
 Section Install
   SetOutPath $INSTDIR
 

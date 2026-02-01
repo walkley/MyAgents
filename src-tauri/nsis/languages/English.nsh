@@ -28,3 +28,12 @@ LangString webview2Downloading ${LANG_ENGLISH} "Downloading WebView2 bootstrappe
 LangString webview2InstallError ${LANG_ENGLISH} "Error: WebView2 installation failed with code $1"
 LangString webview2InstallSuccess ${LANG_ENGLISH} "WebView2 installed successfully"
 LangString deleteAppData ${LANG_ENGLISH} "Delete application data"
+
+; Git for Windows installation
+LangString gitDownloading ${LANG_ENGLISH} "Downloading Git for Windows..."
+LangString gitDownloadSuccess ${LANG_ENGLISH} "Git downloaded successfully"
+LangString gitDownloadError ${LANG_ENGLISH} "Error: Failed to download Git - $0"
+LangString gitInstalling ${LANG_ENGLISH} "Installing Git for Windows..."
+LangString gitInstallSuccess ${LANG_ENGLISH} "Git installed successfully"
+LangString gitInstallError ${LANG_ENGLISH} "Error: Git installation failed with code $1"
+LangString gitAbortError ${LANG_ENGLISH} "Failed to install Git! The app requires Git to run properly. Please install Git manually: https://git-scm.com/downloads/win"

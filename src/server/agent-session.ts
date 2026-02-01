@@ -987,17 +987,6 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
-  // Windows-specific: Enable TLS compatibility for older Windows versions (10 1809-1909)
-  // This helps with certificate verification issues on older Windows
-  if (isWindows) {
-    // Log Windows version for debugging
-    const winVer = process.env.PROCESSOR_ARCHITECTURE || 'unknown';
-    console.log(`[env] Windows architecture: ${winVer}`);
-
-    // Note: NODE_TLS_REJECT_UNAUTHORIZED is NOT set to '0' for security reasons
-    // If TLS issues occur, users should update their Windows or install root certificates
-  }
-
   return env;
 }
 
@@ -2874,11 +2863,11 @@ async function startStreamingSession(): Promise<void> {
     let userFacingError = errorMessage;
     if (errorMessage.includes('process exited with code 1') && process.platform === 'win32') {
       console.error('[agent] Windows subprocess failure detected. Possible causes:');
-      console.error('[agent] 1. Older Windows version may lack required APIs (1909 vs 11)');
-      console.error('[agent] 2. TLS/SSL certificate issues');
-      console.error('[agent] 3. Missing Visual C++ Redistributable');
+      console.error('[agent] 1. Git for Windows not installed (most common)');
+      console.error('[agent] 2. Git Bash not in PATH');
+      console.error('[agent] 3. CLAUDE_CODE_GIT_BASH_PATH environment variable not set');
       console.error('[agent] Windows version:', process.env.OS || 'unknown');
-      userFacingError = '子进程启动失败 (exit code 1)。可能原因：Windows 版本过旧、缺少 Visual C++ 运行库、或 TLS 证书问题。建议升级到 Windows 10 22H2 或更高版本。';
+      userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
     }
 
     broadcast('chat:message-error', userFacingError);
