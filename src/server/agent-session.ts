@@ -479,10 +479,6 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
       console.log(`[agent] MCP ${server.id}: Custom env vars: ${Object.keys(server.env).join(', ')}`);
     }
 
-    // Load proxy environment variables specific to this MCP server
-    // (Playwright needs special handling - see loadProxyEnvVars comments)
-    const proxyEnvVars = loadProxyEnvVars(server.id);
-
     if (server.type === 'stdio' && server.command) {
       let command = server.command;
       let args = server.args || [];
@@ -508,11 +504,20 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
       // Log full command for debugging
       console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
 
-      result[server.id] = {
+      // Build MCP config - follow Claude Code's approach:
+      // Don't pass explicit env vars, let child process inherit naturally
+      // This avoids issues with proxy env vars affecting WebSocket connections
+      const mcpConfig: SdkMcpServerConfig = {
         command,
         args,
-        env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
       };
+
+      // Only add env if server has custom env vars defined
+      if (server.env && Object.keys(server.env).length > 0) {
+        mcpConfig.env = server.env;
+      }
+
+      result[server.id] = mcpConfig;
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
       result[server.id] = {
         type: server.type,
