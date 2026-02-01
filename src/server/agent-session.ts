@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledRuntimePath, getBundledBunDir, isBunRuntime } from './utils/runtime';
+import { getScriptDir, getBundledRuntimePath, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
 
 import type { ToolInput } from '../renderer/types/chat';
@@ -417,8 +417,15 @@ function loadProxyEnvVars(): Record<string, string> {
 
 /**
  * Convert McpServerDefinition to SDK mcpServers format
- * Now runs MCP from local install directory (~/.myagents/mcp/<serverId>/)
- * If not installed locally, falls back to npx (but this may cause stdout pollution)
+ *
+ * Execution strategy:
+ * - Builtin MCP (isBuiltin: true): Use bundled bun to execute, packages cached in ~/.bun/
+ * - Custom MCP: Execute user-specified command directly (npx/uvx/node/python etc.)
+ *
+ * This approach:
+ * - Ensures builtin MCP works without Node.js dependency
+ * - Lets users use their preferred tools for custom MCP
+ * - Shares bun cache globally (~/.bun/install/cache/)
  */
 function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
   // Use memory cache if set (even if empty - user explicitly disabled all MCP)
@@ -439,10 +446,6 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     return {};
   }
 
-  const { existsSync, readFileSync } = require('fs');
-  const { join } = require('path');
-  const mcpBaseDir = join(getMyAgentsUserDir(), 'mcp');
-
   // Load proxy environment variables once for all MCP servers
   const proxyEnvVars = loadProxyEnvVars();
 
@@ -455,79 +458,28 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     }
 
     if (server.type === 'stdio' && server.command) {
-      const serverDir = join(mcpBaseDir, server.id);
       const args = server.args || [];
 
-      // Extract package name from args (e.g., "@playwright/mcp@latest" -> "@playwright/mcp")
-      const packageName = args[0] || '';
-      const packageNameClean = packageName.replace(/@(latest|[\d.]+)$/, '');
+      if (server.isBuiltin) {
+        // Builtin MCP: Use bundled bun with "bun x" (like npx)
+        // Packages are cached in ~/.bun/install/cache/ (global, shared)
+        const bunPath = getBundledRuntimePath();
+        console.log(`[agent] MCP ${server.id}: Using bundled bun (${bunPath}) with args: bun x ${args.join(' ')}`);
 
-      // Check if package is installed locally
-      const localNodeModules = join(serverDir, 'node_modules');
-      const localPkgJson = join(localNodeModules, ...packageNameClean.split('/'), 'package.json');
-
-      if (existsSync(localPkgJson)) {
-        // Package is installed locally - find entry point and run with node
-        try {
-          const pkgInfo = JSON.parse(readFileSync(localPkgJson, 'utf-8'));
-          let entryPoint = '';
-
-          // Try bin first (for CLI tools)
-          if (pkgInfo.bin) {
-            const binPath = typeof pkgInfo.bin === 'string'
-              ? pkgInfo.bin
-              : Object.values(pkgInfo.bin)[0] as string;
-            entryPoint = join(localNodeModules, ...packageNameClean.split('/'), binPath);
-          } else if (pkgInfo.main) {
-            entryPoint = join(localNodeModules, ...packageNameClean.split('/'), pkgInfo.main);
-          }
-
-          if (entryPoint && existsSync(entryPoint)) {
-            // Use shared utility to get bundled bun or fallback runtime
-            const runtimePath = getBundledRuntimePath();
-            // Extract extra CLI arguments (skip the first arg which is the package name)
-            // e.g., ['@playwright/mcp@latest', '--browser', 'chromium'] -> ['--browser', 'chromium']
-            const extraArgs = args.slice(1);
-            console.log(`[agent] MCP ${server.id}: Using local install at ${entryPoint} with runtime ${runtimePath}${extraArgs.length > 0 ? `, extra args: ${extraArgs.join(' ')}` : ''}`);
-
-            result[server.id] = {
-              command: runtimePath,
-              args: [entryPoint, ...extraArgs],
-              env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
-            };
-            continue;
-          }
-        } catch (e) {
-          console.warn(`[agent] MCP ${server.id}: Failed to read local package:`, e);
-        }
-      }
-
-      // Fallback: package not installed locally
-      // Use bundled bun with bunx (bun's npx equivalent) - no Node.js required
-      const runtimePath = getBundledRuntimePath();
-      console.warn(`[agent] MCP ${server.id}: NOT installed locally, using fallback with ${runtimePath}`);
-
-      // For bun, use "bun x" (bunx) to run packages without installing
-      // For node fallback, this won't work but we log a clear error
-      if (isBunRuntime(runtimePath)) {
         result[server.id] = {
-          command: runtimePath,
+          command: bunPath,
           args: ['x', ...args],
           env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
         };
       } else {
-        // Node fallback - try npx but may fail if not installed
-        console.error(`[agent] MCP ${server.id}: No bun available, npx fallback may fail without Node.js`);
-        const argsWithY = args.includes('-y') ? args : ['-y', ...args];
+        // Custom MCP: Execute user-specified command directly
+        // User is responsible for ensuring the command is available (npx/uvx/node/python etc.)
+        console.log(`[agent] MCP ${server.id}: Using user command: ${server.command} ${args.join(' ')}`);
+
         result[server.id] = {
-          command: 'npx',
-          args: argsWithY,
-          env: buildCrossPlatformEnv({
-            ...proxyEnvVars,
-            npm_config_loglevel: 'error',
-            npm_config_update_notifier: 'false',
-            ...server.env,
-          }),
+          command: server.command,
+          args: args,
+          env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
         };
       }
     } else if ((server.type === 'sse' || server.type === 'http') && server.url) {
