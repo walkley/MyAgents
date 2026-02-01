@@ -227,8 +227,6 @@ export interface AppConfig {
   mcpEnabledServers?: string[];
   // Environment variables for MCP servers that require config (e.g., API keys)
   mcpServerEnv?: Record<string, Record<string, string>>;
-  // Installation status for each MCP server (key = server ID)
-  mcpInstallStatus?: Record<string, McpInstallState>;
 
   // ===== Network Proxy (Developer) =====
   // HTTP/SOCKS5 proxy settings for external network requests
@@ -424,7 +422,6 @@ export interface McpServerDefinition {
 
   // Metadata
   isBuiltin: boolean;      // Is a preset MCP
-  requiresInstall?: boolean;  // Requires npm package installation
   requiresConfig?: string[];  // Required config fields (e.g., API keys)
 }
 
@@ -434,17 +431,19 @@ export interface McpServerDefinition {
 export type McpServerStatus = 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled';
 
 /**
- * MCP installation status
+ * MCP enable error type (returned by /api/mcp/enable)
  */
-export type McpInstallStatus = 'idle' | 'installing' | 'ready' | 'error';
+export type McpEnableErrorType = 'command_not_found' | 'warmup_failed' | 'package_not_found' | 'runtime_error' | 'unknown';
 
 /**
- * MCP installation state for a server
+ * MCP enable error response
  */
-export interface McpInstallState {
-  status: McpInstallStatus;
-  error?: string;
-  installedAt?: string; // ISO timestamp
+export interface McpEnableError {
+  type: McpEnableErrorType;
+  message: string;
+  command?: string;
+  runtimeName?: string;
+  downloadUrl?: string;
 }
 
 /**
@@ -459,7 +458,6 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     command: 'npx',
     args: ['@playwright/mcp@latest'],
     isBuiltin: true,
-    requiresInstall: false, // npx auto-installs
   },
 ];
 

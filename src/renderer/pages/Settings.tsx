@@ -15,9 +15,9 @@ import {
     type ProviderVerifyStatus,
     type McpServerDefinition,
     type McpServerType,
+    type McpEnableError,
     PRESET_MCP_SERVERS,
     MCP_DISCOVERY_LINKS,
-    type McpInstallState,
     isVerifyExpired,
     SUBSCRIPTION_PROVIDER_ID,
     PROXY_DEFAULTS,
@@ -29,8 +29,6 @@ import {
     toggleMcpServerEnabled,
     addCustomMcpServer,
     deleteCustomMcpServer,
-    getAllMcpInstallStatus,
-    setMcpInstallStatus,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { isDebugMode, getBuildVersions } from '@/utils/debug';
@@ -454,8 +452,14 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     // MCP state
     const [mcpServers, setMcpServersState] = useState<McpServerDefinition[]>([]);
     const [mcpEnabledIds, setMcpEnabledIds] = useState<string[]>([]);
-    const [mcpInstallStatus, setMcpInstallStatusState] = useState<Record<string, McpInstallState>>({});
+    const [mcpEnabling, setMcpEnabling] = useState<Record<string, boolean>>({}); // Loading state for enable toggle
     const [showMcpForm, setShowMcpForm] = useState(false);
+    // Dialog state for runtime not found
+    const [runtimeDialog, setRuntimeDialog] = useState<{
+        show: boolean;
+        runtimeName?: string;
+        downloadUrl?: string;
+    }>({ show: false });
     const [mcpForm, setMcpForm] = useState<{
         id: string;
         name: string;
@@ -488,10 +492,8 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             try {
                 const servers = await getAllMcpServers();
                 const enabledIds = await getEnabledMcpServerIds();
-                const installStatus = await getAllMcpInstallStatus();
                 setMcpServersState(servers);
                 setMcpEnabledIds(enabledIds);
-                setMcpInstallStatusState(installStatus);
             } catch (err) {
                 console.error('[Settings] Failed to load MCP config:', err);
             }
@@ -499,50 +501,9 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
         loadMcp();
     }, []);
 
-    // Install MCP package
-    const installMcp = async (server: McpServerDefinition): Promise<boolean> => {
-        if (!server.command) return false;
-
-        // Set installing status
-        setMcpInstallStatusState(prev => ({ ...prev, [server.id]: { status: 'installing' } }));
-        await setMcpInstallStatus(server.id, 'installing');
-
-        try {
-            const result = await apiPostJson<{ success: boolean; error?: string }>('/api/mcp/install', {
-                serverId: server.id,
-                command: server.command,
-                args: server.args,
-            });
-
-            if (result.success) {
-                setMcpInstallStatusState(prev => ({
-                    ...prev,
-                    [server.id]: { status: 'ready', installedAt: new Date().toISOString() }
-                }));
-                await setMcpInstallStatus(server.id, 'ready');
-                return true;
-            } else {
-                setMcpInstallStatusState(prev => ({
-                    ...prev,
-                    [server.id]: { status: 'error', error: result.error }
-                }));
-                await setMcpInstallStatus(server.id, 'error', result.error);
-                toast.error(`安装失败: ${result.error}`);
-                return false;
-            }
-        } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : '安装失败';
-            setMcpInstallStatusState(prev => ({
-                ...prev,
-                [server.id]: { status: 'error', error: errorMsg }
-            }));
-            await setMcpInstallStatus(server.id, 'error', errorMsg);
-            toast.error(errorMsg);
-            return false;
-        }
-    };
-
-    // Toggle MCP server enabled status - triggers install if enabling
+    // Toggle MCP server enabled status
+    // For preset MCP (npx): warmup bun cache
+    // For custom MCP: check if command exists
     const handleMcpToggle = async (server: McpServerDefinition, enabled: boolean) => {
         if (!enabled) {
             // Just disable
@@ -552,61 +513,40 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             return;
         }
 
-        // Always check if actually installed locally (don't trust persisted status)
-        setMcpInstallStatusState(prev => ({ ...prev, [server.id]: { status: 'installing' } }));
+        // Set loading state
+        setMcpEnabling(prev => ({ ...prev, [server.id]: true }));
 
         try {
-            // Check if package is actually installed locally
-            const checkResult = await apiPostJson<{ installed: boolean; version?: string }>('/api/mcp/check', {
-                serverId: server.id,
-                args: server.args,
-            });
+            // Call enable API to validate/warmup
+            const result = await apiPostJson<{
+                success: boolean;
+                error?: McpEnableError;
+            }>('/api/mcp/enable', { server });
 
-            if (checkResult.installed) {
-                // Already installed locally, just enable
-                setMcpInstallStatusState(prev => ({
-                    ...prev,
-                    [server.id]: { status: 'ready', installedAt: new Date().toISOString() }
-                }));
-                await setMcpInstallStatus(server.id, 'ready');
+            if (result.success) {
+                // Enable the MCP
                 await toggleMcpServerEnabled(server.id, true);
                 setMcpEnabledIds(prev => [...prev, server.id]);
-                toast.success(`MCP 已启用 (v${checkResult.version || 'unknown'})`);
-                return;
-            }
-
-            // Need to install - call install API
-            const installResult = await apiPostJson<{ success: boolean; error?: string }>('/api/mcp/install', {
-                serverId: server.id,
-                command: server.command,
-                args: server.args,
-            });
-
-            if (installResult.success) {
-                setMcpInstallStatusState(prev => ({
-                    ...prev,
-                    [server.id]: { status: 'ready', installedAt: new Date().toISOString() }
-                }));
-                await setMcpInstallStatus(server.id, 'ready');
-                await toggleMcpServerEnabled(server.id, true);
-                setMcpEnabledIds(prev => [...prev, server.id]);
-                toast.success('MCP 安装成功并已启用');
-            } else {
-                setMcpInstallStatusState(prev => ({
-                    ...prev,
-                    [server.id]: { status: 'error', error: installResult.error }
-                }));
-                await setMcpInstallStatus(server.id, 'error', installResult.error);
-                toast.error(`安装失败: ${installResult.error}`);
+                toast.success('MCP 已启用');
+            } else if (result.error) {
+                // Handle different error types
+                if (result.error.type === 'command_not_found' && result.error.downloadUrl) {
+                    // Show dialog for runtime not found
+                    setRuntimeDialog({
+                        show: true,
+                        runtimeName: result.error.runtimeName,
+                        downloadUrl: result.error.downloadUrl,
+                    });
+                } else {
+                    // Show toast for other errors
+                    toast.error(result.error.message || '启用失败');
+                }
             }
         } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : '操作失败';
-            setMcpInstallStatusState(prev => ({
-                ...prev,
-                [server.id]: { status: 'error', error: errorMsg }
-            }));
-            await setMcpInstallStatus(server.id, 'error', errorMsg);
+            const errorMsg = err instanceof Error ? err.message : '启用失败';
             toast.error(errorMsg);
+        } finally {
+            setMcpEnabling(prev => ({ ...prev, [server.id]: false }));
         }
     };
 
@@ -646,12 +586,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             // Track mcp_add event
             track('mcp_add', { type: mcpForm.type });
 
-            if (mcpForm.type === 'stdio') {
-                toast.success('MCP 服务器已添加，开始安装...');
-                await installMcp(newServer);
-            } else {
-                toast.success('MCP 服务器已添加');
-            }
+            toast.success('MCP 服务器已添加');
         } catch (err) {
             toast.error('添加失败');
         }
@@ -1708,10 +1643,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             <div className="space-y-3">
                                 {mcpServers.map((server) => {
                                     const isEnabled = mcpEnabledIds.includes(server.id);
-                                    const installState = mcpInstallStatus[server.id];
-                                    const isInstalling = installState?.status === 'installing';
-                                    const isReady = installState?.status === 'ready';
-                                    const hasError = installState?.status === 'error';
+                                    const isEnabling = mcpEnabling[server.id] ?? false;
                                     return (
                                         <div
                                             key={server.id}
@@ -1728,17 +1660,8 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                             </span>
                                                         )}
                                                         {/* Status indicator */}
-                                                        {isInstalling && (
+                                                        {isEnabling && (
                                                             <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--info)]" />
-                                                        )}
-                                                        {isReady && (
-                                                            <span className="h-2 w-2 rounded-full bg-[var(--success)]" title="已安装" />
-                                                        )}
-                                                        {hasError && (
-                                                            <span
-                                                                className="h-2 w-2 rounded-full bg-[var(--error)]"
-                                                                title={installState?.error || '安装失败'}
-                                                            />
                                                         )}
                                                     </div>
                                                     {server.description && (
@@ -1749,11 +1672,6 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                     <p className="mt-2 font-mono text-[10px] text-[var(--ink-muted)]">
                                                         {server.command} {server.args?.join(' ')}
                                                     </p>
-                                                    {hasError && installState?.error && (
-                                                        <p className="mt-1 text-xs text-[var(--error)]">
-                                                            {installState.error}
-                                                        </p>
-                                                    )}
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     {!server.isBuiltin && (
@@ -1767,14 +1685,14 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                     )}
                                                     <button
                                                         onClick={() => handleMcpToggle(server, !isEnabled)}
-                                                        disabled={isInstalling}
-                                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${isInstalling
+                                                        disabled={isEnabling}
+                                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${isEnabling
                                                             ? 'bg-[var(--info)]/60 cursor-wait'
                                                             : isEnabled
                                                                 ? 'bg-[var(--success)]'
                                                                 : 'bg-[var(--paper-inset)]'
                                                             }`}
-                                                        title={isInstalling ? '安装中...' : isEnabled ? '已启用' : '点击启用并安装'}
+                                                        title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
                                                     >
                                                         <span
                                                             className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--paper-elevated)] shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
@@ -2511,6 +2429,40 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             >
                                 删除
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Runtime not found dialog */}
+            {runtimeDialog.show && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                    <div className="w-[400px] rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
+                        <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
+                                <AlertCircle className="h-5 w-5 text-[var(--warning)]" />
+                            </div>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">缺少运行环境</h3>
+                        </div>
+                        <p className="mt-4 text-sm text-[var(--ink-muted)]">
+                            此 MCP 服务依赖 <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> 运行，请先安装后再启用。
+                        </p>
+                        <div className="mt-6 flex gap-3">
+                            <button
+                                onClick={() => setRuntimeDialog({ show: false })}
+                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            >
+                                取消
+                            </button>
+                            <div onClick={() => setRuntimeDialog({ show: false })} className="flex-1">
+                                <ExternalLink
+                                    href={runtimeDialog.downloadUrl || '#'}
+                                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:brightness-110"
+                                >
+                                    去官网下载
+                                    <ExternalLinkIcon className="h-3.5 w-3.5" />
+                                </ExternalLink>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -372,80 +372,13 @@ function buildSettingSources(): ('user' | 'project')[] {
 }
 
 /**
- * Load proxy settings from config.json
- * Returns proxy URL or null if not configured
- */
-function loadProxyUrl(): string | null {
-  const { existsSync, readFileSync } = require('fs');
-  const { join } = require('path');
-
-  try {
-    const configPath = join(getMyAgentsUserDir(), 'config.json');
-    if (!existsSync(configPath)) {
-      return null;
-    }
-
-    const content = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(content);
-    const proxySettings = config.proxySettings;
-
-    if (!proxySettings?.enabled || !proxySettings.host || !proxySettings.port) {
-      return null;
-    }
-
-    const protocol = proxySettings.protocol || 'http';
-    return `${protocol}://${proxySettings.host}:${proxySettings.port}`;
-  } catch (e) {
-    console.warn('[agent] Failed to load proxy settings:', e);
-    return null;
-  }
-}
-
-/**
- * Build proxy environment variables for MCP servers
- *
- * IMPORTANT: Playwright MCP needs special handling!
- * - HTTP_PROXY/HTTPS_PROXY affect the MCP process itself, including WebSocket to Chrome
- * - This causes timeout when connecting to local Chrome DevTools through proxy
- * - For Playwright: Only set PLAYWRIGHT_MCP_PROXY_SERVER (affects browser, not MCP process)
- * - For other MCP: Set standard proxy variables
- */
-function loadProxyEnvVars(mcpId?: string): Record<string, string> {
-  const proxyUrl = loadProxyUrl();
-  if (!proxyUrl) {
-    return {};
-  }
-
-  console.log(`[agent] Proxy enabled: ${proxyUrl}`);
-
-  // Playwright MCP: Only set browser proxy, NOT process proxy
-  // This prevents WebSocket connection to Chrome from going through proxy
-  if (mcpId === 'playwright') {
-    console.log(`[agent] Playwright MCP: Using PLAYWRIGHT_MCP_PROXY_SERVER only`);
-    return {
-      PLAYWRIGHT_MCP_PROXY_SERVER: proxyUrl,
-    };
-  }
-
-  // Other MCP servers: Set standard proxy environment variables
-  const noProxy = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
-  return {
-    HTTP_PROXY: proxyUrl,
-    HTTPS_PROXY: proxyUrl,
-    http_proxy: proxyUrl,
-    https_proxy: proxyUrl,
-    NO_PROXY: noProxy,
-    no_proxy: noProxy,
-  };
-}
-
-/**
  * Convert McpServerDefinition to SDK mcpServers format
  *
  * Execution strategy:
  * - For npx commands: Uses bundled bun (bun x), fallback to npx if bun unavailable
  * - For other commands: Uses user-specified command directly (node/python etc.)
- * - Injects proxy environment variables from app config
+ * - Does NOT inject proxy env vars (follows Claude Code's approach)
+ *   Child process inherits environment naturally from shell
  *
  * This approach:
  * - Zero external dependencies: bundled bun ensures MCP works without Node.js

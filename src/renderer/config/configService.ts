@@ -16,8 +16,6 @@ import {
     type Project,
     type Provider,
     PRESET_PROVIDERS,
-    type McpInstallStatus,
-    type McpInstallState,
 } from './types';
 import {
     isBrowserDevMode,
@@ -296,40 +294,6 @@ export async function getEffectiveMcpServers(projectId: string): Promise<McpServ
     );
 }
 
-/**
- * Get MCP installation status for a server
- */
-export async function getMcpInstallStatus(serverId: string): Promise<McpInstallState> {
-    const config = await loadAppConfig();
-    return config.mcpInstallStatus?.[serverId] ?? { status: 'idle' };
-}
-
-/**
- * Set MCP installation status for a server
- */
-export async function setMcpInstallStatus(
-    serverId: string,
-    status: McpInstallStatus,
-    error?: string
-): Promise<void> {
-    const config = await loadAppConfig();
-    const mcpInstallStatus = { ...(config.mcpInstallStatus ?? {}) };
-    mcpInstallStatus[serverId] = {
-        status,
-        error,
-        installedAt: status === 'ready' ? new Date().toISOString() : undefined,
-    };
-    await saveAppConfig({ ...config, mcpInstallStatus });
-    console.log('[configService] MCP install status updated:', serverId, status);
-}
-
-/**
- * Get all MCP installation statuses
- */
-export async function getAllMcpInstallStatus(): Promise<Record<string, McpInstallState>> {
-    const config = await loadAppConfig();
-    return config.mcpInstallStatus ?? {};
-}
 
 // Helper to sort projects by lastOpened (most recent first)
 function sortProjectsByLastOpened(projects: Project[]): Project[] {
