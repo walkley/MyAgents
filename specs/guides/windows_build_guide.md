@@ -75,6 +75,16 @@ myagents-releases/
 3. 安装前端依赖 (`bun install`)
 4. 检查 Rust 依赖
 
+### Git 安装包（构建必需）
+
+NSIS 安装程序会内置 Git for Windows，需要手动放置安装包：
+
+1. 下载 Git for Windows：https://git-scm.com/downloads/win
+2. 将安装包重命名为 `Git-Installer.exe`
+3. 放置到 `src-tauri/nsis/Git-Installer.exe`
+
+> **注意**：此文件已加入 `.gitignore`，不会提交到仓库
+
 ---
 
 ## 构建流程

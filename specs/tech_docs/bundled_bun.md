@@ -204,9 +204,14 @@ DEBUG=1 open MyAgents.app
 **根因**：Claude Agent SDK 在 Windows 上需要 Git Bash 来执行 shell 命令。
 
 **解决方案**：
-- **自动安装**：NSIS 安装程序会自动检测并安装 Git for Windows
+- **自动安装**：NSIS 安装程序内置 Git for Windows，自动检测并安装
 - **手动安装**：https://git-scm.com/downloads/win
 - **环境变量**：若 Git 已安装但不在 PATH，设置 `CLAUDE_CODE_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe`
+
+**构建说明**：
+- Git 安装包需放置在 `src-tauri/nsis/Git-Installer.exe`
+- 下载地址：https://git-scm.com/downloads/win
+- 当前版本：Git for Windows 2.52.0
 
 **诊断方法**：
 1. 查看日志中的 `[sdk-stderr]` 输出

@@ -639,50 +639,32 @@ Section GitForWindows
       ; Git not found, need to install
       ; Skip if in update mode (Git should already be installed)
       ${If} $UpdateMode <> 1
-        ; Download Git for Windows installer using PowerShell
-        ; NSISdl doesn't handle GitHub's HTTPS redirects well, so we use PowerShell instead
-        ; Using stable version 2.52.0
+        ; Extract bundled Git installer to temp directory
+        ; Git installer is bundled in the NSIS installer (no network required)
+        ; To update Git version: replace nsis/Git-Installer.exe and update setup_windows.ps1
+        ; Current version: Git for Windows 2.52.0
         Delete "$TEMP\Git-Installer.exe"
-        DetailPrint "$(gitDownloading)"
-        ; Use PowerShell to download - handles HTTPS and redirects properly
-        ; Note: To update Git version, change the URL below (current: v2.52.0)
-        ; Download URL format: https://github.com/git-for-windows/git/releases/download/v{VERSION}.windows.1/Git-{VERSION}-64-bit.exe
-        nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ''https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe'' -OutFile (Join-Path $env:TEMP ''Git-Installer.exe'') -UseBasicParsing -TimeoutSec 300 }"'
-        Pop $0
-        ; Check if download succeeded (file exists and has content)
-        IfFileExists "$TEMP\Git-Installer.exe" 0 git_download_failed
-        FileOpen $2 "$TEMP\Git-Installer.exe" r
-        FileSeek $2 0 END $3
-        FileClose $2
-        ${If} $3 > 1000000
-          ; File is larger than 1MB, likely successful (Git installer is ~65MB)
-          DetailPrint "$(gitDownloadSuccess)"
+        DetailPrint "$(gitInstalling)"
+        File "/oname=$TEMP\Git-Installer.exe" "Git-Installer.exe"
 
-          ; Install Git silently
-          DetailPrint "$(gitInstalling)"
-          ; /VERYSILENT - No user interaction
-          ; /NORESTART - Don't restart
-          ; /NOCANCEL - No cancel button
-          ; /SP- - Don't show "This will install..." dialog
-          ; /CLOSEAPPLICATIONS - Close apps using files
-          ; /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh" - Include useful components
-          ExecWait '"$TEMP\Git-Installer.exe" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh"' $1
-          Delete "$TEMP\Git-Installer.exe"
-          ${If} $1 = 0
-            DetailPrint "$(gitInstallSuccess)"
-          ${Else}
-            DetailPrint "$(gitInstallError)"
-            ; Don't abort - user can install Git manually later
-            MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
-          ${EndIf}
+        ; Install Git silently
+        ; /VERYSILENT - No user interaction
+        ; /NORESTART - Don't restart
+        ; /NOCANCEL - No cancel button
+        ; /SP- - Don't show "This will install..." dialog
+        ; /CLOSEAPPLICATIONS - Close apps using files
+        ; /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh" - Include useful components
+        ExecWait '"$TEMP\Git-Installer.exe" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh"' $1
+        Delete "$TEMP\Git-Installer.exe"
+        ${If} $1 = 0
+          DetailPrint "$(gitInstallSuccess)"
         ${Else}
-          git_download_failed:
-          DetailPrint "$(gitDownloadError)"
-          Delete "$TEMP\Git-Installer.exe"
+          DetailPrint "$(gitInstallError)"
           ; Don't abort - user can install Git manually later
           MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
         ${EndIf}
       ${EndIf}
+      Goto git_done
   ${Else}
     ; Git found in registry
     Goto git_done
