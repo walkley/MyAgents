@@ -146,7 +146,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
       {showRawResult && (
         <div className="space-y-2">
           <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Tool Output</div>
-          <div className="rounded-lg bg-[var(--paper-contrast)] p-3 font-mono text-xs text-[var(--ink-secondary)] overflow-x-auto border border-[var(--line-subtle)]">
+          <div className="rounded-lg bg-[var(--paper-contrast)] p-3 font-mono text-xs text-[var(--ink-secondary)] overflow-x-auto border border-[var(--line-subtle)] select-text">
             {tool.result}
           </div>
         </div>

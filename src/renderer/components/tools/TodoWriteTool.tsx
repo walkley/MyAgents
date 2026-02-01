@@ -56,7 +56,7 @@ export default function TodoWriteTool({ tool }: TodoWriteToolProps) {
 
               {/* Content */}
               <span
-                className={`flex-1 text-sm leading-relaxed ${isCompleted
+                className={`flex-1 text-sm leading-relaxed select-text ${isCompleted
                     ? 'text-[var(--ink-muted)] line-through'
                     : isInProgress
                       ? 'text-[var(--accent)] font-medium'

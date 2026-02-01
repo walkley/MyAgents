@@ -750,3 +750,35 @@ pre code {
   background: var(--info-bg);
   color: var(--info);
 }
+
+/* ============================================
+   Text Selection Isolation
+   ============================================ */
+
+/*
+ * Problem: Double-clicking text in chat messages causes selection to bleed
+ * into surrounding UI elements (buttons, labels, etc.)
+ *
+ * Solution: Use CSS user-select to create selection boundaries:
+ * - Containers/buttons: user-select: none (prevents selection spread)
+ * - Text content: user-select: text (allows normal selection)
+ *
+ * CSS inheritance: Children inherit user-select from parents, so we only
+ * need to set boundaries at the right levels.
+ */
+
+/* Pre-formatted text blocks are always selectable */
+pre {
+  user-select: text;
+}
+
+/* Code elements (inline and block) are selectable */
+code {
+  user-select: text;
+}
+
+/* Markdown rendered content is selectable */
+.prose,
+.prose * {
+  user-select: text;
+}

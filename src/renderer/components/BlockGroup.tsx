@@ -17,7 +17,7 @@ export default function BlockGroup({
   if (blocks.length === 0) return null;
 
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/30 transition-all">
+    <div className="my-3 overflow-hidden rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/30 transition-all select-none">
       <div className="flex flex-col divide-y divide-[var(--line-subtle)]">
         {blocks.map((block, index) => (
           <ProcessRow

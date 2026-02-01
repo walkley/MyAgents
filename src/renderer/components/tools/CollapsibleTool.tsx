@@ -17,7 +17,7 @@ export function CollapsibleTool({
   const hasExpandedContent = expandedContent !== null && expandedContent !== undefined;
 
   return (
-    <div className="my-0.5">
+    <div className="my-0.5 select-none">
       <button
         type="button"
         onClick={() => hasExpandedContent && setIsExpanded(!isExpanded)}
@@ -39,7 +39,7 @@ export function CollapsibleTool({
         )}
       </button>
       {isExpanded && hasExpandedContent && (
-        <div className="collapsible-tool-expanded mt-1 ml-3 border-l border-[var(--line-subtle)] pl-2.5">
+        <div className="collapsible-tool-expanded mt-1 ml-3 border-l border-[var(--line-subtle)] pl-2.5 select-text">
           <div className="space-y-1.5">{expandedContent}</div>
         </div>
       )}

@@ -163,7 +163,7 @@ export default function ProcessRow({
     }
 
     return (
-        <div className={`group ${index < totalBlocks - 1 ? 'border-b border-[var(--line-subtle)]' : ''}`}>
+        <div className={`group select-none ${index < totalBlocks - 1 ? 'border-b border-[var(--line-subtle)]' : ''}`}>
             <button
                 type="button"
                 onClick={handleToggle}
@@ -229,12 +229,12 @@ export default function ProcessRow({
                         <div className="border-t border-[var(--line)] bg-[var(--paper-elevated)]/50 px-4 pb-4 pt-3">
                             <div className="ml-7">
                                 {isThinking && block.thinking && (
-                                    <div className="text-[var(--ink-secondary)]">
+                                    <div className="text-[var(--ink-secondary)] select-text">
                                         <Markdown compact>{block.thinking}</Markdown>
                                     </div>
                                 )}
                                 {isTool && block.tool && (
-                                    <div className="w-full overflow-hidden">
+                                    <div className="w-full overflow-hidden select-text">
                                         <ToolUse tool={block.tool} />
                                     </div>
                                 )}

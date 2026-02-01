@@ -92,10 +92,10 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     if (parsed.isLocalCommand) {
       const formattedContent = formatLocalCommandOutput(parsed.content);
       return (
-        <div className="flex justify-start w-full px-4 py-2">
+        <div className="flex justify-start w-full px-4 py-2 select-none">
           <div className="w-full max-w-none rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)]/50 p-4">
             <div className="text-xs font-medium text-[var(--ink-muted)] mb-2">系统信息</div>
-            <div className="text-sm text-[var(--ink)]">
+            <div className="text-sm text-[var(--ink)] select-text">
               <Markdown>{formattedContent}</Markdown>
             </div>
           </div>
@@ -106,8 +106,8 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     const hasText = userContent.trim().length > 0;
 
     return (
-      <div className="flex justify-end px-1" data-role="user" data-message-id={message.id}>
-        <article className="relative max-w-[min(34rem,calc(100%-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)]">
+      <div className="flex justify-end px-1 select-none" data-role="user" data-message-id={message.id}>
+        <article className="relative max-w-[min(34rem,calc(100%-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
           {/* Images first (above text) - compact mode for 5 per row */}
           {hasAttachments && (
             <div className={hasText ? 'mb-2' : ''}>
@@ -132,8 +132,8 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
   // Assistant message
   if (typeof message.content === 'string') {
     return (
-      <div className="flex justify-start w-full px-4 py-2">
-        <div className="w-full max-w-none text-[var(--ink)]">
+      <div className="flex justify-start w-full px-4 py-2 select-none">
+        <div className="w-full max-w-none text-[var(--ink)] select-text">
           <Markdown>{message.content}</Markdown>
         </div>
       </div>
@@ -184,7 +184,7 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
   const isStreaming = isLoading && hasIncompleteBlocks;
 
   return (
-    <div className="flex justify-start">
+    <div className="flex justify-start select-none">
       <article className="w-full px-3 py-2">
         <div className="space-y-3">
           {groupedBlocks.map((item, index) => {
@@ -194,9 +194,9 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
                 return (
                   <div
                     key={index}
-                    className="flex justify-start w-full px-1 py-1"
+                    className="flex justify-start w-full px-1 py-1 select-none"
                   >
-                    <div className="w-full max-w-none text-[var(--ink)]">
+                    <div className="w-full max-w-none text-[var(--ink)] select-text">
                       <Markdown>{item.text}</Markdown>
                     </div>
                   </div>
