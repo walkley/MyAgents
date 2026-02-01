@@ -219,11 +219,12 @@ export default function FilePreviewModal({
         }
 
         // Preview mode: Markdown renders as HTML
+        // Use raw mode to skip streaming preprocessing (which can break valid markdown)
         if (isMarkdown) {
             return (
                 <div className="h-full overflow-auto p-6 bg-[var(--paper-reading)]">
                     <div className="prose prose-stone max-w-none dark:prose-invert">
-                        <Markdown>{previewContent}</Markdown>
+                        <Markdown raw>{previewContent}</Markdown>
                     </div>
                 </div>
             );
