@@ -4,7 +4,7 @@
  * Uses Tab-scoped API when in Tab context (WorkspaceConfigPanel),
  * falls back to global API when not in Tab context (GlobalSkillsPanel in Settings).
  */
-import { Plus, Sparkles, Terminal, ChevronRight, Loader2 } from 'lucide-react';
+import { Plus, Sparkles, Terminal, Loader2, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiDelete as globalApiDelete } from '@/api/apiFetch';
@@ -66,12 +66,13 @@ export default function SkillsCommandsList({
     const [deleting, setDeleting] = useState(false);
 
     // Load skills and commands
+    // When scope is 'project', only load project-level data (user-level shown in Settings)
     const loadData = useCallback(async () => {
         setLoading(true);
         try {
             const [skillsRes, commandsRes] = await Promise.all([
-                api.get<{ success: boolean; skills: SkillItem[] }>(`/api/skills?scope=${scope === 'user' ? 'user' : 'all'}`),
-                api.get<{ success: boolean; commands: CommandItem[] }>(`/api/command-items?scope=${scope === 'user' ? 'user' : 'all'}`)
+                api.get<{ success: boolean; skills: SkillItem[] }>(`/api/skills?scope=${scope}`),
+                api.get<{ success: boolean; commands: CommandItem[] }>(`/api/command-items?scope=${scope}`)
             ]);
 
             if (skillsRes.success) {
@@ -241,6 +242,13 @@ export default function SkillsCommandsList({
         }
     }, [deleteTarget, loadData, api]);
 
+    // Open Settings tab with Skills section
+    const handleOpenUserSkills = useCallback(() => {
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+            detail: { section: 'skills' }
+        }));
+    }, []);
+
     if (loading) {
         return (
             <div className="flex h-full items-center justify-center">
@@ -249,10 +257,10 @@ export default function SkillsCommandsList({
         );
     }
 
-    const projectSkills = skills.filter(s => s.scope === 'project');
-    const userSkills = skills.filter(s => s.scope === 'user');
-    const projectCommands = commands.filter(c => c.scope === 'project');
-    const userCommands = commands.filter(c => c.scope === 'user');
+    // When scope is 'project', skills/commands already only contain project-level items
+    // When scope is 'user', they only contain user-level items
+    const displaySkills = skills;
+    const displayCommands = commands;
 
     return (
         <div className="h-full overflow-auto p-6">
@@ -261,9 +269,11 @@ export default function SkillsCommandsList({
                 <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Sparkles className="h-5 w-5 text-[var(--ink-muted)]" />
-                        <h3 className="text-base font-semibold text-[var(--ink)]">技能 Skills</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">
+                            {scope === 'project' ? '项目技能' : '技能 Skills'}
+                        </h3>
                         <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {skills.length}
+                            {displaySkills.length}
                         </span>
                     </div>
                     <button
@@ -276,46 +286,35 @@ export default function SkillsCommandsList({
                     </button>
                 </div>
 
-                {/* Project Skills */}
-                {scope === 'project' && projectSkills.length > 0 && (
-                    <div className="mb-6">
-                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
-                        <div className="grid grid-cols-2 gap-3">
-                            {projectSkills.map(skill => (
-                                <SkillCard
-                                    key={`${skill.scope}-${skill.folderName}`}
-                                    skill={skill}
-                                    onClick={() => onSelectSkill(skill.folderName, skill.scope)}
-                                />
-                            ))}
-                        </div>
+                {/* Skills List */}
+                {displaySkills.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-3">
+                        {displaySkills.map(skill => (
+                            <SkillCard
+                                key={`${skill.scope}-${skill.folderName}`}
+                                skill={skill}
+                                onClick={() => onSelectSkill(skill.folderName, skill.scope)}
+                            />
+                        ))}
                     </div>
-                )}
-
-                {/* User Skills */}
-                {userSkills.length > 0 && (
-                    <div>
-                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
-                            {scope === 'project' ? '用户级 (全局)' : '用户技能'}
-                        </h4>
-                        <div className="grid grid-cols-2 gap-3">
-                            {userSkills.map(skill => (
-                                <SkillCard
-                                    key={`${skill.scope}-${skill.folderName}`}
-                                    skill={skill}
-                                    onClick={() => onSelectSkill(skill.folderName, skill.scope)}
-                                />
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                {skills.length === 0 && (
+                ) : (
                     <EmptyState
                         icon={<Sparkles className="h-12 w-12" />}
-                        title="还没有技能"
+                        title={scope === 'project' ? '还没有项目技能' : '还没有技能'}
                         description="创建你的第一个技能来扩展 Claude 的能力"
                     />
+                )}
+
+                {/* Link to user skills (only in project scope) */}
+                {scope === 'project' && (
+                    <button
+                        type="button"
+                        onClick={handleOpenUserSkills}
+                        className="mt-4 flex w-full items-center justify-center gap-1.5 py-2 text-sm text-[var(--ink-muted)] transition-colors hover:text-[var(--accent)]"
+                    >
+                        <span>查看用户技能</span>
+                        <ExternalLink className="h-3.5 w-3.5" />
+                    </button>
                 )}
             </div>
 
@@ -324,9 +323,11 @@ export default function SkillsCommandsList({
                 <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Terminal className="h-5 w-5 text-[var(--ink-muted)]" />
-                        <h3 className="text-base font-semibold text-[var(--ink)]">指令 Commands</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">
+                            {scope === 'project' ? '项目指令' : '指令 Commands'}
+                        </h3>
                         <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {commands.length}
+                            {displayCommands.length}
                         </span>
                     </div>
                     <button
@@ -339,46 +340,35 @@ export default function SkillsCommandsList({
                     </button>
                 </div>
 
-                {/* Project Commands */}
-                {scope === 'project' && projectCommands.length > 0 && (
-                    <div className="mb-6">
-                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">项目级</h4>
-                        <div className="grid grid-cols-2 gap-3">
-                            {projectCommands.map(cmd => (
-                                <CommandCard
-                                    key={`${cmd.scope}-${cmd.fileName}`}
-                                    command={cmd}
-                                    onClick={() => onSelectCommand(cmd.fileName, cmd.scope)}
-                                />
-                            ))}
-                        </div>
+                {/* Commands List */}
+                {displayCommands.length > 0 ? (
+                    <div className="grid grid-cols-2 gap-3">
+                        {displayCommands.map(cmd => (
+                            <CommandCard
+                                key={`${cmd.scope}-${cmd.fileName}`}
+                                command={cmd}
+                                onClick={() => onSelectCommand(cmd.fileName, cmd.scope)}
+                            />
+                        ))}
                     </div>
-                )}
-
-                {/* User Commands */}
-                {userCommands.length > 0 && (
-                    <div>
-                        <h4 className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">
-                            {scope === 'project' ? '用户级 (全局)' : '用户指令'}
-                        </h4>
-                        <div className="grid grid-cols-2 gap-3">
-                            {userCommands.map(cmd => (
-                                <CommandCard
-                                    key={`${cmd.scope}-${cmd.fileName}`}
-                                    command={cmd}
-                                    onClick={() => onSelectCommand(cmd.fileName, cmd.scope)}
-                                />
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                {commands.length === 0 && (
+                ) : (
                     <EmptyState
                         icon={<Terminal className="h-12 w-12" />}
-                        title="还没有指令"
+                        title={scope === 'project' ? '还没有项目指令' : '还没有指令'}
                         description="创建你的第一个指令来定义工作流"
                     />
+                )}
+
+                {/* Link to user commands (only in project scope) */}
+                {scope === 'project' && (
+                    <button
+                        type="button"
+                        onClick={handleOpenUserSkills}
+                        className="mt-4 flex w-full items-center justify-center gap-1.5 py-2 text-sm text-[var(--ink-muted)] transition-colors hover:text-[var(--accent)]"
+                    >
+                        <span>查看用户指令</span>
+                        <ExternalLink className="h-3.5 w-3.5" />
+                    </button>
                 )}
             </div>
 
