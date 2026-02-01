@@ -246,6 +246,30 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 
 ---
 
+## ⚠️ Windows 10 兼容性
+
+### 最低支持版本
+
+**官方支持**：Windows 10 1809+（Build 17763）
+
+**已知问题**：Windows 10 1909 等旧版本可能出现 `Claude Code process exited with code 1` 错误。
+
+### 排查步骤
+
+1. **确认 Windows 版本**：`winver` 查看版本号
+2. **检查日志**：查找 `[sdk-stderr]` 和 `[agent] Windows subprocess failure` 相关日志
+3. **尝试降级 Bun**：先试 1.2.15，若仍有问题再降到 1.1.43
+
+### 建议
+
+- **开发测试**：在 Windows 10 22H2 或 Windows 11 上测试
+- **最终用户**：建议升级到 Windows 10 22H2+ 或 Windows 11
+- **Bun 版本**：首选 1.2.15，备选 1.1.43
+
+**详见**：[bundled_bun.md](./bundled_bun.md) 中的 Windows 兼容性说明
+
+---
+
 ## 📚 相关文档
 
 - [Windows 构建指南](../guides/windows_build_guide.md)

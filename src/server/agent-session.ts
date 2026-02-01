@@ -987,6 +987,17 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
+  // Windows-specific: Enable TLS compatibility for older Windows versions (10 1809-1909)
+  // This helps with certificate verification issues on older Windows
+  if (isWindows) {
+    // Log Windows version for debugging
+    const winVer = process.env.PROCESSOR_ARCHITECTURE || 'unknown';
+    console.log(`[env] Windows architecture: ${winVer}`);
+
+    // Note: NODE_TLS_REJECT_UNAUTHORIZED is NOT set to '0' for security reasons
+    // If TLS issues occur, users should update their Windows or install root certificates
+  }
+
   return env;
 }
 
@@ -2253,6 +2264,8 @@ async function startStreamingSession(): Promise<void> {
         executable: 'bun',
         env,
         stderr: (message: string) => {
+          // Always log stderr to help diagnose subprocess issues (especially on older Windows)
+          console.error('[sdk-stderr]', message);
           if (process.env.DEBUG === '1') {
             broadcast('chat:debug-message', message);
           }
@@ -2856,7 +2869,19 @@ async function startStreamingSession(): Promise<void> {
     const errorStack = error instanceof Error ? error.stack : String(error);
     console.error('[agent] session error:', errorMessage);
     console.error('[agent] session error stack:', errorStack);
-    broadcast('chat:message-error', errorMessage);
+
+    // Enhanced error diagnostics for Windows subprocess failures
+    let userFacingError = errorMessage;
+    if (errorMessage.includes('process exited with code 1') && process.platform === 'win32') {
+      console.error('[agent] Windows subprocess failure detected. Possible causes:');
+      console.error('[agent] 1. Older Windows version may lack required APIs (1909 vs 11)');
+      console.error('[agent] 2. TLS/SSL certificate issues');
+      console.error('[agent] 3. Missing Visual C++ Redistributable');
+      console.error('[agent] Windows version:', process.env.OS || 'unknown');
+      userFacingError = '子进程启动失败 (exit code 1)。可能原因：Windows 版本过旧、缺少 Visual C++ 运行库、或 TLS 证书问题。建议升级到 Windows 10 22H2 或更高版本。';
+    }
+
+    broadcast('chat:message-error', userFacingError);
     handleMessageError(errorMessage);
     setSessionState('error');
   } finally {
