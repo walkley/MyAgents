@@ -457,7 +457,8 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     description: '浏览器自动化能力，支持网页浏览、截图、表单填写等',
     type: 'stdio',
     command: 'npx',
-    args: ['@playwright/mcp@latest'],
+    // Use --isolated to avoid conflicts with existing Chrome browser sessions
+    args: ['@playwright/mcp@latest', '--isolated'],
     isBuiltin: true,
     requiresInstall: false, // npx auto-installs
   },

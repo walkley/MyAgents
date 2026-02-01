@@ -212,7 +212,9 @@ const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     description: '浏览器自动化能力，支持网页浏览、截图、表单填写等',
     type: 'stdio',
     command: 'npx',
-    args: ['@playwright/mcp@latest'],
+    // Use --isolated to avoid conflicts with existing Chrome browser sessions
+    // Each session will use a fresh profile in memory
+    args: ['@playwright/mcp@latest', '--isolated'],
     env: {},
     isBuiltin: true,
   },
@@ -370,6 +372,50 @@ function buildSettingSources(): ('user' | 'project')[] {
 }
 
 /**
+ * Load proxy settings from config.json and return as environment variables
+ * Returns HTTP_PROXY, HTTPS_PROXY, and lowercase variants for maximum compatibility
+ */
+function loadProxyEnvVars(): Record<string, string> {
+  const { existsSync, readFileSync } = require('fs');
+  const { join } = require('path');
+
+  try {
+    const configPath = join(getMyAgentsUserDir(), 'config.json');
+    if (!existsSync(configPath)) {
+      return {};
+    }
+
+    const content = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(content);
+    const proxySettings = config.proxySettings;
+
+    // Check if proxy is enabled and has valid configuration
+    if (!proxySettings?.enabled || !proxySettings.host || !proxySettings.port) {
+      return {};
+    }
+
+    const protocol = proxySettings.protocol || 'http';
+    const proxyUrl = `${protocol}://${proxySettings.host}:${proxySettings.port}`;
+
+    console.log(`[agent] Proxy enabled: ${proxyUrl}`);
+
+    // Set both uppercase and lowercase for maximum compatibility
+    // Some tools check HTTP_PROXY, others check http_proxy
+    // PLAYWRIGHT_MCP_PROXY_SERVER is specific to @playwright/mcp for browser proxy
+    return {
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      PLAYWRIGHT_MCP_PROXY_SERVER: proxyUrl,
+    };
+  } catch (e) {
+    console.warn('[agent] Failed to load proxy settings:', e);
+    return {};
+  }
+}
+
+/**
  * Convert McpServerDefinition to SDK mcpServers format
  * Now runs MCP from local install directory (~/.myagents/mcp/<serverId>/)
  * If not installed locally, falls back to npx (but this may cause stdout pollution)
@@ -396,6 +442,9 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
   const { existsSync, readFileSync } = require('fs');
   const { join } = require('path');
   const mcpBaseDir = join(getMyAgentsUserDir(), 'mcp');
+
+  // Load proxy environment variables once for all MCP servers
+  const proxyEnvVars = loadProxyEnvVars();
 
   const result: Record<string, SdkMcpServerConfig> = {};
 
@@ -436,12 +485,15 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
           if (entryPoint && existsSync(entryPoint)) {
             // Use shared utility to get bundled bun or fallback runtime
             const runtimePath = getBundledRuntimePath();
-            console.log(`[agent] MCP ${server.id}: Using local install at ${entryPoint} with runtime ${runtimePath}`);
+            // Extract extra CLI arguments (skip the first arg which is the package name)
+            // e.g., ['@playwright/mcp@latest', '--browser', 'chromium'] -> ['--browser', 'chromium']
+            const extraArgs = args.slice(1);
+            console.log(`[agent] MCP ${server.id}: Using local install at ${entryPoint} with runtime ${runtimePath}${extraArgs.length > 0 ? `, extra args: ${extraArgs.join(' ')}` : ''}`);
 
             result[server.id] = {
               command: runtimePath,
-              args: [entryPoint],
-              env: buildCrossPlatformEnv(server.env),
+              args: [entryPoint, ...extraArgs],
+              env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
             };
             continue;
           }
@@ -461,7 +513,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
         result[server.id] = {
           command: runtimePath,
           args: ['x', ...args],
-          env: buildCrossPlatformEnv(server.env),
+          env: buildCrossPlatformEnv({ ...proxyEnvVars, ...server.env }),
         };
       } else {
         // Node fallback - try npx but may fail if not installed
@@ -471,6 +523,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
           command: 'npx',
           args: argsWithY,
           env: buildCrossPlatformEnv({
+            ...proxyEnvVars,
             npm_config_loglevel: 'error',
             npm_config_update_notifier: 'false',
             ...server.env,
