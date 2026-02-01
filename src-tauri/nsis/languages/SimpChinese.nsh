@@ -3,9 +3,9 @@
 
 LangString addOrReinstall ${LANG_SIMPCHINESE} "覆盖升级"
 LangString alreadyInstalled ${LANG_SIMPCHINESE} "检测到已安装"
-LangString alreadyInstalledLong ${LANG_SIMPCHINESE} "检测到您已安装了 MyAgents $R0 版本，当前正在安装 MyAgents ${VERSION} 版本。$\n$\n您可以直接下一步进行覆盖升级。"
+LangString alreadyInstalledLong ${LANG_SIMPCHINESE} "检测到您已安装了 MyAgents $R0 版本，当前正在安装 MyAgents ${VERSION} 版本。$\n$\n您可以直接下一步进行安装。"
 LangString appRunning ${LANG_SIMPCHINESE} "${PRODUCTNAME} 正在运行！请关闭后再试。"
-LangString appRunningOkKill ${LANG_SIMPCHINESE} "检测到 ${PRODUCTNAME} 正在运行。$\n点击 "确定" 以终止进程。"
+LangString appRunningOkKill ${LANG_SIMPCHINESE} "检测到 ${PRODUCTNAME} 正在运行。$\n点击「确定」以终止进程。"
 LangString chooseMaintenanceOption ${LANG_SIMPCHINESE} "选择要执行的操作。"
 LangString choowHowToInstall ${LANG_SIMPCHINESE} "选择安装方式"
 LangString createDesktop ${LANG_SIMPCHINESE} "创建桌面快捷方式"
