@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - 彻底修复 Chat 页面滚动回弹问题
+- **Windows 10 1909 兼容性修复**：安装程序自动安装 Git for Windows（Claude Agent SDK 依赖）
 
 ---
 
