@@ -1,9 +1,9 @@
 ; English language file for MyAgents NSIS Installer
 ; Custom translations for reinstall page
 
-LangString addOrReinstall ${LANG_ENGLISH} "Overwrite Upgrade"
+LangString addOrReinstall ${LANG_ENGLISH} "Reinstall"
 LangString alreadyInstalled ${LANG_ENGLISH} "Already Installed"
-LangString alreadyInstalledLong ${LANG_ENGLISH} "MyAgents $R5 is already installed. You are about to install MyAgents ${VERSION}.$\n$\nYou can proceed with the upgrade directly."
+LangString alreadyInstalledLong ${LANG_ENGLISH} "MyAgents $R5 is already installed.$\n$\nYou can choose to reinstall or uninstall."
 LangString appRunning ${LANG_ENGLISH} "${PRODUCTNAME} is running! Please close it first then try again."
 LangString appRunningOkKill ${LANG_ENGLISH} "${PRODUCTNAME} is running.$\nClick $\"OK$\" to terminate it."
 LangString chooseMaintenanceOption ${LANG_ENGLISH} "Select the operation you want to perform."

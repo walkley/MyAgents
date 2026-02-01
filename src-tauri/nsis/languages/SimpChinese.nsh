@@ -1,9 +1,9 @@
 ; Simplified Chinese language file for MyAgents NSIS Installer
 ; Custom translations for reinstall page
 
-LangString addOrReinstall ${LANG_SIMPCHINESE} "覆盖升级"
+LangString addOrReinstall ${LANG_SIMPCHINESE} "重新安装"
 LangString alreadyInstalled ${LANG_SIMPCHINESE} "检测到已安装"
-LangString alreadyInstalledLong ${LANG_SIMPCHINESE} "检测到您已安装了 MyAgents $R5 版本，当前正在安装 MyAgents ${VERSION} 版本。$\n$\n您可以直接下一步进行安装。"
+LangString alreadyInstalledLong ${LANG_SIMPCHINESE} "检测到您已安装了 MyAgents $R5 版本。$\n$\n您可以选择重新安装或卸载。"
 LangString appRunning ${LANG_SIMPCHINESE} "${PRODUCTNAME} 正在运行！请关闭后再试。"
 LangString appRunningOkKill ${LANG_SIMPCHINESE} "检测到 ${PRODUCTNAME} 正在运行。$\n点击「确定」以终止进程。"
 LangString chooseMaintenanceOption ${LANG_SIMPCHINESE} "选择要执行的操作。"
