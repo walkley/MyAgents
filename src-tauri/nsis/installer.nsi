@@ -309,11 +309,11 @@ Function PageLeaveReinstall
     ${Else}                    ; User chose to uninstall
       Goto reinst_uninstall
     ${EndIf}
-  ${ElseIf} $R0 = 1 ; Upgrading
-    ${If} $R1 = 1              ; User chose to uninstall
+  ${ElseIf} $R0 = 1 ; Upgrading - MyAgents: inverted logic due to swapped options
+    ${If} $R1 = 1              ; User chose 覆盖升级 (do NOT uninstall)
+      Goto reinst_done
+    ${Else}                    ; User chose 安装前卸载 (uninstall first)
       Goto reinst_uninstall
-    ${Else}
-      Goto reinst_done         ; User chose NOT to uninstall
     ${EndIf}
   ${ElseIf} $R0 = -1 ; Downgrading
     ${If} $R1 = 1              ; User chose to uninstall
