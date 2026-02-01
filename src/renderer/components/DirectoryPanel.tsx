@@ -12,6 +12,7 @@ import {
   Loader2,
   Pencil,
   RefreshCw,
+  Settings,
   Trash2,
   Upload,
   PanelRightClose
@@ -980,7 +981,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
               <ChevronUp className={`h-4 w-4 transition-transform ${isCollapsed ? 'rotate-180' : ''}`} />
             </button>
           )}
-          <span className="text-sm font-semibold text-[var(--ink)]">项目工作区</span>
+          <span className="text-base font-semibold text-[var(--ink)]">项目工作区</span>
         </div>
         {/* 项目设置 button on right */}
         {onOpenConfig && (
@@ -993,6 +994,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
             title="打开项目设置"
           >
+            <Settings className="h-4 w-4" />
             项目设置
           </button>
         )}
