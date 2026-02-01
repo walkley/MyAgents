@@ -639,13 +639,21 @@ Section GitForWindows
       ; Git not found, need to install
       ; Skip if in update mode (Git should already be installed)
       ${If} $UpdateMode <> 1
-        ; Download Git for Windows installer
+        ; Download Git for Windows installer using PowerShell
+        ; NSISdl doesn't handle GitHub's HTTPS redirects well, so we use PowerShell instead
         ; Using stable version 2.52.0
         Delete "$TEMP\Git-Installer.exe"
         DetailPrint "$(gitDownloading)"
-        NSISdl::download "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe" "$TEMP\Git-Installer.exe"
+        ; Use PowerShell to download - handles HTTPS and redirects properly
+        nsExec::ExecToLog 'powershell -ExecutionPolicy Bypass -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ''https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe'' -OutFile ''$TEMP\Git-Installer.exe'' -UseBasicParsing }"'
         Pop $0
-        ${If} $0 == "success"
+        ; Check if download succeeded (file exists and has content)
+        IfFileExists "$TEMP\Git-Installer.exe" 0 git_download_failed
+        FileOpen $2 "$TEMP\Git-Installer.exe" r
+        FileSeek $2 0 END $3
+        FileClose $2
+        ${If} $3 > 1000000
+          ; File is larger than 1MB, likely successful (Git installer is ~65MB)
           DetailPrint "$(gitDownloadSuccess)"
 
           ; Install Git silently
@@ -655,7 +663,7 @@ Section GitForWindows
           ; /NOCANCEL - No cancel button
           ; /SP- - Don't show "This will install..." dialog
           ; /CLOSEAPPLICATIONS - Close apps using files
-          ; /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh,scalar" - Include useful components
+          ; /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh" - Include useful components
           ExecWait '"$TEMP\Git-Installer.exe" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /COMPONENTS="icons,ext,ext\shellhere,ext\guihere,gitlfs,assoc,assoc_sh"' $1
           Delete "$TEMP\Git-Installer.exe"
           ${If} $1 = 0
@@ -666,7 +674,9 @@ Section GitForWindows
             MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
           ${EndIf}
         ${Else}
+          git_download_failed:
           DetailPrint "$(gitDownloadError)"
+          Delete "$TEMP\Git-Installer.exe"
           ; Don't abort - user can install Git manually later
           MessageBox MB_ICONEXCLAMATION|MB_OK "$(gitAbortError)"
         ${EndIf}
