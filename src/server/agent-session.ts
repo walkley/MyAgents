@@ -372,52 +372,71 @@ function buildSettingSources(): ('user' | 'project')[] {
 }
 
 /**
- * Load proxy settings from config.json and return as environment variables
- * Returns HTTP_PROXY, HTTPS_PROXY, and lowercase variants for maximum compatibility
+ * Load proxy settings from config.json
+ * Returns proxy URL or null if not configured
  */
-function loadProxyEnvVars(): Record<string, string> {
+function loadProxyUrl(): string | null {
   const { existsSync, readFileSync } = require('fs');
   const { join } = require('path');
 
   try {
     const configPath = join(getMyAgentsUserDir(), 'config.json');
     if (!existsSync(configPath)) {
-      return {};
+      return null;
     }
 
     const content = readFileSync(configPath, 'utf-8');
     const config = JSON.parse(content);
     const proxySettings = config.proxySettings;
 
-    // Check if proxy is enabled and has valid configuration
     if (!proxySettings?.enabled || !proxySettings.host || !proxySettings.port) {
-      return {};
+      return null;
     }
 
     const protocol = proxySettings.protocol || 'http';
-    const proxyUrl = `${protocol}://${proxySettings.host}:${proxySettings.port}`;
-
-    console.log(`[agent] Proxy enabled: ${proxyUrl}`);
-
-    // Set both uppercase and lowercase for maximum compatibility
-    // Some tools check HTTP_PROXY, others check http_proxy
-    // PLAYWRIGHT_MCP_PROXY_SERVER is specific to @playwright/mcp for browser proxy
-    // NO_PROXY ensures local connections (like Playwright's WebSocket to Chrome) bypass proxy
-    const noProxy = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
-
-    return {
-      HTTP_PROXY: proxyUrl,
-      HTTPS_PROXY: proxyUrl,
-      http_proxy: proxyUrl,
-      https_proxy: proxyUrl,
-      NO_PROXY: noProxy,
-      no_proxy: noProxy,
-      PLAYWRIGHT_MCP_PROXY_SERVER: proxyUrl,
-    };
+    return `${protocol}://${proxySettings.host}:${proxySettings.port}`;
   } catch (e) {
     console.warn('[agent] Failed to load proxy settings:', e);
+    return null;
+  }
+}
+
+/**
+ * Build proxy environment variables for MCP servers
+ *
+ * IMPORTANT: Playwright MCP needs special handling!
+ * - HTTP_PROXY/HTTPS_PROXY affect the MCP process itself, including WebSocket to Chrome
+ * - This causes timeout when connecting to local Chrome DevTools through proxy
+ * - For Playwright: Only set PLAYWRIGHT_MCP_PROXY_SERVER (affects browser, not MCP process)
+ * - For other MCP: Set standard proxy variables
+ */
+function loadProxyEnvVars(mcpId?: string): Record<string, string> {
+  const proxyUrl = loadProxyUrl();
+  if (!proxyUrl) {
     return {};
   }
+
+  console.log(`[agent] Proxy enabled: ${proxyUrl}`);
+
+  // Playwright MCP: Only set browser proxy, NOT process proxy
+  // This prevents WebSocket connection to Chrome from going through proxy
+  if (mcpId === 'playwright') {
+    console.log(`[agent] Playwright MCP: Using PLAYWRIGHT_MCP_PROXY_SERVER only`);
+    return {
+      PLAYWRIGHT_MCP_PROXY_SERVER: proxyUrl,
+    };
+  }
+
+  // Other MCP servers: Set standard proxy environment variables
+  const noProxy = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+  return {
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+  };
 }
 
 /**
@@ -452,9 +471,6 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     return {};
   }
 
-  // Load proxy environment variables once for all MCP servers
-  const proxyEnvVars = loadProxyEnvVars();
-
   const result: Record<string, SdkMcpServerConfig> = {};
 
   for (const server of servers) {
@@ -462,6 +478,10 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     if (isDebugMode && server.env && Object.keys(server.env).length > 0) {
       console.log(`[agent] MCP ${server.id}: Custom env vars: ${Object.keys(server.env).join(', ')}`);
     }
+
+    // Load proxy environment variables specific to this MCP server
+    // (Playwright needs special handling - see loadProxyEnvVars comments)
+    const proxyEnvVars = loadProxyEnvVars(server.id);
 
     if (server.type === 'stdio' && server.command) {
       let command = server.command;
