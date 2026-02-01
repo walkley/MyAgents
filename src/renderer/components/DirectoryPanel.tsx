@@ -1072,6 +1072,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                 indent={16}
                 height={treeHeight}
                 width="100%"
+                className="overscroll-contain"
               >
                 {({ node, style }) => {
                   const data = node.data as DirectoryTreeNode;
