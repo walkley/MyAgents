@@ -320,6 +320,7 @@ if (isDebugMode()) console.log('[module] debug message');
 | Bun Sidecar 打包机制 | [bundled_bun.md](./specs/tech_docs/bundled_bun.md) |
 | 自动更新、CI/CD | [auto_update.md](./specs/tech_docs/auto_update.md) |
 | 工具权限控制 | [sdk_canUseTool_guide.md](./specs/tech_docs/sdk_canUseTool_guide.md) |
+| **SDK 自定义工具** | [sdk_custom_tools_guide.md](./specs/tech_docs/sdk_custom_tools_guide.md) |
 | SSE 状态同步 | [session_state_sync.md](./specs/tech_docs/session_state_sync.md) |
 | Session 存储架构 | [session_storage.md](./specs/tech_docs/session_storage.md) |
 | 日志系统 | [unified_logging.md](./specs/tech_docs/unified_logging.md) |

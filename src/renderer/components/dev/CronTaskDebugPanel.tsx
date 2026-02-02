@@ -1,0 +1,228 @@
+// Developer Debug Panel for Cron Tasks
+// Shows all active cron tasks with controls to open/stop them
+
+import { useState, useEffect, useCallback } from 'react';
+import { Clock, Square, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
+import { getAllCronTasks, stopCronTask } from '@/api/cronTaskClient';
+import type { CronTask } from '@/types/cronTask';
+import { formatCronInterval, getCronStatusText } from '@/types/cronTask';
+import { CUSTOM_EVENTS } from '../../../shared/constants';
+
+interface CronTaskDebugPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPanelProps) {
+  const [tasks, setTasks] = useState<CronTask[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
+
+  // Load tasks
+  const loadTasks = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const allTasks = await getAllCronTasks();
+      // Filter to show only active tasks (running or paused)
+      const activeTasks = allTasks.filter(t => t.status === 'running' || t.status === 'paused');
+      setTasks(activeTasks);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load tasks');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Load on open
+  useEffect(() => {
+    if (isOpen) {
+      loadTasks();
+    }
+  }, [isOpen, loadTasks]);
+
+  // Handle open task - dispatch event to jump to tab
+  const handleOpenTask = useCallback((task: CronTask) => {
+    // If task has a tabId, try to jump to that tab
+    if (task.tabId) {
+      window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
+        detail: { targetTabId: task.tabId, sessionId: task.sessionId }
+      }));
+      onClose();
+    } else {
+      // No tab associated - show info
+      alert(`该任务没有关联的标签页\n\n工作区: ${task.workspacePath}\nSession: ${task.sessionId}\n\n请手动打开对应的工作区和历史记录`);
+    }
+  }, [onClose]);
+
+  // Handle stop task
+  const handleStopTask = useCallback(async (task: CronTask) => {
+    const confirmed = window.confirm(
+      `确定要停止此定时任务吗？\n\n任务ID: ${task.id}\n已执行: ${task.executionCount} 次\n\n停止后任务将无法恢复。`
+    );
+    if (!confirmed) return;
+
+    setStoppingTaskId(task.id);
+    try {
+      await stopCronTask(task.id);
+      // Reload tasks
+      await loadTasks();
+    } catch (err) {
+      alert(`停止任务失败: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setStoppingTaskId(null);
+    }
+  }, [loadTasks]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+
+      {/* Panel */}
+      <div className="relative z-10 w-full max-w-2xl rounded-xl bg-[var(--paper)] shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
+          <div className="flex items-center gap-2">
+            <Clock className="h-5 w-5 text-[var(--accent)]" />
+            <h2 className="text-base font-semibold text-[var(--ink)]">定时任务调试面板</h2>
+            <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+              DEV
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadTasks}
+              disabled={isLoading}
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+              title="刷新"
+            >
+              <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="max-h-96 overflow-y-auto p-5">
+          {error && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
+              <AlertCircle className="h-4 w-4" />
+              {error}
+            </div>
+          )}
+
+          {isLoading && tasks.length === 0 ? (
+            <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
+              加载中...
+            </div>
+          ) : tasks.length === 0 ? (
+            <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
+              没有活跃的定时任务
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {tasks.map((task) => (
+                <div
+                  key={task.id}
+                  className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4"
+                >
+                  {/* Task header */}
+                  <div className="mb-2 flex items-start justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <code className="text-xs font-medium text-[var(--ink)]">{task.id}</code>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          task.status === 'running'
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                        }`}>
+                          {getCronStatusText(task.status)}
+                        </span>
+                      </div>
+                      <p className="mt-1 truncate text-xs text-[var(--ink-muted)]" title={task.prompt}>
+                        {task.prompt}
+                      </p>
+                    </div>
+                    {/* Actions */}
+                    <div className="ml-3 flex items-center gap-1">
+                      <button
+                        onClick={() => handleOpenTask(task)}
+                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--accent)]/10 hover:text-[var(--accent)]"
+                        title="打开"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => handleStopTask(task)}
+                        disabled={stoppingTaskId === task.id}
+                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--error)]/10 hover:text-[var(--error)] disabled:opacity-50"
+                        title="停止"
+                      >
+                        <Square className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Task details */}
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                    <div className="flex justify-between">
+                      <span className="text-[var(--ink-muted)]">间隔</span>
+                      <span className="text-[var(--ink)]">{formatCronInterval(task.intervalMinutes)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[var(--ink-muted)]">已执行</span>
+                      <span className="text-[var(--ink)]">{task.executionCount} 次</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[var(--ink-muted)]">运行模式</span>
+                      <span className="text-[var(--ink)]">{task.runMode === 'new_session' ? '无记忆' : '保持上下文'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-[var(--ink-muted)]">Tab</span>
+                      <span className="font-mono text-[var(--ink)]">{task.tabId || '-'}</span>
+                    </div>
+                    <div className="col-span-2 flex justify-between">
+                      <span className="text-[var(--ink-muted)]">工作区</span>
+                      <span className="truncate text-[var(--ink)]" title={task.workspacePath}>
+                        {task.workspacePath.split('/').pop() || task.workspacePath}
+                      </span>
+                    </div>
+                    {task.lastExecutedAt && (
+                      <div className="col-span-2 flex justify-between">
+                        <span className="text-[var(--ink-muted)]">上次执行</span>
+                        <span className="text-[var(--ink)]">
+                          {new Date(task.lastExecutedAt).toLocaleString('zh-CN')}
+                        </span>
+                      </div>
+                    )}
+                    {task.lastError && (
+                      <div className="col-span-2 mt-1 rounded bg-[var(--error-bg)] px-2 py-1 text-[var(--error)]">
+                        错误: {task.lastError}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-[var(--line)] px-5 py-3">
+          <p className="text-[10px] text-[var(--ink-faint)]">
+            此面板仅供开发调试使用，显示所有运行中或暂停的定时任务
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
