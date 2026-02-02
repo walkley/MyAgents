@@ -18,6 +18,7 @@ import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
+import { CUSTOM_EVENTS } from '../../shared/constants';
 import { TabContext, type SessionState, type TabContextValue } from './TabContext';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -25,7 +26,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, stopTabSidecar, isTauri } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, stopTabSidecar, isTauri, getSessionActivation } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
 import {
     notifyMessageComplete,
@@ -1132,6 +1133,18 @@ export default function TabProvider({
     const loadSession = useCallback(async (targetSessionId: string): Promise<boolean> => {
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
+
+            // Check if session is already activated by another Tab (Session singleton constraint)
+            const activation = await getSessionActivation(targetSessionId);
+            if (activation && activation.tab_id && activation.tab_id !== tabId) {
+                console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is already activated by tab ${activation.tab_id}, requesting jump`);
+                // Dispatch event to App.tsx to jump to the target Tab
+                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
+                    detail: { targetTabId: activation.tab_id, sessionId: targetSessionId }
+                }));
+                return false;
+            }
+
             const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {

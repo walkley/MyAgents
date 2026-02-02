@@ -3,12 +3,14 @@ import { arrayMove } from '@dnd-kit/sortable';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise } from '@/api/tauriClient';
+import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
 import TabProvider from '@/context/TabProvider';
 import { useUpdater } from '@/hooks/useUpdater';
+import { useTrayEvents } from '@/hooks/useTrayEvents';
+import { useConfig } from '@/hooks/useConfig';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
 import Settings from '@/pages/Settings';
@@ -17,6 +19,7 @@ import {
   type Provider,
 } from '@/config/types';
 import { type Tab, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
+import { getAllCronTasks, getTasksToRecover, startCronScheduler, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS } from '../shared/constants';
@@ -24,6 +27,12 @@ import { CUSTOM_EVENTS } from '../shared/constants';
 export default function App() {
   // Auto-update state (silent background updates)
   const { updateReady, updateVersion, restartAndUpdate } = useUpdater();
+
+  // App config for tray behavior
+  const { config } = useConfig();
+
+  // Settings initial section state (for deep linking to specific section)
+  const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
 
   // Multi-tab state
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
@@ -37,6 +46,12 @@ export default function App() {
   const [closeConfirmState, setCloseConfirmState] = useState<{
     tabId: string;
     tabTitle: string;
+  } | null>(null);
+
+  // Exit confirmation state (for cron tasks)
+  const [exitConfirmState, setExitConfirmState] = useState<{
+    runningTaskCount: number;
+    resolve: (value: boolean) => void;
   } | null>(null);
 
   // Global Sidecar silent retry mechanism
@@ -95,6 +110,33 @@ export default function App() {
     }
   }, []);
 
+  // Recover running cron tasks after app restart
+  const recoverCronTasks = useCallback(async () => {
+    if (!isTauriEnvironment()) return;
+
+    try {
+      const tasksToRecover = await getTasksToRecover();
+      if (tasksToRecover.length === 0) {
+        console.log('[App] No cron tasks to recover');
+        return;
+      }
+
+      console.log(`[App] Recovering ${tasksToRecover.length} cron task(s)...`);
+
+      for (const task of tasksToRecover) {
+        try {
+          // Restart the scheduler for each running task
+          await startCronScheduler(task.id);
+          console.log(`[App] Cron task ${task.id} scheduler restarted`);
+        } catch (error) {
+          console.error(`[App] Failed to recover cron task ${task.id}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error('[App] Failed to recover cron tasks:', error);
+    }
+  }, []);
+
   // Start Global Sidecar on mount, cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
@@ -114,6 +156,12 @@ export default function App() {
     // This ensures MCP and other global API calls work from any page
     void startGlobalSidecarSilent();
 
+    // Recover cron tasks that were running before app restart
+    // This is done after a short delay to ensure Rust is fully initialized
+    const recoveryTimeout = setTimeout(() => {
+      void recoverCronTasks();
+    }, 1000);
+
     return () => {
       mountedRef.current = false;
       // Clear any pending retry
@@ -121,12 +169,13 @@ export default function App() {
         clearTimeout(retryTimeoutRef.current);
         retryTimeoutRef.current = null;
       }
+      clearTimeout(recoveryTimeout);
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();
       void stopAllSidecars();
     };
-  }, [startGlobalSidecarSilent]);
+  }, [startGlobalSidecarSilent, recoverCronTasks]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
@@ -136,7 +185,7 @@ export default function App() {
   }, []);
 
   // Perform the actual tab close operation (pure function, no confirmation)
-  const performCloseTab = useCallback((tabId: string) => {
+  const performCloseTab = useCallback(async (tabId: string) => {
     const currentTabs = tabs;
 
     // Double-check: tab might have been removed
@@ -152,9 +201,25 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
-    // Stop this Tab's Sidecar when closing (only if it has an agentDir)
+    // Check if this Tab has an active cron task
+    // If so, don't stop the Sidecar - let it run in background for scheduled executions
     if (tab.agentDir) {
-      void stopTabSidecar(tabId);
+      try {
+        const cronTask = await getTabCronTask(tabId);
+        if (cronTask && (cronTask.status === 'running' || cronTask.status === 'paused')) {
+          // Cron task is active - keep Sidecar running but clear tab association
+          console.log(`[App] Tab ${tabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
+          await updateCronTaskTab(cronTask.id, undefined); // Clear tabId association
+          // Don't stop Sidecar
+        } else {
+          // No active cron task - stop Sidecar as usual
+          void stopTabSidecar(tabId);
+        }
+      } catch (error) {
+        console.error(`[App] Error checking cron task for tab ${tabId}:`, error);
+        // On error, stop Sidecar to be safe
+        void stopTabSidecar(tabId);
+      }
     }
 
     // Special case: If this is the last tab, replace with launcher (don't close the app)
@@ -190,7 +255,7 @@ export default function App() {
     }
 
     // Otherwise, close directly
-    performCloseTab(tabId);
+    void performCloseTab(tabId);
   }, [tabs, performCloseTab]);
 
   // Close current active tab (for Cmd+W)
@@ -252,6 +317,28 @@ export default function App() {
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
 
     try {
+      // Check if the session is already activated by another Tab (Session singleton constraint)
+      if (sessionId) {
+        const activation = await getSessionActivation(sessionId);
+        if (activation && activation.tab_id && activation.tab_id !== activeTabId) {
+          // Session is already open in another Tab - jump to that Tab instead of showing error
+          console.log(`[App] Session ${sessionId} already active in tab ${activation.tab_id}, jumping to it`);
+
+          // Check if the target Tab exists
+          const targetTab = tabs.find(t => t.id === activation.tab_id);
+          if (targetTab) {
+            // Jump to the existing Tab
+            setActiveTabId(activation.tab_id);
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+            return;
+          } else {
+            // Tab doesn't exist (e.g., cron task running without Tab)
+            // Connect this Tab to the existing Sidecar
+            console.log(`[App] Target tab ${activation.tab_id} not found, connecting current tab to existing Sidecar`);
+          }
+        }
+      }
+
       console.log('[App] Starting sidecar for project:', project.path, 'sessionId:', sessionId);
 
       // Start a Tab-specific Sidecar instance
@@ -299,11 +386,26 @@ export default function App() {
     }
   }, [activeTabId]);
 
-  const handleBackToLauncher = useCallback(() => {
+  const handleBackToLauncher = useCallback(async () => {
     if (!activeTabId) return;
 
-    // Stop this Tab's Sidecar
-    void stopTabSidecar(activeTabId);
+    // Check if this Tab has an active cron task before stopping Sidecar
+    try {
+      const cronTask = await getTabCronTask(activeTabId);
+      if (cronTask && (cronTask.status === 'running' || cronTask.status === 'paused')) {
+        // Cron task is active - keep Sidecar running but clear tab association
+        console.log(`[App] Tab ${activeTabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
+        await updateCronTaskTab(cronTask.id, undefined);
+        // Don't stop Sidecar
+      } else {
+        // No active cron task - stop Sidecar
+        void stopTabSidecar(activeTabId);
+      }
+    } catch (error) {
+      console.error(`[App] Error checking cron task for tab ${activeTabId}:`, error);
+      // On error, stop Sidecar to be safe
+      void stopTabSidecar(activeTabId);
+    }
 
     setTabs((prev) =>
       prev.map((t) =>
@@ -350,9 +452,6 @@ export default function App() {
       return arrayMove(prev, oldIndex, newIndex);
     });
   }, []);
-
-  // Settings initial section state (for deep linking to specific section)
-  const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
 
   // Open Settings as a new tab (or switch to existing one)
   // Optional initialSection parameter to open a specific section (e.g., 'providers')
@@ -401,6 +500,53 @@ export default function App() {
       window.removeEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     };
   }, [handleOpenSettings]);
+
+  // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
+  useEffect(() => {
+    const handleJumpToTab = (event: CustomEvent<{ targetTabId: string; sessionId: string }>) => {
+      const { targetTabId, sessionId } = event.detail;
+      console.log(`[App] Jump to tab ${targetTabId} for session ${sessionId}`);
+      // Check if target Tab exists
+      const targetTab = tabs.find(t => t.id === targetTabId);
+      if (targetTab) {
+        setActiveTabId(targetTabId);
+      } else {
+        console.warn(`[App] Target tab ${targetTabId} not found, cannot jump`);
+      }
+    };
+    window.addEventListener(CUSTOM_EVENTS.JUMP_TO_TAB, handleJumpToTab as EventListener);
+    return () => {
+      window.removeEventListener(CUSTOM_EVENTS.JUMP_TO_TAB, handleJumpToTab as EventListener);
+    };
+  }, [tabs]);
+
+  // System tray event handling (minimize to tray, exit confirmation)
+  useTrayEvents({
+    minimizeToTray: config.minimizeToTray,
+    onOpenSettings: () => handleOpenSettings('general'),
+    onExitRequested: async () => {
+      // Check for running cron tasks
+      try {
+        const tasks = await getAllCronTasks();
+        const runningTasks = tasks.filter(t => t.status === 'running' || t.status === 'paused');
+
+        if (runningTasks.length > 0) {
+          // Show confirmation dialog
+          return new Promise<boolean>((resolve) => {
+            setExitConfirmState({
+              runningTaskCount: runningTasks.length,
+              resolve,
+            });
+          });
+        }
+      } catch (error) {
+        console.error('[App] Failed to check cron tasks:', error);
+      }
+
+      // No running tasks, allow exit
+      return true;
+    },
+  });
 
   return (
     <div className="flex h-screen flex-col bg-[var(--paper)]">
@@ -472,10 +618,29 @@ export default function App() {
           cancelText="取消"
           confirmVariant="danger"
           onConfirm={() => {
-            performCloseTab(closeConfirmState.tabId);
+            void performCloseTab(closeConfirmState.tabId);
             setCloseConfirmState(null);
           }}
           onCancel={() => setCloseConfirmState(null)}
+        />
+      )}
+
+      {/* Exit confirmation dialog for running cron tasks */}
+      {exitConfirmState && (
+        <ConfirmDialog
+          title="退出应用"
+          message={`有 ${exitConfirmState.runningTaskCount} 个定时任务正在运行中。退出后任务将被停止。确定要退出吗？`}
+          confirmText="退出"
+          cancelText="取消"
+          confirmVariant="danger"
+          onConfirm={() => {
+            exitConfirmState.resolve(true);
+            setExitConfirmState(null);
+          }}
+          onCancel={() => {
+            exitConfirmState.resolve(false);
+            setExitConfirmState(null);
+          }}
         />
       )}
     </div>
