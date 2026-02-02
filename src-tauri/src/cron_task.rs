@@ -978,10 +978,37 @@ pub async fn cmd_create_cron_task(config: CronTaskConfig) -> Result<CronTask, St
 }
 
 /// Start a cron task
+/// Also registers the CronTask as a user of the workspace's Sidecar (reference counting)
+/// This ensures the Sidecar stays alive even if the Tab closes during the first execution
 #[tauri::command]
-pub async fn cmd_start_cron_task(task_id: String) -> Result<CronTask, String> {
+pub async fn cmd_start_cron_task(
+    app_handle: tauri::AppHandle,
+    task_id: String,
+) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
-    manager.start_task(&task_id).await
+    let task = manager.start_task(&task_id).await?;
+
+    // Register CronTask user immediately when task starts
+    // This is crucial: we need to register BEFORE the first execution starts,
+    // otherwise closing the Tab during first execution would stop the Sidecar
+    if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
+        if let Ok(mut sidecar_manager) = sidecar_state.lock() {
+            sidecar_manager.register_user(
+                &task.workspace_path,
+                UserRef::CronTask(task.id.clone()),
+            );
+            log::info!(
+                "[CronTask] Registered CronTask {} as user of workspace {} (on start)",
+                task.id, task.workspace_path
+            );
+        } else {
+            log::warn!("[CronTask] Failed to lock SidecarManager to register CronTask user");
+        }
+    } else {
+        log::warn!("[CronTask] SidecarManager state not available for CronTask user registration");
+    }
+
+    Ok(task)
 }
 
 /// Pause a cron task
@@ -1071,9 +1098,9 @@ pub async fn cmd_get_tasks_to_recover() -> Result<Vec<CronTask>, String> {
     Ok(manager.get_tasks_to_recover().await)
 }
 
-/// Start the scheduler for a task (called after task is started)
-/// Also registers the CronTask as a user of the workspace's Sidecar (reference counting)
-/// This prevents the Sidecar from being stopped when the Tab closes
+/// Start the scheduler for a task (called after first execution completes)
+/// Note: CronTask user registration is now done in cmd_start_cron_task (earlier timing)
+/// This function only starts the scheduler loop and activates the session
 #[tauri::command]
 pub async fn cmd_start_cron_scheduler(
     app_handle: tauri::AppHandle,
@@ -1081,24 +1108,14 @@ pub async fn cmd_start_cron_scheduler(
 ) -> Result<(), String> {
     let manager = get_cron_task_manager();
 
-    // Get task info for session activation and user registration
+    // Get task info for session activation
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-    // Register CronTask user and activate session
+    // Activate session for legacy compatibility (CronTask user already registered in cmd_start_cron_task)
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut sidecar_manager) = sidecar_state.lock() {
-            // Register this CronTask as a user of the workspace (reference counting)
-            sidecar_manager.register_user(
-                &task.workspace_path,
-                UserRef::CronTask(task.id.clone()),
-            );
-            log::info!(
-                "[CronTask] Registered CronTask {} as user of workspace {}",
-                task.id, task.workspace_path
-            );
-
-            // Also activate session for legacy compatibility
+            // Activate session
             if let Some(tab_id) = &task.tab_id {
                 if let Some(instance) = sidecar_manager.get_instance(tab_id) {
                     let port = instance.port;
@@ -1118,7 +1135,7 @@ pub async fn cmd_start_cron_scheduler(
         }
     }
 
-    // Start the scheduler
+    // Start the scheduler loop
     manager.start_task_scheduler(&task_id).await
 }
 
