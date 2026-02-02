@@ -9,11 +9,14 @@ import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState } from '@/context/TabContext';
 import { useAutoScroll } from '@/hooks/useAutoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
+import { useCronTask } from '@/hooks/useCronTask';
+import { getSessionCronTask, updateCronTaskTab, startCronScheduler } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -23,6 +26,7 @@ import {
   updateProjectMcpServers,
 } from '@/config/configService';
 import { CUSTOM_EVENTS } from '../../shared/constants';
+// CronTaskConfig type is used via useCronTask hook
 
 interface ChatProps {
   onBack?: () => void;
@@ -32,6 +36,7 @@ interface ChatProps {
 export default function Chat({ onBack, onNewSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
+    tabId,
     agentDir,
     sessionId,
     messages,
@@ -79,6 +84,9 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentProvider?.primaryModel
   );
+  // Cron task state
+  const [showCronSettings, setShowCronSettings] = useState(false);
+  const [cronPrompt, setCronPrompt] = useState('');
 
   // Ref for input focus
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -105,6 +113,37 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
   }, []);
+
+  // Cron task management hook
+  const {
+    state: cronState,
+    enableCronMode,
+    disableCronMode,
+    updateConfig: updateCronConfig,
+    startTask: startCronTask,
+    pause: pauseCronTask,
+    resume: resumeCronTask,
+    stop: stopCronTask,
+    restoreFromTask: restoreCronTask,
+  } = useCronTask({
+    workspacePath: agentDir,
+    sessionId: sessionId ?? '',
+    tabId,
+    onExecute: async (_taskId, prompt, _isFirstExecution, _aiCanExit) => {
+      // Send cron task message
+      // Note: taskId, isFirstExecution, aiCanExit are available for future enhancements
+      // (e.g., injecting cron context into system prompt)
+      const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
+        baseUrl: currentProvider.config.baseUrl,
+        apiKey: apiKeys[currentProvider.id],
+        authType: currentProvider.authType,
+      } : undefined;
+      await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv);
+    },
+    onComplete: (task, reason) => {
+      console.log('[Chat] Cron task completed:', task.id, reason);
+    },
+  });
 
   // File drop zone for chat area (HTML5 drag-drop for non-Tauri/development)
   const handleFileDrop = useCallback((files: File[]) => {
@@ -184,6 +223,49 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   const [workspaceMcpEnabled, setWorkspaceMcpEnabled] = useState<string[]>(
     currentProject?.mcpEnabledServers ?? []
   );
+
+  // Track whether cron task restoration has been attempted for current session
+  const cronRestoreAttemptedRef = useRef<string | null>(null);
+
+  // Restore cron task state when session changes (for app restart recovery or tab re-open)
+  useEffect(() => {
+    if (!sessionId || !tabId || !isTauriEnvironment()) return;
+
+    // Skip if already attempted for this session or already has an active task
+    if (cronRestoreAttemptedRef.current === sessionId || cronState.task) return;
+
+    // Mark as attempted before async operation to prevent race conditions
+    cronRestoreAttemptedRef.current = sessionId;
+
+    const restoreCronTaskState = async () => {
+      try {
+        const task = await getSessionCronTask(sessionId);
+        if (task && (task.status === 'running' || task.status === 'paused')) {
+          console.log('[Chat] Restoring cron task for session:', sessionId, task.id, 'to tab:', tabId);
+
+          // Update task's tabId to this new tab
+          await updateCronTaskTab(task.id, tabId);
+
+          // Restore UI state
+          restoreCronTask(task);
+
+          // If task is running, restart the scheduler (it may have been stopped when tab was closed)
+          if (task.status === 'running') {
+            try {
+              await startCronScheduler(task.id);
+              console.log('[Chat] Restarted cron scheduler for task:', task.id);
+            } catch (schedulerError) {
+              console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Chat] Failed to restore cron task:', error);
+      }
+    };
+
+    void restoreCronTaskState();
+  }, [sessionId, tabId, restoreCronTask, cronState.task]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {
@@ -389,6 +471,15 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
         authType: currentProvider.authType,
       } : undefined;
 
+      // If cron mode is enabled and task hasn't started yet, start the task
+      if (cronState.isEnabled && !cronState.task && cronState.config) {
+        // Update config with the actual prompt (user's message)
+        updateCronConfig({ prompt: text });
+        // Start the cron task - this will execute immediately and schedule future executions
+        await startCronTask();
+        return; // startCronTask handles the message sending via onExecute callback
+      }
+
       const success = await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
       if (!success) {
         const errorMessage = {
@@ -578,7 +669,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             systemStatus={systemStatus}
           />
 
-          {/* Floating input - manages its own state for performance */}
+          {/* Floating input with integrated cron task components */}
           <SimpleChatInput
             ref={chatInputRef}
             onSend={handleSendMessage}
@@ -609,6 +700,23 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             onRefreshProviders={refreshProviderData}
             onOpenAgentSettings={() => setShowWorkspaceConfig(true)}
             onWorkspaceRefresh={triggerWorkspaceRefresh}
+            // Cron task props - StatusBar and Overlay are rendered inside SimpleChatInput
+            cronModeEnabled={cronState.isEnabled}
+            cronConfig={cronState.config}
+            cronTask={cronState.task}
+            onCronButtonClick={() => setShowCronSettings(true)}
+            onCronSettings={() => setShowCronSettings(true)}
+            onCronCancel={disableCronMode}
+            onCronPause={pauseCronTask}
+            onCronResume={resumeCronTask}
+            onCronStop={async () => {
+              // Stop the task and restore the original prompt to the input
+              const originalPrompt = await stopCronTask();
+              if (originalPrompt) {
+                chatInputRef.current?.setValue(originalPrompt);
+              }
+            }}
+            onInputChange={(text) => setCronPrompt(text)}
           />
         </div>
       </div>
@@ -642,6 +750,18 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
           refreshKey={workspaceRefreshKey}
         />
       )}
+
+      {/* Cron Task Settings Modal */}
+      <CronTaskSettingsModal
+        isOpen={showCronSettings}
+        onClose={() => setShowCronSettings(false)}
+        initialPrompt={cronPrompt}
+        initialConfig={cronState.config}
+        onConfirm={(config) => {
+          enableCronMode(config);
+          setShowCronSettings(false);
+        }}
+      />
     </div>
   );
 }
