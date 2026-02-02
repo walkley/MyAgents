@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench } from 'lucide-react';
+import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench, Clock } from 'lucide-react';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -6,6 +6,8 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabStateOptional } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, type ModelEntity } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import CronTaskStatusBar from './cron/CronTaskStatusBar';
+import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -54,6 +56,34 @@ interface SimpleChatInputProps {
   onOpenAgentSettings?: () => void;
   /** Callback to refresh workspace after files are added */
   onWorkspaceRefresh?: () => void;
+  // Cron task props
+  /** Whether cron mode is currently enabled (before task starts) */
+  cronModeEnabled?: boolean;
+  /** Cron task config (for status bar display) */
+  cronConfig?: {
+    intervalMinutes: number;
+  } | null;
+  /** Active cron task (for overlay display) */
+  cronTask?: {
+    status: 'running' | 'paused' | 'stopped' | 'completed';
+    intervalMinutes: number;
+    executionCount: number;
+    lastExecutedAt?: string;
+  } | null;
+  /** Callback when cron button is clicked */
+  onCronButtonClick?: () => void;
+  /** Callback when cron settings button is clicked (from status bar or overlay) */
+  onCronSettings?: () => void;
+  /** Callback when cron is cancelled (from status bar X button) */
+  onCronCancel?: () => void;
+  /** Callback when cron task is paused */
+  onCronPause?: () => void;
+  /** Callback when cron task is resumed */
+  onCronResume?: () => void;
+  /** Callback when cron task is stopped */
+  onCronStop?: () => void;
+  /** Callback when input text changes (for cron prompt tracking) */
+  onInputChange?: (text: string) => void;
 }
 
 const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
@@ -70,6 +100,8 @@ export interface SimpleChatInputHandle {
   processDroppedFilePaths?: (paths: string[]) => Promise<void>;
   /** Insert @references at cursor position or end of input */
   insertReferences: (paths: string[]) => void;
+  /** Set the input value directly (used for restoring content after cron stop) */
+  setValue: (value: string) => void;
 }
 
 // File search result type
@@ -104,6 +136,16 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onRefreshProviders,
   onOpenAgentSettings,
   onWorkspaceRefresh,
+  cronModeEnabled = false,
+  cronConfig,
+  cronTask,
+  onCronButtonClick,
+  onCronSettings,
+  onCronCancel,
+  onCronPause,
+  onCronResume,
+  onCronStop,
+  onInputChange,
 }, ref) {
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -118,6 +160,11 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalValue]);
+
+  // Notify parent of input value changes (for cron prompt tracking)
+  useEffect(() => {
+    onInputChange?.(inputValue);
+  }, [inputValue, onInputChange]);
 
   // Check if a provider is available:
   // - Subscription type: always available
@@ -641,12 +688,20 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     }, 0);
   }, [textareaRef]);
 
+  // Set input value directly (for restoring content after cron stop)
+  const setValue = useCallback((value: string) => {
+    setInputValue(value);
+    // Also focus the textarea
+    textareaRef.current?.focus();
+  }, []);
+
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
     processDroppedFiles,
     processDroppedFilePaths,
     insertReferences,
-  }), [processDroppedFiles, processDroppedFilePaths, insertReferences]);
+    setValue,
+  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, setValue]);
 
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1016,7 +1071,35 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
       {/* Input container */}
       <div className="pointer-events-auto relative w-full max-w-3xl">
-        <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl">
+        {/* Cron task status bar - shows when cron mode enabled but task not started */}
+        {cronModeEnabled && !cronTask && cronConfig && (
+          <CronTaskStatusBar
+            intervalMinutes={cronConfig.intervalMinutes}
+            onSettings={() => onCronSettings?.()}
+            onCancel={() => onCronCancel?.()}
+          />
+        )}
+
+        <div className={`relative border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl ${
+          cronModeEnabled && !cronTask && cronConfig
+            ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
+            : 'rounded-2xl'  // Normal: fully rounded
+        }`}>
+          {/* Cron task overlay - shows when task is running/paused */}
+          {cronTask && (cronTask.status === 'running' || cronTask.status === 'paused') && (
+            <CronTaskOverlay
+              status={cronTask.status}
+              intervalMinutes={cronTask.intervalMinutes}
+              executionCount={cronTask.executionCount}
+              nextExecutionTime={cronTask.lastExecutedAt
+                ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
+                : undefined}
+              onPause={() => onCronPause?.()}
+              onResume={() => onCronResume?.()}
+              onStop={() => onCronStop?.()}
+              onSettings={() => onCronSettings?.()}
+            />
+          )}
           {/* Clickable area for focus - covers input area but not toolbar */}
           <div
             className="cursor-text"
@@ -1231,6 +1314,25 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   </div>
                 )}
               </div>
+
+              {/* Cron Task Button */}
+              {onCronButtonClick && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCronButtonClick();
+                  }}
+                  className={`rounded-lg p-2 transition-colors ${
+                    cronModeEnabled
+                      ? 'bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                  }`}
+                  title={cronModeEnabled ? '定时任务已启用' : '设置定时任务'}
+                >
+                  <Clock className="h-4 w-4" />
+                </button>
+              )}
 
               {/* Hidden file input */}
               <input
