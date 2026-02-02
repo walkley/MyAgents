@@ -2,7 +2,7 @@
 // Handles spawning, monitoring, and shutting down multiple Bun backend server instances
 // Supports per-Tab isolation with independent Sidecar processes
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -272,11 +272,69 @@ impl Drop for SidecarInstance {
     }
 }
 
+/// Session activation record
+/// Tracks which Sidecar is currently "activating" a Session
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionActivation {
+    /// Session ID being activated
+    pub session_id: String,
+    /// Tab ID that owns this activation (None for headless cron tasks)
+    pub tab_id: Option<String>,
+    /// Port of the Sidecar handling this session
+    pub port: u16,
+    /// Workspace path
+    pub workspace_path: String,
+    /// Whether this is a cron task activation
+    pub is_cron_task: bool,
+}
+
+/// Reference to a Sidecar user (either a Tab or a CronTask)
+/// Used for reference counting to determine when a Sidecar can be safely stopped
+#[derive(Debug, Clone, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum UserRef {
+    /// A Tab that is using the Sidecar
+    Tab(String),
+    /// A CronTask that is using the Sidecar
+    CronTask(String),
+}
+
+impl std::fmt::Display for UserRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserRef::Tab(id) => write!(f, "Tab({})", id),
+            UserRef::CronTask(id) => write!(f, "CronTask({})", id),
+        }
+    }
+}
+
+/// Sidecar info for external queries
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SidecarInfo {
+    pub port: u16,
+    pub workspace_path: String,
+    pub is_healthy: bool,
+}
+
 /// Multi-instance Sidecar Manager
-/// Manages multiple Sidecar processes, one per Tab
+/// Manages multiple Sidecar processes with Session singleton support
+///
+/// Reference Counting Architecture:
+/// - Each workspace can have one Sidecar process
+/// - Multiple "users" (Tabs and CronTasks) can reference the same workspace's Sidecar
+/// - Sidecar is only stopped when all users have unregistered (ref count = 0)
 pub struct SidecarManager {
-    /// Tab ID -> Sidecar Instance
+    /// Tab ID -> Sidecar Instance (primary mapping, kept for backward compatibility)
     instances: HashMap<String, SidecarInstance>,
+    /// Session ID -> Session Activation (tracks which session is active)
+    session_activations: HashMap<String, SessionActivation>,
+    /// Workspace Path -> Primary Tab ID (for Sidecar reuse within same workspace)
+    workspace_primary_tab: HashMap<String, String>,
+    /// Workspace Path -> Set of Users (reference counting for Sidecar lifecycle)
+    /// The Sidecar for a workspace stays alive as long as this set is non-empty
+    workspace_users: HashMap<String, HashSet<UserRef>>,
+    /// Tab ID -> Workspace Path (for looking up workspace when Tab closes)
+    /// This is needed because Tabs that reuse a Sidecar don't have their own instance
+    tab_workspaces: HashMap<String, String>,
     /// Port counter for allocation (starts from BASE_PORT)
     port_counter: AtomicU16,
 }
@@ -285,6 +343,10 @@ impl SidecarManager {
     pub fn new() -> Self {
         Self {
             instances: HashMap::new(),
+            session_activations: HashMap::new(),
+            workspace_primary_tab: HashMap::new(),
+            workspace_users: HashMap::new(),
+            tab_workspaces: HashMap::new(),
             port_counter: AtomicU16::new(BASE_PORT),
         }
     }
@@ -345,6 +407,225 @@ impl SidecarManager {
     pub fn stop_all(&mut self) {
         log::info!("[sidecar] Stopping all {} instances", self.instances.len());
         self.instances.clear(); // Drop will kill each process
+        self.session_activations.clear();
+        self.workspace_primary_tab.clear();
+        self.workspace_users.clear();
+        self.tab_workspaces.clear();
+    }
+
+    // ============= Session Activation Methods =============
+
+    /// Get session activation by session ID
+    pub fn get_session_activation(&self, session_id: &str) -> Option<&SessionActivation> {
+        self.session_activations.get(session_id)
+    }
+
+    /// Activate a session (associate it with a Sidecar)
+    pub fn activate_session(
+        &mut self,
+        session_id: String,
+        tab_id: Option<String>,
+        port: u16,
+        workspace_path: String,
+        is_cron_task: bool,
+    ) {
+        log::info!(
+            "[sidecar] Activating session {} on port {}, tab: {:?}, cron: {}",
+            session_id, port, tab_id, is_cron_task
+        );
+        self.session_activations.insert(
+            session_id.clone(),
+            SessionActivation {
+                session_id,
+                tab_id,
+                port,
+                workspace_path,
+                is_cron_task,
+            },
+        );
+    }
+
+    /// Deactivate a session
+    pub fn deactivate_session(&mut self, session_id: &str) -> Option<SessionActivation> {
+        log::info!("[sidecar] Deactivating session {}", session_id);
+        self.session_activations.remove(session_id)
+    }
+
+    /// Update session activation's tab_id (e.g., when a Tab connects to headless Sidecar)
+    pub fn update_session_tab(&mut self, session_id: &str, tab_id: Option<String>) {
+        if let Some(activation) = self.session_activations.get_mut(session_id) {
+            log::info!(
+                "[sidecar] Updating session {} tab: {:?} -> {:?}",
+                session_id, activation.tab_id, tab_id
+            );
+            activation.tab_id = tab_id;
+            // If a tab connects, it's no longer a pure cron task session
+            if activation.tab_id.is_some() {
+                activation.is_cron_task = false;
+            }
+        }
+    }
+
+    /// Get all active sessions for a workspace
+    pub fn get_workspace_sessions(&self, workspace_path: &str) -> Vec<&SessionActivation> {
+        self.session_activations
+            .values()
+            .filter(|a| a.workspace_path == workspace_path)
+            .collect()
+    }
+
+    // ============= Workspace Sidecar Management =============
+
+    /// Get the primary tab for a workspace (if exists)
+    pub fn get_workspace_primary_tab(&self, workspace_path: &str) -> Option<&String> {
+        self.workspace_primary_tab.get(workspace_path)
+    }
+
+    /// Set the primary tab for a workspace
+    pub fn set_workspace_primary_tab(&mut self, workspace_path: String, tab_id: String) {
+        log::debug!("[sidecar] Setting workspace {} primary tab: {}", workspace_path, tab_id);
+        self.workspace_primary_tab.insert(workspace_path, tab_id);
+    }
+
+    /// Remove the primary tab for a workspace
+    pub fn remove_workspace_primary_tab(&mut self, workspace_path: &str) -> Option<String> {
+        self.workspace_primary_tab.remove(workspace_path)
+    }
+
+    /// Get Sidecar info for a workspace (if a Sidecar is running)
+    pub fn get_workspace_sidecar(&mut self, workspace_path: &str) -> Option<SidecarInfo> {
+        // Find the primary tab for this workspace
+        let primary_tab = self.workspace_primary_tab.get(workspace_path)?.clone();
+
+        // Get the Sidecar instance
+        let instance = self.instances.get_mut(&primary_tab)?;
+
+        Some(SidecarInfo {
+            port: instance.port,
+            workspace_path: workspace_path.to_string(),
+            is_healthy: instance.is_running(),
+        })
+    }
+
+    /// Check if a workspace has any users (tabs or cron tasks)
+    /// Reserved for future use (e.g., safe Sidecar shutdown checks)
+    #[allow(dead_code)]
+    pub fn workspace_has_users(&self, workspace_path: &str) -> bool {
+        // Check if any session activation is using this workspace
+        self.session_activations
+            .values()
+            .any(|a| a.workspace_path == workspace_path)
+    }
+
+    /// Get all tab IDs using a workspace
+    pub fn get_workspace_tabs(&self, workspace_path: &str) -> Vec<String> {
+        self.session_activations
+            .values()
+            .filter(|a| a.workspace_path == workspace_path && a.tab_id.is_some())
+            .filter_map(|a| a.tab_id.clone())
+            .collect()
+    }
+
+    // ============= Reference Counting Methods (Sidecar Lifecycle) =============
+
+    /// Register a user (Tab or CronTask) for a workspace
+    /// This increments the reference count for the workspace's Sidecar
+    pub fn register_user(&mut self, workspace_path: &str, user: UserRef) {
+        let users = self.workspace_users
+            .entry(workspace_path.to_string())
+            .or_insert_with(HashSet::new);
+
+        let was_empty = users.is_empty();
+        users.insert(user.clone());
+
+        // Also track tab -> workspace mapping for Tabs
+        if let UserRef::Tab(ref tab_id) = user {
+            self.tab_workspaces.insert(tab_id.clone(), workspace_path.to_string());
+        }
+
+        log::info!(
+            "[sidecar] Registered {} for workspace {}, total users: {} (was_empty: {})",
+            user, workspace_path, users.len(), was_empty
+        );
+    }
+
+    /// Unregister a user (Tab or CronTask) from a workspace
+    /// Returns true if the workspace has no more users (Sidecar can be stopped)
+    pub fn unregister_user(&mut self, workspace_path: &str, user: &UserRef) -> bool {
+        // Also clean up tab -> workspace mapping for Tabs
+        if let UserRef::Tab(ref tab_id) = user {
+            self.tab_workspaces.remove(tab_id);
+        }
+
+        let should_stop = if let Some(users) = self.workspace_users.get_mut(workspace_path) {
+            users.remove(user);
+            let is_empty = users.is_empty();
+            log::info!(
+                "[sidecar] Unregistered {} from workspace {}, remaining users: {}, should_stop: {}",
+                user, workspace_path, users.len(), is_empty
+            );
+            is_empty
+        } else {
+            log::warn!(
+                "[sidecar] Attempted to unregister {} from workspace {} but no users registered",
+                user, workspace_path
+            );
+            true // No users, safe to stop
+        };
+
+        // Clean up empty entry
+        if should_stop {
+            self.workspace_users.remove(workspace_path);
+        }
+
+        should_stop
+    }
+
+    /// Get the workspace path for a Tab (for looking up when Tab closes)
+    pub fn get_tab_workspace(&self, tab_id: &str) -> Option<String> {
+        self.tab_workspaces.get(tab_id).cloned()
+    }
+
+    /// Get all users for a workspace
+    pub fn get_workspace_users(&self, workspace_path: &str) -> Vec<UserRef> {
+        self.workspace_users
+            .get(workspace_path)
+            .map(|users| users.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Check if a workspace has any users (Tab or CronTask)
+    pub fn workspace_has_any_users(&self, workspace_path: &str) -> bool {
+        self.workspace_users
+            .get(workspace_path)
+            .map(|users| !users.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Check if a specific user is registered for a workspace
+    pub fn is_user_registered(&self, workspace_path: &str, user: &UserRef) -> bool {
+        self.workspace_users
+            .get(workspace_path)
+            .map(|users| users.contains(user))
+            .unwrap_or(false)
+    }
+
+    /// Get all cron task users for a workspace
+    pub fn get_workspace_cron_tasks(&self, workspace_path: &str) -> Vec<String> {
+        self.workspace_users
+            .get(workspace_path)
+            .map(|users| {
+                users.iter()
+                    .filter_map(|user| {
+                        if let UserRef::CronTask(id) = user {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -675,6 +956,7 @@ fn wait_for_health(port: u16) -> Result<(), String> {
 // ============= Tab-based Multi-instance Commands =============
 
 /// Start a Sidecar for a specific Tab
+/// Supports Sidecar reuse: if the workspace already has a running Sidecar, reuse it
 pub fn start_tab_sidecar<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
@@ -691,6 +973,24 @@ pub fn start_tab_sidecar<R: Runtime>(
         if instance.is_running() {
             log::info!("[sidecar] Tab {} already has running instance on port {}", tab_id, instance.port);
             return Ok(instance.port);
+        }
+    }
+
+    // Check if workspace already has a running Sidecar (for reuse)
+    if let Some(ref dir) = agent_dir {
+        let workspace_path = dir.to_string_lossy().to_string();
+        if let Some(sidecar_info) = manager_guard.get_workspace_sidecar(&workspace_path) {
+            if sidecar_info.is_healthy {
+                log::info!(
+                    "[sidecar] Reusing existing Sidecar for workspace {} (port {}), tab {}",
+                    workspace_path, sidecar_info.port, tab_id
+                );
+
+                // Register this Tab as a user of the workspace (reference counting)
+                manager_guard.register_user(&workspace_path, UserRef::Tab(tab_id.to_string()));
+
+                return Ok(sidecar_info.port);
+            }
         }
     }
 
@@ -858,10 +1158,19 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Wait for health
     match wait_for_health(port) {
         Ok(()) => {
-            // Mark as healthy
+            // Mark as healthy, set workspace primary tab, and register Tab user
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
             if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
                 instance.healthy = true;
+
+                // Set this tab as the primary tab for the workspace
+                if let Some(ref dir) = instance.agent_dir {
+                    let workspace_path = dir.to_string_lossy().to_string();
+                    manager_guard.set_workspace_primary_tab(workspace_path.clone(), tab_id.to_string());
+
+                    // Register this Tab as a user of the workspace (reference counting)
+                    manager_guard.register_user(&workspace_path, UserRef::Tab(tab_id.to_string()));
+                }
             }
             Ok(port)
         }
@@ -904,14 +1213,79 @@ pub fn start_tab_sidecar<R: Runtime>(
 }
 
 /// Stop a Sidecar for a specific Tab
+/// Uses reference counting: only stops if no other users (Tabs or CronTasks) are using the workspace
 pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result<(), String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    
+
+    // Get the workspace path for this tab
+    // First check if tab has its own instance, otherwise look up from tab_workspaces
+    // (needed for Tabs that reused another Tab's Sidecar)
+    let workspace_path = manager_guard
+        .get_instance(tab_id)
+        .and_then(|i| i.agent_dir.as_ref())
+        .map(|p| p.to_string_lossy().to_string())
+        .or_else(|| manager_guard.get_tab_workspace(tab_id));
+
+    // Check if this tab is the primary tab for the workspace
+    let is_primary = if let Some(ref wp) = workspace_path {
+        manager_guard.get_workspace_primary_tab(wp).map(|t| t == tab_id).unwrap_or(false)
+    } else {
+        false
+    };
+
+    if let Some(ref wp) = workspace_path {
+        // Unregister this Tab from the workspace's users
+        let user = UserRef::Tab(tab_id.to_string());
+        let should_stop = manager_guard.unregister_user(wp, &user);
+
+        if !should_stop {
+            // Other users exist - don't stop the Sidecar
+            let remaining_users = manager_guard.get_workspace_users(wp);
+            log::info!(
+                "[sidecar] Tab {} closing but workspace {} has other users: {:?}, keeping Sidecar alive",
+                tab_id, wp, remaining_users
+            );
+
+            // If this tab was the primary, transfer to another tab
+            if is_primary {
+                // Find another Tab user to be the new primary
+                let other_tabs: Vec<String> = remaining_users.iter()
+                    .filter_map(|u| {
+                        if let UserRef::Tab(id) = u {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !other_tabs.is_empty() {
+                    let new_primary = other_tabs[0].clone();
+                    log::info!("[sidecar] Transferring primary tab from {} to {}", tab_id, new_primary);
+                    manager_guard.set_workspace_primary_tab(wp.clone(), new_primary);
+                }
+            }
+
+            // Don't remove the instance - just return
+            return Ok(());
+        }
+
+        // All users removed - safe to stop the Sidecar
+        log::info!("[sidecar] All users unregistered from workspace {}, stopping Sidecar", wp);
+    }
+
+    // No other users - stop the Sidecar
+    if is_primary {
+        if let Some(ref wp) = workspace_path {
+            manager_guard.remove_workspace_primary_tab(wp);
+        }
+    }
+
     if let Some(instance) = manager_guard.remove_instance(tab_id) {
         log::info!("[sidecar] Stopped instance for tab {} on port {}", tab_id, instance.port);
         // Instance is dropped here, killing the process
     }
-    
+
     Ok(())
 }
 
@@ -947,6 +1321,41 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
             agent_dir: String::new(),
         })
     }
+}
+
+/// Start a headless Sidecar for cron task execution
+/// Returns the port of the Sidecar (either existing or newly started)
+pub fn start_cron_sidecar<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    workspace_path: &str,
+    task_id: &str,
+) -> Result<u16, String> {
+    // Use a special tab ID format for cron tasks
+    let cron_tab_id = format!("__cron_{}__", task_id);
+
+    log::info!(
+        "[sidecar] Starting cron sidecar for task {} in workspace {}",
+        task_id, workspace_path
+    );
+
+    // Check if workspace already has a Sidecar
+    {
+        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        if let Some(info) = manager_guard.get_workspace_sidecar(workspace_path) {
+            if info.is_healthy {
+                log::info!(
+                    "[sidecar] Reusing existing Sidecar for cron task {} (port {})",
+                    task_id, info.port
+                );
+                return Ok(info.port);
+            }
+        }
+    }
+
+    // Start a new Sidecar using the cron tab ID
+    let agent_dir = PathBuf::from(workspace_path);
+    start_tab_sidecar(app_handle, manager, &cron_tab_id, Some(agent_dir))
 }
 
 /// Start the global sidecar (for Settings page)
@@ -1166,7 +1575,7 @@ pub fn ensure_sidecar_running<R: Runtime>(
     state: &ManagedSidecar,
 ) -> Result<u16, String> {
     const LEGACY_TAB_ID: &str = "__legacy__";
-    
+
     // Check if already running
     {
         let mut manager_guard = state.lock().map_err(|e| e.to_string())?;
@@ -1176,7 +1585,318 @@ pub fn ensure_sidecar_running<R: Runtime>(
             }
         }
     }
-    
+
     // Need to restart
     restart_sidecar(app_handle, state)
+}
+
+// ============= Session Activation Tauri Commands =============
+
+/// Get session activation status
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_get_session_activation(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> Option<SessionActivation> {
+    let manager = state.lock().ok()?;
+    manager.get_session_activation(&sessionId).cloned()
+}
+
+/// Activate a session (associate with Sidecar)
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_activate_session(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+    tabId: Option<String>,
+    port: u16,
+    workspacePath: String,
+    isCronTask: bool,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.activate_session(sessionId, tabId, port, workspacePath, isCronTask);
+    Ok(())
+}
+
+/// Deactivate a session
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_deactivate_session(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.deactivate_session(&sessionId);
+    Ok(())
+}
+
+/// Update session's tab association
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_update_session_tab(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+    tabId: Option<String>,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.update_session_tab(&sessionId, tabId);
+    Ok(())
+}
+
+/// Get Sidecar info for a workspace
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_get_workspace_sidecar(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+) -> Option<SidecarInfo> {
+    let mut manager = state.lock().ok()?;
+    manager.get_workspace_sidecar(&workspacePath)
+}
+
+/// Start a headless Sidecar for cron task execution
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_start_cron_sidecar(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    taskId: String,
+) -> Result<u16, String> {
+    start_cron_sidecar(&app_handle, &state, &workspacePath, &taskId)
+}
+
+/// Cron task execution payload - sent to Sidecar's /cron/execute-sync endpoint
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronExecutePayload {
+    pub task_id: String,
+    pub prompt: String,
+    /// Session ID for activation tracking (prevents Sidecar from being killed during cron execution)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_first_execution: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_can_exit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_env: Option<ProviderEnv>,
+    /// Run mode: "single_session" (keep context) or "new_session" (fresh each time)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEnv {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// Cron task execution response from Sidecar
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronExecuteResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_requested_exit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
+}
+
+/// Execute a cron task synchronously via Sidecar HTTP API
+/// This function starts/reuses a Sidecar for the workspace and calls its /cron/execute-sync endpoint
+pub async fn execute_cron_task<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    workspace_path: &str,
+    payload: CronExecutePayload,
+) -> Result<CronExecuteResponse, String> {
+    // Start or reuse Sidecar for this workspace
+    let port = start_cron_sidecar(app_handle, manager, workspace_path, &payload.task_id)?;
+
+    // Activate session as cron task (prevents Sidecar from being killed if Tab closes)
+    if let Some(ref session_id) = payload.session_id {
+        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        manager_guard.activate_session(
+            session_id.clone(),
+            None,  // No tab_id for cron tasks
+            port,
+            workspace_path.to_string(),
+            true,  // is_cron_task = true
+        );
+        log::info!(
+            "[sidecar] Cron task {} activated session {} as cron (port {})",
+            payload.task_id, session_id, port
+        );
+    }
+
+    let url = format!("http://127.0.0.1:{}/cron/execute-sync", port);
+    log::info!(
+        "[sidecar] Executing cron task {} via {}",
+        payload.task_id, url
+    );
+
+    // Create HTTP client with generous timeout (cron tasks can take long)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(660)) // 11 minutes (slightly more than Sidecar's 10 min timeout)
+        .tcp_nodelay(true)
+        .no_proxy() // Disable proxy for localhost
+        .build()
+        .map_err(|e| format!("[sidecar] Failed to create HTTP client: {}", e))?;
+
+    // Send request to Sidecar
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await;
+
+    // Deactivate session after execution (regardless of success/failure)
+    // Note: We keep the session activated between cron executions to protect Sidecar.
+    // Only deactivate if the task is being stopped or completed.
+    // For now, we keep it activated - the cron scheduler should deactivate when task stops.
+
+    let response = response.map_err(|e| format!("[sidecar] HTTP request failed: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("[sidecar] Failed to read response body: {}", e))?;
+
+    log::info!(
+        "[sidecar] Cron task {} response: status={}, body={}",
+        payload.task_id, status, body.chars().take(200).collect::<String>()
+    );
+
+    // Parse response
+    let result: CronExecuteResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body))?;
+
+    Ok(result)
+}
+
+/// Tauri command to execute a cron task synchronously
+/// This is called by the cron scheduler in Rust
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_execute_cron_task(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    taskId: String,
+    sessionId: Option<String>,
+    prompt: String,
+    isFirstExecution: Option<bool>,
+    aiCanExit: Option<bool>,
+    permissionMode: Option<String>,
+    model: Option<String>,
+    providerEnv: Option<ProviderEnv>,
+    runMode: Option<String>,
+) -> Result<CronExecuteResponse, String> {
+    let payload = CronExecutePayload {
+        task_id: taskId.clone(),
+        prompt,
+        session_id: sessionId,
+        is_first_execution: isFirstExecution,
+        ai_can_exit: aiCanExit,
+        permission_mode: permissionMode,
+        model,
+        provider_env: providerEnv,
+        run_mode: runMode,
+    };
+
+    execute_cron_task(&app_handle, &state, &workspacePath, payload).await
+}
+
+// ============= User Registration Tauri Commands (Reference Counting) =============
+
+/// Register a Tab user for a workspace
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_register_tab_user(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    tabId: String,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.register_user(&workspacePath, UserRef::Tab(tabId));
+    Ok(())
+}
+
+/// Register a CronTask user for a workspace
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_register_cron_task_user(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    taskId: String,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.register_user(&workspacePath, UserRef::CronTask(taskId));
+    Ok(())
+}
+
+/// Unregister a Tab user from a workspace
+/// Returns true if the Sidecar should be stopped (no more users)
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_unregister_tab_user(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    tabId: String,
+) -> Result<bool, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    let should_stop = manager.unregister_user(&workspacePath, &UserRef::Tab(tabId));
+    Ok(should_stop)
+}
+
+/// Unregister a CronTask user from a workspace
+/// Returns true if the Sidecar should be stopped (no more users)
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_unregister_cron_task_user(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+    taskId: String,
+) -> Result<bool, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    let should_stop = manager.unregister_user(&workspacePath, &UserRef::CronTask(taskId));
+    Ok(should_stop)
+}
+
+/// Get all users for a workspace
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_get_workspace_users(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+) -> Result<Vec<String>, String> {
+    let manager = state.lock().map_err(|e| e.to_string())?;
+    let users = manager.get_workspace_users(&workspacePath)
+        .into_iter()
+        .map(|u| u.to_string())
+        .collect();
+    Ok(users)
+}
+
+/// Check if a workspace has any users
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_workspace_has_users(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    workspacePath: String,
+) -> Result<bool, String> {
+    let manager = state.lock().map_err(|e| e.to_string())?;
+    Ok(manager.workspace_has_any_users(&workspacePath))
 }
