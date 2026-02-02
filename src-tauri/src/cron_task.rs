@@ -642,11 +642,20 @@ impl CronTaskManager {
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
             if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
-                if let Ok(mut manager) = sidecar_state.lock() {
-                    manager.deactivate_session(session_id);
-                    log::debug!("[CronTask] Deactivated session: {}", session_id);
+                match sidecar_state.lock() {
+                    Ok(mut manager) => {
+                        manager.deactivate_session(session_id);
+                        log::debug!("[CronTask] Deactivated session: {}", session_id);
+                    }
+                    Err(e) => {
+                        log::error!("[CronTask] Cannot deactivate session {}: lock poisoned: {}", session_id, e);
+                    }
                 }
+            } else {
+                log::warn!("[CronTask] Cannot deactivate session {}: SidecarManager state not found", session_id);
             }
+        } else {
+            log::warn!("[CronTask] Cannot deactivate session {}: app handle not available", session_id);
         }
     }
 
@@ -655,17 +664,26 @@ impl CronTaskManager {
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
             if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
-                if let Ok(mut manager) = sidecar_state.lock() {
-                    let user = UserRef::CronTask(task_id.to_string());
-                    let should_stop = manager.unregister_user(workspace_path, &user);
-                    log::info!(
-                        "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
-                        task_id, workspace_path, should_stop
-                    );
-                    // Note: We don't actually stop the Sidecar here - that's handled by stop_tab_sidecar
-                    // when all users are unregistered
+                match sidecar_state.lock() {
+                    Ok(mut manager) => {
+                        let user = UserRef::CronTask(task_id.to_string());
+                        let should_stop = manager.unregister_user(workspace_path, &user);
+                        log::info!(
+                            "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
+                            task_id, workspace_path, should_stop
+                        );
+                        // Note: We don't actually stop the Sidecar here - that's handled by stop_tab_sidecar
+                        // when all users are unregistered
+                    }
+                    Err(e) => {
+                        log::error!("[CronTask] Cannot unregister CronTask {}: lock poisoned: {}", task_id, e);
+                    }
                 }
+            } else {
+                log::warn!("[CronTask] Cannot unregister CronTask {}: SidecarManager state not found", task_id);
             }
+        } else {
+            log::warn!("[CronTask] Cannot unregister CronTask {}: app handle not available", task_id);
         }
     }
 
@@ -858,29 +876,30 @@ async fn complete_task_internal(
     exit_reason: Option<String>,
 ) {
     // Get session ID and workspace path before updating status
-    let (session_id, workspace_path) = {
+    let task_info = {
         let tasks_guard = tasks.read().await;
-        tasks_guard.get(task_id).map(|t| (t.session_id.clone(), t.workspace_path.clone())).unzip()
+        tasks_guard.get(task_id).map(|t| (t.session_id.clone(), t.workspace_path.clone()))
+    };
+
+    let Some((session_id, workspace_path)) = task_info else {
+        log::warn!("[CronTask] Task {} not found in complete_task_internal", task_id);
+        return;
     };
 
     // Unregister CronTask user (reference counting) and deactivate session
     if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut manager) = sidecar_state.lock() {
             // Unregister CronTask user
-            if let Some(ref wp) = workspace_path {
-                let user = UserRef::CronTask(task_id.to_string());
-                let should_stop = manager.unregister_user(wp, &user);
-                log::info!(
-                    "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
-                    task_id, wp, should_stop
-                );
-            }
+            let user = UserRef::CronTask(task_id.to_string());
+            let should_stop = manager.unregister_user(&workspace_path, &user);
+            log::info!(
+                "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
+                task_id, workspace_path, should_stop
+            );
 
             // Deactivate session
-            if let Some(ref sid) = session_id {
-                manager.deactivate_session(sid);
-                log::info!("[CronTask] Deactivated session {} for completed task {}", sid, task_id);
-            }
+            manager.deactivate_session(&session_id);
+            log::info!("[CronTask] Deactivated session {} for completed task {}", session_id, task_id);
         }
     }
 

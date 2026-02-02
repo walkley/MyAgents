@@ -467,6 +467,8 @@ impl SidecarManager {
     }
 
     /// Get all active sessions for a workspace
+    /// Reserved for future use (e.g., debugging, admin UI)
+    #[allow(dead_code)]
     pub fn get_workspace_sessions(&self, workspace_path: &str) -> Vec<&SessionActivation> {
         self.session_activations
             .values()
@@ -518,6 +520,8 @@ impl SidecarManager {
     }
 
     /// Get all tab IDs using a workspace
+    /// Reserved for future use
+    #[allow(dead_code)]
     pub fn get_workspace_tabs(&self, workspace_path: &str) -> Vec<String> {
         self.session_activations
             .values()
@@ -603,6 +607,8 @@ impl SidecarManager {
     }
 
     /// Check if a specific user is registered for a workspace
+    /// Reserved for future use (e.g., debugging)
+    #[allow(dead_code)]
     pub fn is_user_registered(&self, workspace_path: &str, user: &UserRef) -> bool {
         self.workspace_users
             .get(workspace_path)
@@ -611,6 +617,8 @@ impl SidecarManager {
     }
 
     /// Get all cron task users for a workspace
+    /// Reserved for future use (e.g., task center UI)
+    #[allow(dead_code)]
     pub fn get_workspace_cron_tasks(&self, workspace_path: &str) -> Vec<String> {
         self.workspace_users
             .get(workspace_path)
@@ -1246,7 +1254,10 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
                 tab_id, wp, remaining_users
             );
 
-            // If this tab was the primary, transfer to another tab
+            // If this tab was the primary, transfer to another tab (if available)
+            // IMPORTANT: If no other Tabs exist but CronTasks do, we keep the primary_tab
+            // pointing to the old tab ID so get_workspace_sidecar can still find the instance.
+            // The instance is NOT removed because should_stop is false.
             if is_primary {
                 // Find another Tab user to be the new primary
                 let other_tabs: Vec<String> = remaining_users.iter()
@@ -1263,6 +1274,15 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
                     let new_primary = other_tabs[0].clone();
                     log::info!("[sidecar] Transferring primary tab from {} to {}", tab_id, new_primary);
                     manager_guard.set_workspace_primary_tab(wp.clone(), new_primary);
+                } else {
+                    // No other Tabs, but CronTasks exist
+                    // Keep the workspace_primary_tab pointing to the old tab so
+                    // get_workspace_sidecar can still find the instance
+                    log::info!(
+                        "[sidecar] Tab {} was primary but only CronTasks remain, keeping primary_tab reference for instance lookup",
+                        tab_id
+                    );
+                    // Note: We intentionally do NOT remove workspace_primary_tab here
                 }
             }
 
