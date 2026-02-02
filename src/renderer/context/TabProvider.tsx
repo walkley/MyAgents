@@ -1003,11 +1003,10 @@ export default function TabProvider({
         }
     }, []);
 
-    // Track agentDir for cleanup (need ref because cleanup runs after props may change)
-    const agentDirRef = useRef(agentDir);
-    agentDirRef.current = agentDir;
-
-    // Cleanup on unmount - disconnect SSE, clear pending timers, and stop Tab's Sidecar
+    // Cleanup on unmount - disconnect SSE and clear pending timers
+    // NOTE: Sidecar lifecycle is now managed by App.tsx performCloseTab(),
+    // which checks for active cron tasks before stopping.
+    // Do NOT call stopTabSidecar here - it would bypass cron task protection.
     useEffect(() => {
         return () => {
             if (sseRef.current) {
@@ -1017,11 +1016,8 @@ export default function TabProvider({
                 clearTimeout(stopTimeoutRef.current);
                 stopTimeoutRef.current = null;
             }
-            // Only stop Sidecar if this Tab had one (i.e., was running a project)
-            // Settings/Launcher tabs don't have sidecars (agentDir is empty string)
-            if (agentDirRef.current) {
-                void stopTabSidecar(tabId);
-            }
+            // Sidecar stop is handled by App.tsx performCloseTab()
+            // which properly checks for active cron tasks before stopping
         };
     }, [tabId]);
 
