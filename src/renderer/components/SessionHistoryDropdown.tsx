@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import { BarChart2, Clock, Trash2 } from 'lucide-react';
 
 import { deleteSession, getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { getWorkspaceCronTasks } from '@/api/cronTaskClient';
+import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 
 import SessionStatsModal from './SessionStatsModal';
@@ -16,6 +18,7 @@ interface SessionHistoryDropdownProps {
 
 // Track fetch state: null = not fetched, empty array = fetched but empty
 type FetchState = SessionMetadata[] | null;
+type CronTaskFetchState = CronTask[] | null;
 
 export default function SessionHistoryDropdown({
     agentDir,
@@ -25,25 +28,55 @@ export default function SessionHistoryDropdown({
     onClose,
 }: SessionHistoryDropdownProps) {
     const [sessions, setSessions] = useState<FetchState>(null);
+    const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
+
+    // Map sessionId to active cron task (running or paused)
+    const sessionCronTaskMap = useMemo(() => {
+        if (!cronTasks) return new Map<string, CronTask>();
+        return new Map(
+            cronTasks
+                .filter(t => t.status === 'running' || t.status === 'paused')
+                .map(t => [t.sessionId, t])
+        );
+    }, [cronTasks]);
 
     // Keep onClose ref updated via effect
     useEffect(() => {
         onCloseRef.current = onClose;
     }, [onClose]);
 
-    // Load sessions when opened
+    // Load sessions and cron tasks when opened
     useEffect(() => {
         if (!isOpen || !agentDir) return;
 
         let cancelled = false;
 
         (async () => {
-            const data = await getSessions(agentDir);
-            if (!cancelled) {
-                setSessions(data);
+            // Load sessions and cron tasks in parallel, with independent error handling
+            const [sessionsResult, cronTasksResult] = await Promise.allSettled([
+                getSessions(agentDir),
+                getWorkspaceCronTasks(agentDir),
+            ]);
+
+            if (cancelled) return;
+
+            // Always set sessions if available (primary data)
+            if (sessionsResult.status === 'fulfilled') {
+                setSessions(sessionsResult.value);
+            } else {
+                console.error('[SessionHistoryDropdown] Failed to load sessions:', sessionsResult.reason);
+                setSessions([]); // Show empty state rather than loading forever
+            }
+
+            // Cron tasks are optional enhancement - don't block on failure
+            if (cronTasksResult.status === 'fulfilled') {
+                setCronTasks(cronTasksResult.value);
+            } else {
+                console.error('[SessionHistoryDropdown] Failed to load cron tasks:', cronTasksResult.reason);
+                setCronTasks([]); // Fall back to no cron task indicators
             }
         })();
 
@@ -51,6 +84,7 @@ export default function SessionHistoryDropdown({
             cancelled = true;
             // Reset state when closing or agentDir changes
             setSessions(null);
+            setCronTasks(null);
             setStatsSession(null);
         };
     }, [isOpen, agentDir]);
@@ -153,6 +187,11 @@ export default function SessionHistoryDropdown({
                                             {isCurrent && (
                                                 <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
                                                     当前
+                                                </span>
+                                            )}
+                                            {sessionCronTaskMap.has(session.id) && (
+                                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                                                    定时
                                                 </span>
                                             )}
                                             <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
