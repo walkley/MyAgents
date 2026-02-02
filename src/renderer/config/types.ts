@@ -208,6 +208,9 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
+  // General settings
+  autoStart: boolean; // 开机启动
+  cronNotifications: boolean; // 定时任务通知
   // API Keys for providers (stored separately for security)
   providerApiKeys?: Record<string, string>;
   // Provider verification status (persisted after API key validation)
@@ -482,4 +485,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   theme: 'light',
   minimizeToTray: false,
   showDevTools: false,
+  autoStart: false,
+  cronNotifications: true,
 };

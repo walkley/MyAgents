@@ -8,6 +8,7 @@ import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
+import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import {
     getModelsDisplay,
     PRESET_PROVIDERS,
@@ -31,6 +32,7 @@ import {
     deleteCustomMcpServer,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
+import { useAutostart } from '@/hooks/useAutostart';
 import { isDebugMode, getBuildVersions } from '@/utils/debug';
 import {
     isDeveloperSectionUnlocked,
@@ -43,7 +45,7 @@ import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
 // Settings sub-sections
-type SettingsSection = 'providers' | 'mcp' | 'skills' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -91,7 +93,7 @@ interface SettingsProps {
     onSectionChange?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['providers', 'mcp', 'skills', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -193,12 +195,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    // Determine initial section: use initialSection if valid, otherwise default to 'providers'
+    // Autostart hook for managing launch on startup
+    const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
+
+    // Determine initial section: use initialSection if valid, otherwise default to 'general'
     const getInitialSection = (): SettingsSection => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
             return initialSection as SettingsSection;
         }
-        return 'providers';
+        return 'general';
     };
 
     const [activeSection, setActiveSection] = useState<SettingsSection>(getInitialSection);
@@ -406,6 +411,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Developer section unlock state
     const [devSectionVisible, setDevSectionVisible] = useState(isDeveloperSectionUnlocked);
+    const [showCronDebugPanel, setShowCronDebugPanel] = useState(false);
     const logoTapCountRef = useRef(0);
     const logoTapTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -1118,6 +1124,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                 <nav className="space-y-1">
                     <button
+                        onClick={() => setActiveSection('general')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        通用
+                    </button>
+                    <button
                         onClick={() => setActiveSection('providers')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'providers'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1167,6 +1182,115 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                 {/* Other sections use narrower layout */}
                 <div className={`mx-auto max-w-xl px-8 py-8 ${activeSection === 'skills' ? 'hidden' : ''}`}>
+
+                    {activeSection === 'general' && (
+                        <div className="space-y-6">
+                            <div>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
+                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                    配置应用程序的通用行为
+                                </p>
+                            </div>
+
+                            {/* Startup Settings */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">启动设置</h3>
+
+                                {/* Auto Start */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">开机启动</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            系统启动时自动运行 MyAgents
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={async () => {
+                                            const success = await setAutostart(!autostartEnabled);
+                                            if (success) {
+                                                toast.success(autostartEnabled ? '已关闭开机启动' : '已开启开机启动');
+                                            } else {
+                                                toast.error('设置失败，请重试');
+                                            }
+                                        }}
+                                        disabled={autostartLoading}
+                                        className={`relative h-6 w-11 rounded-full transition-colors ${
+                                            autostartLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                                        } ${
+                                            autostartEnabled
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--paper-inset)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                autostartEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                {/* Minimize to Tray */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">最小化到托盘</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            关闭窗口时最小化到系统托盘而非退出应用
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            updateConfig({ minimizeToTray: !config.minimizeToTray });
+                                            toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
+                                        }}
+                                        className={`relative h-6 w-11 cursor-pointer rounded-full transition-colors ${
+                                            config.minimizeToTray
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--paper-inset)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.minimizeToTray ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Notification Settings */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">通知设置</h3>
+
+                                {/* Cron Task Notifications */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">定时任务通知</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            定时任务执行完成时发送系统通知
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            updateConfig({ cronNotifications: !config.cronNotifications });
+                                            toast.success(config.cronNotifications ? '已关闭任务通知' : '已开启任务通知');
+                                        }}
+                                        className={`relative h-6 w-11 cursor-pointer rounded-full transition-colors ${
+                                            config.cronNotifications
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--paper-inset)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.cronNotifications ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {activeSection === 'about' && (
                         <div className="space-y-6">
@@ -1494,9 +1618,33 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                 </div>
                                             )}
                                         </div>
+
+                                        {/* Cron Task Debug Panel */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">定时任务</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        查看和管理运行中的定时任务（开发调试用）
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => setShowCronDebugPanel(true)}
+                                                    className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
+                                                >
+                                                    打开面板
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}
+
+                            {/* Cron Task Debug Panel Modal */}
+                            <CronTaskDebugPanel
+                                isOpen={showCronDebugPanel}
+                                onClose={() => setShowCronDebugPanel(false)}
+                            />
                         </div>
                     )}
 
