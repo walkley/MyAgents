@@ -17,6 +17,13 @@ import {
 } from '../shared/slashCommands';
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import type { McpServerDefinition } from '../renderer/config/types';
+import {
+  setCronTaskContext,
+  clearCronTaskContext,
+  CRON_TASK_COMPLETE_PATTERN,
+  CRON_TASK_EXIT_TEXT,
+  CRON_TASK_EXIT_REASON_PATTERN,
+} from './tools/cron-tools';
 
 // ============= CRASH DIAGNOSTICS =============
 // File-based logging to capture crashes before process dies
@@ -77,6 +84,7 @@ import {
   setMcpServers,
   getMcpServers,
   resetSession,
+  waitForSessionIdle,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
@@ -140,6 +148,49 @@ type SendMessagePayload = {
     apiKey?: string;
   };
 };
+
+// Cron task execution payload
+type CronExecutePayload = {
+  taskId: string;
+  prompt: string;
+  /** Session ID for single_session mode (reuse existing session) */
+  sessionId?: string;
+  isFirstExecution?: boolean;
+  aiCanExit?: boolean;
+  permissionMode?: PermissionMode;
+  model?: string;
+  providerEnv?: {
+    baseUrl?: string;
+    apiKey?: string;
+  };
+  /** Run mode: "single_session" (keep context) or "new_session" (fresh each time) */
+  runMode?: 'single_session' | 'new_session';
+};
+
+// Build a cron task prompt with context
+function buildCronPrompt(userPrompt: string, taskId: string, isFirstExecution: boolean, aiCanExit: boolean): string {
+  const exitToolInstructions = aiCanExit
+    ? `如果任务目标已完全达成，无需继续定时执行，请调用 \`exit_cron_task\` 工具来结束任务，并提供结束原因。`
+    : `注意：任务创建者禁用了 AI 自主结束功能，你无法调用 exit_cron_task 工具。请继续执行任务直到达到预设的结束条件。`;
+
+  const cronContext = `<cron-task-context>
+你正在执行一个定时任务 (Task ID: ${taskId})。
+
+${isFirstExecution ? '这是该任务的第一次执行。' : '这是该任务的一次周期性执行。'}
+
+请执行以下任务：
+</cron-task-context>
+
+${userPrompt}
+
+<cron-task-instructions>
+${exitToolInstructions}
+
+如果任务需要继续定时执行（例如需要持续监控、定期检查等），正常完成本次执行即可，系统会按设定的间隔再次触发。
+</cron-task-instructions>`;
+
+  return cronContext;
+}
 
 function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; port: number } {
   const args = argv.slice(2);
@@ -493,6 +544,207 @@ async function main() {
           await resetSession();
           return jsonResponse({ success: true });
         } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // ============= CRON TASK API =============
+
+      // GET /cron/check-completion - Check if the last response indicates task completion
+      if (pathname === '/cron/check-completion' && request.method === 'GET') {
+        try {
+          const messages = getMessages();
+          const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
+
+          if (!lastAssistantMessage) {
+            return jsonResponse({ success: true, completed: false, reason: null });
+          }
+
+          // Extract text content from the message
+          let textContent = '';
+          if (typeof lastAssistantMessage.content === 'string') {
+            textContent = lastAssistantMessage.content;
+          } else if (Array.isArray(lastAssistantMessage.content)) {
+            textContent = lastAssistantMessage.content
+              .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+              .map(block => block.text)
+              .join('\n');
+          }
+
+          // Check for completion marker
+          const completionMatch = textContent.match(CRON_TASK_COMPLETE_PATTERN);
+          if (completionMatch) {
+            return jsonResponse({
+              success: true,
+              completed: true,
+              reason: completionMatch[1].trim()
+            });
+          }
+
+          return jsonResponse({ success: true, completed: false, reason: null });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // POST /cron/execute - Execute a scheduled task
+      // This endpoint wraps the user's prompt with cron-specific instructions
+      // and enables the exit_cron_task custom tool
+      if (pathname === '/cron/execute' && request.method === 'POST') {
+        let payload: CronExecutePayload;
+        try {
+          payload = (await request.json()) as CronExecutePayload;
+        } catch {
+          return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
+        }
+
+        const { taskId, prompt, isFirstExecution, aiCanExit, permissionMode, model, providerEnv } = payload;
+
+        if (!taskId || !prompt) {
+          return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
+        }
+
+        // Set cron task context so the exit_cron_task tool knows which task is running
+        setCronTaskContext(taskId, aiCanExit ?? false);
+
+        // Wrap the prompt with cron task context
+        const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
+
+        try {
+          console.log(`[cron] execute taskId=${taskId} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
+          await enqueueUserMessage(cronPrompt, [], permissionMode ?? 'auto', model, providerEnv);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          // Clear context on error
+          clearCronTaskContext();
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // POST /cron/execute-sync - Execute a scheduled task synchronously
+      // This endpoint is used by Rust for direct Sidecar invocation without frontend
+      // It waits for the execution to complete and returns the result
+      if (pathname === '/cron/execute-sync' && request.method === 'POST') {
+        let payload: CronExecutePayload;
+        try {
+          payload = (await request.json()) as CronExecutePayload;
+        } catch {
+          return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
+        }
+
+        const { taskId, prompt, sessionId, isFirstExecution, aiCanExit, permissionMode, model, providerEnv, runMode } = payload;
+
+        if (!taskId || !prompt) {
+          return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
+        }
+
+        // Handle session setup based on runMode
+        const effectiveRunMode = runMode ?? 'single_session';
+        const { agentDir } = getAgentState();
+
+        if (effectiveRunMode === 'new_session') {
+          // Create a fresh session for each execution (no memory of previous runs)
+          const newSession = createSession(agentDir);
+          const switched = await switchToSession(newSession.id);
+          if (!switched) {
+            console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
+            return jsonResponse({ success: false, error: 'Failed to create new session for execution.' }, 500);
+          }
+          console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
+        } else if (sessionId) {
+          // single_session mode: switch to the task's stored session (keeps context)
+          const switched = await switchToSession(sessionId);
+          if (!switched) {
+            console.warn(`[cron] execute-sync taskId=${taskId} failed to switch to session ${sessionId}, continuing with current session`);
+          } else {
+            console.log(`[cron] execute-sync taskId=${taskId} single_session mode: switched to session ${sessionId}`);
+          }
+        }
+
+        // Set cron task context so the exit_cron_task tool knows which task is running
+        setCronTaskContext(taskId, aiCanExit ?? false);
+
+        // Wrap the prompt with cron task context
+        const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
+
+        try {
+          console.log(`[cron] execute-sync taskId=${taskId} runMode=${effectiveRunMode} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
+
+          // Enqueue the message (this starts the async execution)
+          await enqueueUserMessage(cronPrompt, [], permissionMode ?? 'auto', model, providerEnv);
+
+          // Wait for session to become idle (execution complete)
+          // Timeout: 10 minutes max execution time
+          const completed = await waitForSessionIdle(600000, 1000);
+
+          if (!completed) {
+            console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
+            clearCronTaskContext();
+            return jsonResponse({
+              success: false,
+              error: 'Execution timed out after 10 minutes'
+            }, 408); // Request Timeout
+          }
+
+          // Check if AI requested exit
+          let aiRequestedExit = false;
+          let exitReason: string | undefined;
+
+          // Check messages for completion marker or exit_cron_task tool call
+          const messages = getMessages();
+          const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
+
+          if (lastAssistantMessage) {
+            let textContent = '';
+            if (typeof lastAssistantMessage.content === 'string') {
+              textContent = lastAssistantMessage.content;
+            } else if (Array.isArray(lastAssistantMessage.content)) {
+              textContent = lastAssistantMessage.content
+                .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+                .map(block => block.text)
+                .join('\n');
+            }
+
+            // Check for completion marker
+            const completionMatch = textContent.match(CRON_TASK_COMPLETE_PATTERN);
+            if (completionMatch) {
+              aiRequestedExit = true;
+              exitReason = completionMatch[1].trim();
+            }
+
+            // Also check for exit tool result in text
+            if (textContent.includes(CRON_TASK_EXIT_TEXT)) {
+              aiRequestedExit = true;
+              const reasonMatch = textContent.match(CRON_TASK_EXIT_REASON_PATTERN);
+              if (reasonMatch) {
+                exitReason = reasonMatch[1].trim();
+              }
+            }
+          }
+
+          // Clear context after execution
+          clearCronTaskContext();
+
+          console.log(`[cron] execute-sync taskId=${taskId} completed, aiRequestedExit=${aiRequestedExit}, exitReason=${exitReason}`);
+
+          return jsonResponse({
+            success: true,
+            aiRequestedExit,
+            exitReason
+          });
+        } catch (error) {
+          // Clear context on error
+          clearCronTaskContext();
+          console.error(`[cron] execute-sync taskId=${taskId} error:`, error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
             500

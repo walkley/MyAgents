@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
+import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -385,7 +386,7 @@ function buildSettingSources(): ('user' | 'project')[] {
  * - Fallback to npx for environments where bun is unavailable
  * - Custom MCP can use any user-preferred tools
  */
-function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
+function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronToolsServer> {
   // Use memory cache if set (even if empty - user explicitly disabled all MCP)
   // Only fall back to config file if never set (null)
   let servers: McpServerDefinition[];
@@ -397,14 +398,22 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     if (isDebugMode) console.log(`[agent] Using workspace MCP: ${servers.map(s => s.id).join(', ') || 'none'}`);
   }
 
-  if (servers.length === 0) {
-    // Return empty object
-    // SDK auto-discovery is controlled via buildSettingSources() - when MCP is explicitly
-    // configured, settingSources excludes 'user' to prevent unwanted MCP discovery
-    return {};
+  const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
+
+  // Add cron tools server if we're in a cron task context
+  const cronContext = getCronTaskContext();
+  if (cronContext.taskId) {
+    result['cron-tools'] = cronToolsServer;
+    console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
   }
 
-  const result: Record<string, SdkMcpServerConfig> = {};
+  // Return early if no user MCP servers (but may have cron-tools)
+  if (servers.length === 0) {
+    if (Object.keys(result).length > 0) {
+      console.log(`[agent] Built SDK MCP servers: ${Object.keys(result).join(', ')}`);
+    }
+    return result;
+  }
 
   for (const server of servers) {
     // Log server env for debugging
@@ -2164,6 +2173,29 @@ export function isSessionActive(): boolean {
   return isProcessing || querySession !== null;
 }
 
+/**
+ * Wait for the current session to become idle
+ * Returns true if idle, false if timeout
+ * @param timeoutMs Maximum time to wait in milliseconds (default: 10 minutes)
+ * @param pollIntervalMs How often to check status (default: 500ms)
+ */
+export async function waitForSessionIdle(
+  timeoutMs: number = 600000,
+  pollIntervalMs: number = 500
+): Promise<boolean> {
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (sessionState === 'idle' && !isProcessing && !querySession) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+
+  console.warn('[agent] waitForSessionIdle: timeout reached');
+  return false;
+}
+
 export async function interruptCurrentResponse(): Promise<boolean> {
   if (!querySession) {
     // 即使没有 querySession，如果 isStreamingMessage 为 true，也需要重置状态
@@ -2879,6 +2911,8 @@ async function startStreamingSession(): Promise<void> {
     if (sessionState !== 'error') {
       setSessionState('idle');
     }
+    // Clear cron task context after session ends
+    clearCronTaskContext();
     resolveTermination!();
   }
 }

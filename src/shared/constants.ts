@@ -50,4 +50,6 @@ export const CUSTOM_EVENTS = {
     SKILL_COPIED_TO_PROJECT: 'skill-copied-to-project',
     /** Fired to open Settings page with optional section (e.g., 'mcp', 'providers') */
     OPEN_SETTINGS: 'open-settings',
+    /** Fired when user tries to open a Session that's already active in another Tab */
+    JUMP_TO_TAB: 'jump-to-tab',
 } as const;
