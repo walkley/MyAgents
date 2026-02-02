@@ -23,6 +23,17 @@ use crate::sidecar::{
     execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv, UserRef,
 };
 
+/// Normalize a path for comparison (removes trailing slashes)
+/// This ensures consistent path matching regardless of how paths are formatted
+fn normalize_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path.to_string() // Keep original if it's root path
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Run mode for cron tasks
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -513,13 +524,22 @@ impl CronTaskManager {
     }
 
     /// Get tasks for a specific workspace
+    /// Uses normalized path comparison to handle trailing slashes and other inconsistencies
     pub async fn get_tasks_for_workspace(&self, workspace_path: &str) -> Vec<CronTask> {
         let tasks = self.tasks.read().await;
-        tasks
+        let normalized_query = normalize_path(workspace_path);
+        let result: Vec<CronTask> = tasks
             .values()
-            .filter(|t| t.workspace_path == workspace_path)
+            .filter(|t| normalize_path(&t.workspace_path) == normalized_query)
             .cloned()
-            .collect()
+            .collect();
+
+        log::debug!(
+            "[CronTask] get_tasks_for_workspace: query='{}' (normalized='{}'), found {} tasks",
+            workspace_path, normalized_query, result.len()
+        );
+
+        result
     }
 
     /// Get active task for a specific session (running or paused)
