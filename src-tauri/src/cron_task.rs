@@ -1368,8 +1368,14 @@ pub async fn cmd_is_task_executing(task_id: String) -> Result<bool, String> {
 }
 
 /// Initialize cron task manager with app handle (called during app setup)
+/// Emits "cron:manager-ready" event when initialization is complete
 pub async fn initialize_cron_manager(handle: AppHandle) {
     let manager = get_cron_task_manager();
-    manager.set_app_handle(handle).await;
+    manager.set_app_handle(handle.clone()).await;
     log::info!("[CronTask] Manager initialized with app handle");
+
+    // Emit event to notify frontend that cron manager is ready
+    // Frontend should wait for this event before calling recoverCronTasks
+    let _ = handle.emit("cron:manager-ready", serde_json::json!({}));
+    log::info!("[CronTask] Emitted cron:manager-ready event");
 }

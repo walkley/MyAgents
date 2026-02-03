@@ -161,11 +161,52 @@ export default function App() {
     // This ensures MCP and other global API calls work from any page
     void startGlobalSidecarSilent();
 
-    // Recover cron tasks that were running before app restart
-    // This is done after a short delay to ensure Rust is fully initialized
-    const recoveryTimeout = setTimeout(() => {
-      void recoverCronTasks();
-    }, 1000);
+    // Recover cron tasks when Rust cron manager is ready
+    // Listen for the cron:manager-ready event from Rust layer
+    let unlistenManagerReady: (() => void) | null = null;
+    let recoveryDone = false;
+    let fallbackTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const setupCronRecovery = async () => {
+      if (!isTauriEnvironment()) return;
+
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+
+        // Listen for manager ready event from Rust
+        unlistenManagerReady = await listen('cron:manager-ready', () => {
+          if (!recoveryDone && mountedRef.current) {
+            recoveryDone = true;
+            console.log('[App] Received cron:manager-ready event, starting recovery...');
+            void recoverCronTasks();
+            // Clear fallback timeout since we received the event
+            if (fallbackTimeout) {
+              clearTimeout(fallbackTimeout);
+              fallbackTimeout = null;
+            }
+          }
+        });
+
+        // Fallback: if event doesn't arrive within 3 seconds, try recovery anyway
+        // This handles edge cases where event might be missed (e.g., already emitted before listener set up)
+        fallbackTimeout = setTimeout(() => {
+          if (!recoveryDone && mountedRef.current) {
+            recoveryDone = true;
+            console.log('[App] Cron manager ready event timeout, attempting recovery anyway...');
+            void recoverCronTasks();
+          }
+        }, 3000);
+      } catch (error) {
+        console.error('[App] Failed to setup cron recovery listener:', error);
+        // Fallback to immediate recovery on error
+        if (!recoveryDone) {
+          recoveryDone = true;
+          void recoverCronTasks();
+        }
+      }
+    };
+
+    void setupCronRecovery();
 
     return () => {
       mountedRef.current = false;
@@ -174,7 +215,13 @@ export default function App() {
         clearTimeout(retryTimeoutRef.current);
         retryTimeoutRef.current = null;
       }
-      clearTimeout(recoveryTimeout);
+      // Cleanup cron recovery
+      if (unlistenManagerReady) {
+        unlistenManagerReady();
+      }
+      if (fallbackTimeout) {
+        clearTimeout(fallbackTimeout);
+      }
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();

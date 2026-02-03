@@ -16,7 +16,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
-import { getSessionCronTask, updateCronTaskTab, startCronScheduler } from '@/api/cronTaskClient';
+import { getSessionCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -268,16 +268,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           // Update task's tabId to this new tab
           await updateCronTaskTab(task.id, tabId);
 
-          // Restore UI state
+          // Restore UI state only - Scheduler is managed by App.tsx recoverCronTasks
+          // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
           restoreCronTask(task);
-
-          // Restart the scheduler (it may have been stopped when tab was closed)
-          try {
-            await startCronScheduler(task.id);
-            console.log('[Chat] Restarted cron scheduler for task:', task.id);
-          } catch (schedulerError) {
-            console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
-          }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
           // This happens when user switches from a cron-task session to a regular session
