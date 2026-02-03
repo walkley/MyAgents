@@ -202,6 +202,54 @@ pub struct CronTaskTriggerPayload {
     pub tab_id: Option<String>,
 }
 
+// ============ Recovery Event Types (方案 A: Rust 统一恢复) ============
+
+/// Event payload for a single task recovery success
+/// Emitted as "cron:task-recovered" for each successfully recovered task
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronTaskRecoveredPayload {
+    pub task_id: String,
+    pub session_id: String,
+    pub workspace_path: String,
+    pub port: u16,
+    pub status: String,
+    pub execution_count: u32,
+    pub interval_minutes: u32,
+}
+
+/// Event payload for task status changes
+/// Emitted as "cron:task-status-changed" when task status changes
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronTaskStatusChangedPayload {
+    pub task_id: String,
+    pub session_id: String,
+    pub old_status: String,
+    pub new_status: String,
+    pub reason: Option<String>,
+}
+
+/// Event payload for recovery summary
+/// Emitted as "cron:recovery-summary" after all recovery attempts complete
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronRecoverySummaryPayload {
+    pub total_tasks: u32,
+    pub recovered_count: u32,
+    pub failed_count: u32,
+    pub failed_tasks: Vec<CronRecoveryFailedTask>,
+}
+
+/// Info about a single failed recovery
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronRecoveryFailedTask {
+    pub task_id: String,
+    pub workspace_path: String,
+    pub error: String,
+}
+
 /// Manager for cron tasks
 pub struct CronTaskManager {
     tasks: Arc<RwLock<HashMap<String, CronTask>>>,
@@ -1368,14 +1416,137 @@ pub async fn cmd_is_task_executing(task_id: String) -> Result<bool, String> {
 }
 
 /// Initialize cron task manager with app handle (called during app setup)
+/// Now includes unified recovery logic (方案 A: Rust 统一恢复)
 /// Emits "cron:manager-ready" event when initialization is complete
+/// Emits "cron:task-recovered" for each recovered task
+/// Emits "cron:recovery-summary" after all recovery attempts complete
 pub async fn initialize_cron_manager(handle: AppHandle) {
     let manager = get_cron_task_manager();
     manager.set_app_handle(handle.clone()).await;
     log::info!("[CronTask] Manager initialized with app handle");
 
+    // Recover running tasks (方案 A: Rust 层统一恢复)
+    recover_running_tasks(&handle).await;
+
     // Emit event to notify frontend that cron manager is ready
-    // Frontend should wait for this event before calling recoverCronTasks
+    // Frontend no longer needs to call recoverCronTasks
     let _ = handle.emit("cron:manager-ready", serde_json::json!({}));
     log::info!("[CronTask] Emitted cron:manager-ready event");
+}
+
+/// Recover all tasks that were running before app restart (方案 A: Rust 统一恢复)
+/// This function:
+/// 1. Gets all tasks with status=Running
+/// 2. For each task: starts Sidecar, activates session, starts scheduler
+/// 3. Emits cron:task-recovered for each success
+/// 4. Emits cron:recovery-summary when done
+async fn recover_running_tasks(handle: &AppHandle) {
+    let manager = get_cron_task_manager();
+    let tasks_to_recover = manager.get_tasks_to_recover().await;
+
+    if tasks_to_recover.is_empty() {
+        log::info!("[CronTask] No tasks to recover");
+        // Emit empty summary
+        let _ = handle.emit("cron:recovery-summary", CronRecoverySummaryPayload {
+            total_tasks: 0,
+            recovered_count: 0,
+            failed_count: 0,
+            failed_tasks: vec![],
+        });
+        return;
+    }
+
+    log::info!("[CronTask] Recovering {} task(s)...", tasks_to_recover.len());
+
+    let mut recovered_count = 0u32;
+    let mut failed_tasks: Vec<CronRecoveryFailedTask> = vec![];
+
+    for task in &tasks_to_recover {
+        match try_recover_single_task(handle, task).await {
+            Ok(port) => {
+                recovered_count += 1;
+                log::info!("[CronTask] Recovered task {} on port {}", task.id, port);
+
+                // Emit task-recovered event for frontend
+                let _ = handle.emit("cron:task-recovered", CronTaskRecoveredPayload {
+                    task_id: task.id.clone(),
+                    session_id: task.session_id.clone(),
+                    workspace_path: task.workspace_path.clone(),
+                    port,
+                    status: "running".to_string(),
+                    execution_count: task.execution_count,
+                    interval_minutes: task.interval_minutes,
+                });
+            }
+            Err(e) => {
+                log::error!("[CronTask] Failed to recover task {}: {}", task.id, e);
+                failed_tasks.push(CronRecoveryFailedTask {
+                    task_id: task.id.clone(),
+                    workspace_path: task.workspace_path.clone(),
+                    error: e,
+                });
+            }
+        }
+    }
+
+    let total = tasks_to_recover.len() as u32;
+    let failed_count = failed_tasks.len() as u32;
+
+    log::info!(
+        "[CronTask] Recovery complete: {}/{} tasks recovered, {} failed",
+        recovered_count, total, failed_count
+    );
+
+    // Emit recovery summary
+    let _ = handle.emit("cron:recovery-summary", CronRecoverySummaryPayload {
+        total_tasks: total,
+        recovered_count,
+        failed_count,
+        failed_tasks,
+    });
+}
+
+/// Try to recover a single task
+/// Returns the Sidecar port on success
+async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<u16, String> {
+    log::info!(
+        "[CronTask] Recovering task {} for workspace {}",
+        task.id, task.workspace_path
+    );
+
+    // Step 1: Start Sidecar for this task
+    let sidecar_state = handle.try_state::<ManagedSidecarManager>()
+        .ok_or_else(|| "SidecarManager state not available".to_string())?;
+
+    let port = crate::sidecar::start_cron_sidecar(
+        handle,
+        &sidecar_state,
+        &task.workspace_path,
+        &task.id,
+    )?;
+
+    log::info!("[CronTask] Sidecar started for task {} on port {}", task.id, port);
+
+    // Step 2: Activate session
+    {
+        let mut manager = sidecar_state.lock()
+            .map_err(|e| format!("Failed to lock SidecarManager: {}", e))?;
+
+        manager.activate_session(
+            task.session_id.clone(),
+            task.tab_id.clone(),
+            Some(task.id.clone()),
+            port,
+            task.workspace_path.clone(),
+            true, // is_cron_task = true
+        );
+        log::info!("[CronTask] Session {} activated for task {}", task.session_id, task.id);
+    }
+
+    // Step 3: Start scheduler
+    let cron_manager = get_cron_task_manager();
+    cron_manager.start_task_scheduler(&task.id).await?;
+    log::info!("[CronTask] Scheduler started for task {}", task.id);
+
+    Ok(port)
 }

@@ -89,6 +89,7 @@ export class SseConnection {
     private eventHandler: SseEventHandler | null = null;
     private statusHandler: SseConnectionStatusHandler | null = null;
     private connectionId: string;
+    private fixedPort?: number; // If provided, use this port instead of looking up from Rust
 
     // Reconnection state
     private reconnectAttempts = 0;
@@ -96,8 +97,9 @@ export class SseConnection {
     private isReconnecting = false;
     private shouldReconnect = true; // Set to false when intentionally disconnecting
 
-    constructor(connectionId: string) {
+    constructor(connectionId: string, fixedPort?: number) {
         this.connectionId = connectionId;
+        this.fixedPort = fixedPort;
     }
 
     /**
@@ -197,8 +199,8 @@ export class SseConnection {
     private async connectBrowser(): Promise<void> {
         if (this.eventSource) return;
 
-        // Use Tab-specific server URL
-        const serverUrl = await getTabServerUrl(this.connectionId);
+        // Use Tab-specific server URL (or fixed port if provided)
+        const serverUrl = await this.getServerUrl();
         const sseUrl = `${serverUrl}/chat/stream`;
 
         console.debug(`[SSE ${this.connectionId}] Connecting browser EventSource:`, sseUrl);
@@ -235,8 +237,8 @@ export class SseConnection {
     private async connectTauri(): Promise<void> {
         if (this.tauriConnected) return;
 
-        // Use Tab-specific server URL
-        const serverUrl = await getTabServerUrl(this.connectionId);
+        // Use Tab-specific server URL (or fixed port if provided)
+        const serverUrl = await this.getServerUrl();
         const sseUrl = `${serverUrl}/chat/stream`;
 
         console.debug(`[SSE ${this.connectionId}] Connecting Tauri SSE proxy:`, sseUrl);
@@ -447,11 +449,24 @@ export class SseConnection {
             this.reconnectTimer = null;
         }
     }
+
+    /**
+     * Get the server URL for this connection
+     * If fixedPort is set, use it directly; otherwise lookup from Rust
+     */
+    private async getServerUrl(): Promise<string> {
+        if (this.fixedPort !== undefined) {
+            return `http://127.0.0.1:${this.fixedPort}`;
+        }
+        return getTabServerUrl(this.connectionId);
+    }
 }
 
 /**
  * Create a new SSE connection instance
+ * @param connectionId - Tab ID for this connection
+ * @param fixedPort - If provided, use this port instead of looking up from Rust (for cron task Sidecar)
  */
-export function createSseConnection(connectionId: string): SseConnection {
-    return new SseConnection(connectionId);
+export function createSseConnection(connectionId: string, fixedPort?: number): SseConnection {
+    return new SseConnection(connectionId, fixedPort);
 }

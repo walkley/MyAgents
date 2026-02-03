@@ -248,8 +248,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   const cronLoadedSessionRef = useRef<string | null>(null);
 
   // Restore or clear cron task state when session changes
+  // 方案 A: Rust 统一恢复 - Scheduler 由 Rust 层 initialize_cron_manager 自动恢复
+  // 前端只负责同步 UI 状态
+  //
   // This handles:
   // 1. App restart recovery - restore cron task UI for running/paused tasks
+  //    (Scheduler already started by Rust layer)
   // 2. Tab re-open - reconnect to existing cron task
   // 3. Session switch - clear cron state if switching to a session without cron task
   useEffect(() => {
@@ -263,12 +267,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
         const task = await getSessionCronTask(sessionId);
 
         if (task && task.status === 'running') {
-          console.log('[Chat] Restoring cron task for session:', sessionId, task.id, 'to tab:', tabId);
+          console.log('[Chat] Restoring cron task UI for session:', sessionId, task.id, 'to tab:', tabId);
 
           // Update task's tabId to this new tab
           await updateCronTaskTab(task.id, tabId);
 
-          // Restore UI state only - Scheduler is managed by App.tsx recoverCronTasks
+          // Restore UI state only - Scheduler is managed by Rust layer (方案 A)
           // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
           restoreCronTask(task);
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {

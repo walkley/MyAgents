@@ -1021,10 +1021,11 @@ export default function TabProvider({
     }, [appendLog, appendUnifiedLog, tabId, markIncompleteBlocksAsFinished]);
 
     // Connect SSE
+    // If sidecarPort is provided (e.g., connected to cron task Sidecar), use it directly
     const connectSse = useCallback(async () => {
         if (sseRef.current?.isConnected()) return;
 
-        const sse = createSseConnection(tabId);
+        const sse = createSseConnection(tabId, sidecarPort);
         sse.setEventHandler(handleSseEvent);
         sseRef.current = sse;
 
@@ -1037,7 +1038,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] SSE connect failed:`, error);
             throw error;
         }
-    }, [tabId, handleSseEvent]);
+    }, [tabId, sidecarPort, handleSseEvent]);
 
     // Disconnect SSE
     const disconnectSse = useCallback(() => {

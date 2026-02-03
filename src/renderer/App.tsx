@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar, updateSessionTab, connectTabToCronSidecar, deactivateSession } from '@/api/tauriClient';
+import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, connectTabToCronSidecar, deactivateSession } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -18,7 +18,8 @@ import {
   type Provider,
 } from '@/config/types';
 import { type Tab, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
-import { getAllCronTasks, getTasksToRecover, startCronScheduler, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
+import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
+import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS } from '../shared/constants';
@@ -109,38 +110,8 @@ export default function App() {
     }
   }, []);
 
-  // Recover running cron tasks after app restart
-  const recoverCronTasks = useCallback(async () => {
-    if (!isTauriEnvironment()) return;
-
-    try {
-      const tasksToRecover = await getTasksToRecover();
-      if (tasksToRecover.length === 0) {
-        console.log('[App] No cron tasks to recover');
-        return;
-      }
-
-      console.log(`[App] Recovering ${tasksToRecover.length} cron task(s)...`);
-
-      for (const task of tasksToRecover) {
-        try {
-          // Start Sidecar first so it's ready when scheduler triggers or user opens session
-          // This ensures Sidecar reuse works correctly
-          console.log(`[App] Starting Sidecar for cron task ${task.id} (workspace: ${task.workspacePath})`);
-          await startCronSidecar(task.workspacePath, task.id);
-          console.log(`[App] Sidecar started for cron task ${task.id}`);
-
-          // Restart the scheduler for each running task
-          await startCronScheduler(task.id);
-          console.log(`[App] Cron task ${task.id} scheduler restarted`);
-        } catch (error) {
-          console.error(`[App] Failed to recover cron task ${task.id}:`, error);
-        }
-      }
-    } catch (error) {
-      console.error('[App] Failed to recover cron tasks:', error);
-    }
-  }, []);
+  // 方案 A: Rust 统一恢复 - 前端不再主动恢复，只监听事件
+  // Rust 层 initialize_cron_manager 会自动恢复所有 running 状态的任务
 
   // Start Global Sidecar on mount, cleanup on unmount
   useEffect(() => {
@@ -161,52 +132,59 @@ export default function App() {
     // This ensures MCP and other global API calls work from any page
     void startGlobalSidecarSilent();
 
-    // Recover cron tasks when Rust cron manager is ready
-    // Listen for the cron:manager-ready event from Rust layer
+    // 方案 A: Rust 统一恢复 - 监听恢复事件（仅用于日志和 UI 反馈）
+    // Rust 层会自动恢复任务，前端只需要监听结果
     let unlistenManagerReady: (() => void) | null = null;
-    let recoveryDone = false;
-    let fallbackTimeout: ReturnType<typeof setTimeout> | null = null;
+    let unlistenRecoverySummary: (() => void) | null = null;
+    let unlistenTaskRecovered: (() => void) | null = null;
 
-    const setupCronRecovery = async () => {
+    const setupCronRecoveryListeners = async () => {
       if (!isTauriEnvironment()) return;
 
       try {
         const { listen } = await import('@tauri-apps/api/event');
 
-        // Listen for manager ready event from Rust
-        unlistenManagerReady = await listen('cron:manager-ready', () => {
-          if (!recoveryDone && mountedRef.current) {
-            recoveryDone = true;
-            console.log('[App] Received cron:manager-ready event, starting recovery...');
-            void recoverCronTasks();
-            // Clear fallback timeout since we received the event
-            if (fallbackTimeout) {
-              clearTimeout(fallbackTimeout);
-              fallbackTimeout = null;
+        // Listen for individual task recovered events
+        unlistenTaskRecovered = await listen<CronTaskRecoveredPayload>(
+          CRON_EVENTS.TASK_RECOVERED,
+          (event) => {
+            if (mountedRef.current) {
+              const { taskId, sessionId, port } = event.payload;
+              console.log(`[App] Cron task recovered: ${taskId} (session: ${sessionId}, port: ${port})`);
             }
           }
-        });
+        );
 
-        // Fallback: if event doesn't arrive within 3 seconds, try recovery anyway
-        // This handles edge cases where event might be missed (e.g., already emitted before listener set up)
-        fallbackTimeout = setTimeout(() => {
-          if (!recoveryDone && mountedRef.current) {
-            recoveryDone = true;
-            console.log('[App] Cron manager ready event timeout, attempting recovery anyway...');
-            void recoverCronTasks();
+        // Listen for recovery summary event
+        unlistenRecoverySummary = await listen<CronRecoverySummaryPayload>(
+          CRON_EVENTS.RECOVERY_SUMMARY,
+          (event) => {
+            if (mountedRef.current) {
+              const { totalTasks, recoveredCount, failedCount, failedTasks } = event.payload;
+              if (totalTasks > 0) {
+                console.log(
+                  `[App] Cron recovery summary: ${recoveredCount}/${totalTasks} recovered, ${failedCount} failed`
+                );
+                if (failedTasks.length > 0) {
+                  console.warn('[App] Failed tasks:', failedTasks);
+                }
+              }
+            }
           }
-        }, 3000);
+        );
+
+        // Listen for manager ready event (indicates recovery is complete)
+        unlistenManagerReady = await listen(CRON_EVENTS.MANAGER_READY, () => {
+          if (mountedRef.current) {
+            console.log('[App] Cron manager ready (Rust recovery complete)');
+          }
+        });
       } catch (error) {
-        console.error('[App] Failed to setup cron recovery listener:', error);
-        // Fallback to immediate recovery on error
-        if (!recoveryDone) {
-          recoveryDone = true;
-          void recoverCronTasks();
-        }
+        console.error('[App] Failed to setup cron recovery listeners:', error);
       }
     };
 
-    void setupCronRecovery();
+    void setupCronRecoveryListeners();
 
     return () => {
       mountedRef.current = false;
@@ -215,19 +193,22 @@ export default function App() {
         clearTimeout(retryTimeoutRef.current);
         retryTimeoutRef.current = null;
       }
-      // Cleanup cron recovery
+      // Cleanup cron recovery listeners
+      if (unlistenTaskRecovered) {
+        unlistenTaskRecovered();
+      }
+      if (unlistenRecoverySummary) {
+        unlistenRecoverySummary();
+      }
       if (unlistenManagerReady) {
         unlistenManagerReady();
-      }
-      if (fallbackTimeout) {
-        clearTimeout(fallbackTimeout);
       }
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();
       void stopAllSidecars();
     };
-  }, [startGlobalSidecarSilent, recoverCronTasks]);
+  }, [startGlobalSidecarSilent]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
