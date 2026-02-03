@@ -1310,37 +1310,62 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
 }
 
 /// Get the server URL for a specific Tab
+/// Supports both direct instance lookup and workspace-based lookup (for reused Sidecars)
 pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Result<String, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    
+
+    // First try direct instance lookup
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         if instance.is_running() {
             return Ok(format!("http://127.0.0.1:{}", instance.port));
         }
     }
-    
+
+    // If not found, try workspace-based lookup (for Tabs reusing another Tab's Sidecar)
+    if let Some(workspace_path) = manager_guard.get_tab_workspace(tab_id) {
+        if let Some(sidecar_info) = manager_guard.get_workspace_sidecar(&workspace_path) {
+            if sidecar_info.is_healthy {
+                return Ok(format!("http://127.0.0.1:{}", sidecar_info.port));
+            }
+        }
+    }
+
     Err(format!("No running sidecar for tab {}", tab_id))
 }
 
 /// Get status for a Tab's sidecar
+/// Supports both direct instance lookup and workspace-based lookup (for reused Sidecars)
 pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> Result<SidecarStatus, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-    
+
+    // First try direct instance lookup
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
-        Ok(SidecarStatus {
+        return Ok(SidecarStatus {
             running: instance.is_running(),
             port: instance.port,
             agent_dir: instance.agent_dir.as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
-        })
-    } else {
-        Ok(SidecarStatus {
-            running: false,
-            port: 0,
-            agent_dir: String::new(),
-        })
+        });
     }
+
+    // If not found, try workspace-based lookup (for Tabs reusing another Tab's Sidecar)
+    if let Some(workspace_path) = manager_guard.get_tab_workspace(tab_id) {
+        if let Some(sidecar_info) = manager_guard.get_workspace_sidecar(&workspace_path) {
+            return Ok(SidecarStatus {
+                running: sidecar_info.is_healthy,
+                port: sidecar_info.port,
+                agent_dir: workspace_path,
+            });
+        }
+    }
+
+    // No sidecar found
+    Ok(SidecarStatus {
+        running: false,
+        port: 0,
+        agent_dir: String::new(),
+    })
 }
 
 /// Start a headless Sidecar for cron task execution
