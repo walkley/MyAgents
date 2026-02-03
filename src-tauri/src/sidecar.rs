@@ -1622,6 +1622,12 @@ pub async fn execute_cron_task<R: Runtime>(
         payload.task_id, port
     );
 
+    // Debug: confirm we reached this point
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": payload.task_id,
+        "message": format!("execute_cron_task: CHECKPOINT after sidecar ready, session_id={:?}", payload.session_id.is_some())
+    }));
+
     // Activate session as cron task (prevents Sidecar from being killed if Tab closes)
     if let Some(ref session_id) = payload.session_id {
         let _ = app_handle.emit("cron:debug", serde_json::json!({
