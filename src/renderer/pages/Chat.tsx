@@ -224,22 +224,24 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     currentProject?.mcpEnabledServers ?? []
   );
 
-  // Track whether cron task restoration has been attempted for current session
-  const cronRestoreAttemptedRef = useRef<string | null>(null);
+  // Track which session's cron task state has been loaded
+  const cronLoadedSessionRef = useRef<string | null>(null);
 
-  // Restore cron task state when session changes (for app restart recovery or tab re-open)
+  // Restore or clear cron task state when session changes
+  // This handles:
+  // 1. App restart recovery - restore cron task UI for running/paused tasks
+  // 2. Tab re-open - reconnect to existing cron task
+  // 3. Session switch - clear cron state if switching to a session without cron task
   useEffect(() => {
     if (!sessionId || !tabId || !isTauriEnvironment()) return;
 
-    // Skip if already attempted for this session or already has an active task
-    if (cronRestoreAttemptedRef.current === sessionId || cronState.task) return;
+    // Skip if already loaded for this session
+    if (cronLoadedSessionRef.current === sessionId) return;
 
-    // Mark as attempted before async operation to prevent race conditions
-    cronRestoreAttemptedRef.current = sessionId;
-
-    const restoreCronTaskState = async () => {
+    const loadCronTaskState = async () => {
       try {
         const task = await getSessionCronTask(sessionId);
+
         if (task && (task.status === 'running' || task.status === 'paused')) {
           console.log('[Chat] Restoring cron task for session:', sessionId, task.id, 'to tab:', tabId);
 
@@ -258,14 +260,21 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
               console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
             }
           }
+        } else if (cronState.task && cronState.task.sessionId !== sessionId) {
+          // Current cron state is for a different session - clear it
+          // This happens when user switches from a cron-task session to a regular session
+          console.log('[Chat] Clearing cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
+          disableCronMode();
         }
+
+        cronLoadedSessionRef.current = sessionId;
       } catch (error) {
-        console.error('[Chat] Failed to restore cron task:', error);
+        console.error('[Chat] Failed to load cron task state:', error);
       }
     };
 
-    void restoreCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, cronState.task]);
+    void loadCronTaskState();
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {
@@ -580,6 +589,12 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                 agentDir={agentDir}
                 currentSessionId={sessionId}
                 onSelectSession={(id) => {
+                  // Block session switch if cron task is running
+                  // User must stop the cron task first before switching
+                  if (cronState.task?.status === 'running') {
+                    console.log('[Chat] Cannot switch session while cron task is running');
+                    return;
+                  }
                   track('session_switch');
                   void loadSession(id);
                 }}

@@ -1130,15 +1130,25 @@ export default function TabProvider({
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
 
-            // Check if session is already activated by another Tab (Session singleton constraint)
+            // Check if session is already activated by another Tab or CronTask (Session singleton constraint)
             const activation = await getSessionActivation(targetSessionId);
-            if (activation && activation.tab_id && activation.tab_id !== tabId) {
-                console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is already activated by tab ${activation.tab_id}, requesting jump`);
-                // Dispatch event to App.tsx to jump to the target Tab
-                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
-                    detail: { targetTabId: activation.tab_id, sessionId: targetSessionId }
-                }));
-                return false;
+            if (activation) {
+                // Case 1: Session is open in another Tab - jump to that Tab
+                if (activation.tab_id && activation.tab_id !== tabId) {
+                    console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is already activated by tab ${activation.tab_id}, requesting jump`);
+                    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
+                        detail: { targetTabId: activation.tab_id, sessionId: targetSessionId }
+                    }));
+                    return false;
+                }
+
+                // Case 2: Session is used by a CronTask without Tab - jump to show cron task UI
+                // This happens when cron task is running in background (tab was closed)
+                if (activation.is_cron_task && !activation.tab_id) {
+                    console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is used by background cron task, will connect to it`);
+                    // Don't block - let the session load, Chat.tsx will restore cron task UI
+                    // The session switch will update the activation's tab_id
+                }
             }
 
             const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
