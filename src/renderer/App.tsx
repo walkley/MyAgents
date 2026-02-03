@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar, getWorkspaceSidecar, updateSessionTab, registerTabUser } from '@/api/tauriClient';
+import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar, updateSessionTab, connectTabToCronSidecar, deactivateSession } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -207,12 +206,31 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
+    // Deactivate session when Tab closes (unless cron task keeps it active)
+    // This ensures Session singleton constraint is maintained
+    if (tab.sessionId) {
+      try {
+        const cronTask = await getTabCronTask(tabId);
+        if (cronTask && cronTask.status === 'running') {
+          // Cron task is active - update session activation to remove tab_id but keep task_id
+          console.log(`[App] Tab ${tabId} closing with active cron task ${cronTask.id}, updating session activation`);
+          await updateSessionTab(tab.sessionId, undefined);
+        } else {
+          // No active cron task - fully deactivate session
+          console.log(`[App] Tab ${tabId} closing, deactivating session ${tab.sessionId}`);
+          await deactivateSession(tab.sessionId);
+        }
+      } catch (error) {
+        console.error(`[App] Error deactivating session for tab ${tabId}:`, error);
+      }
+    }
+
     // Check if this Tab has an active cron task
     // If so, don't stop the Sidecar - let it run in background for scheduled executions
     if (tab.agentDir) {
       try {
         const cronTask = await getTabCronTask(tabId);
-        if (cronTask && (cronTask.status === 'running' || cronTask.status === 'paused')) {
+        if (cronTask && cronTask.status === 'running') {
           // Cron task is active - keep Sidecar running but clear tab association
           console.log(`[App] Tab ${tabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
           await updateCronTaskTab(cronTask.id, undefined); // Clear tabId association
@@ -305,6 +323,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [tabs, closeCurrentTab]);
 
+  /**
+   * Launch a project with Session Singleton Architecture
+   *
+   * Four scenarios (evaluated in order):
+   * 1. Session already open in a Tab → Jump to that Tab
+   * 2. Session has running cron task (no Tab) → New Tab connects to Cron Sidecar
+   * 3. Current Tab has running cron task → New Tab + New Sidecar
+   * 4. Normal switch → Current Tab switches Session
+   */
   const handleLaunchProject = useCallback(async (
     project: Project,
     _provider: Provider,
@@ -323,79 +350,126 @@ export default function App() {
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
 
     try {
-      // Check if the session is already activated by another Tab or CronTask (Session singleton constraint)
+      // ========================================
+      // Scenario 1: Session already open in a Tab
+      // ========================================
       if (sessionId) {
-        const activation = await getSessionActivation(sessionId);
-        if (activation) {
-          // Session is already activated
-          if (activation.tab_id && activation.tab_id !== activeTabId) {
-            // Session is open in another Tab - check if that Tab exists
-            const targetTab = tabs.find(t => t.id === activation.tab_id);
-            if (targetTab) {
-              // Jump to the existing Tab
-              console.log(`[App] Session ${sessionId} already active in tab ${activation.tab_id}, jumping to it`);
-              setActiveTabId(activation.tab_id);
-              setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-              return;
-            }
-          }
-
-          // Tab doesn't exist or no tab_id (cron task running without Tab)
-          // Connect this Tab to the existing Sidecar instead of creating a new one
-          console.log(`[App] Session ${sessionId} activated by cron task, connecting current tab to existing Sidecar on port ${activation.port}`);
-
-          // Check if workspace Sidecar exists
-          const sidecarInfo = await getWorkspaceSidecar(project.path);
-          if (sidecarInfo && sidecarInfo.port > 0) {
-            // Sidecar exists - register this Tab as a user and update session's tab_id
-            await registerTabUser(project.path, activeTabId);
-            await updateSessionTab(sessionId, activeTabId);
-
-            console.log(`[App] Connected tab ${activeTabId} to existing Sidecar on port ${sidecarInfo.port}`);
-
-            // Update tab to chat view
-            setTabs((prev) =>
-              prev.map((t) =>
-                t.id === activeTabId
-                  ? {
-                    ...t,
-                    agentDir: project.path,
-                    sessionId: sessionId ?? null,
-                    view: 'chat',
-                    title: getFolderName(project.path),
-                  }
-                  : t
-              )
-            );
-            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-            return;
-          }
-          // Sidecar doesn't exist - fall through to create new one
-          console.log(`[App] No existing Sidecar found for workspace, creating new one`);
+        // Find if session is already open in any existing Tab
+        const existingTab = tabs.find(t => t.sessionId === sessionId);
+        if (existingTab) {
+          console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
+          setActiveTabId(existingTab.id);
+          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+          return;
         }
       }
 
-      console.log('[App] Starting sidecar for project:', project.path, 'sessionId:', sessionId);
+      // ========================================
+      // Scenario 2: Session has running cron task (no Tab)
+      // ========================================
+      if (sessionId) {
+        const activation = await getSessionActivation(sessionId);
+        if (activation && activation.task_id) {
+          // Session is activated by a cron task - connect Tab to its Sidecar
+          console.log(`[App] Scenario 2: Session ${sessionId} has cron task ${activation.task_id} on port ${activation.port}`);
+
+          // Determine target Tab (may need new Tab if current has cron task)
+          let targetTabId = activeTabId;
+          const currentTabCronTask = await getTabCronTask(activeTabId);
+          if (currentTabCronTask && currentTabCronTask.status === 'running') {
+            // Current Tab has running cron task, need new Tab
+            if (tabs.length >= MAX_TABS) {
+              setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+              setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+              return;
+            }
+            const newTab = createNewTab();
+            setTabs((prev) => [...prev, newTab]);
+            targetTabId = newTab.id;
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
+          }
+
+          // Connect Tab to cron task Sidecar
+          const port = await connectTabToCronSidecar(targetTabId, activation.task_id);
+          console.log(`[App] Tab ${targetTabId} connected to cron Sidecar on port ${port}`);
+
+          // Update session activation to include this Tab
+          await updateSessionTab(sessionId, targetTabId);
+
+          // Update tab state
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === targetTabId
+                ? {
+                  ...t,
+                  agentDir: project.path,
+                  sessionId: sessionId,
+                  view: 'chat',
+                  title: getFolderName(project.path),
+                  cronTaskId: activation.task_id ?? undefined, // Mark Tab as connected to cron task
+                  sidecarPort: port, // Store the port for SSE connection
+                }
+                : t
+            )
+          );
+
+          if (targetTabId !== activeTabId) {
+            setActiveTabId(targetTabId);
+          }
+          setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
+          return;
+        }
+      }
+
+      // ========================================
+      // Scenario 3: Current Tab has running cron task
+      // ========================================
+      let targetTabId = activeTabId;
+      const currentTabCronTask = await getTabCronTask(activeTabId);
+      if (currentTabCronTask && currentTabCronTask.status === 'running') {
+        console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
+
+        if (tabs.length >= MAX_TABS) {
+          setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+          return;
+        }
+
+        const newTab = createNewTab();
+        setTabs((prev) => [...prev, newTab]);
+        targetTabId = newTab.id;
+        setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
+      }
+
+      // ========================================
+      // Scenario 4: Normal switch (or Scenario 3 continuation)
+      // ========================================
+      console.log(`[App] Scenario 4: Normal launch - tab ${targetTabId}, project: ${project.path}, sessionId: ${sessionId}`);
 
       // Start a Tab-specific Sidecar instance
-      const status = await startTabSidecar(activeTabId, project.path);
+      const status = await startTabSidecar(targetTabId, project.path);
       console.log('[App] Tab sidecar started:', status);
 
-      // Update tab to chat view with project info and optional sessionId
-      // SSE will be connected by TabProvider, which will load the session if sessionId is provided
+      // Update tab state
       setTabs((prev) =>
         prev.map((t) =>
-          t.id === activeTabId
+          t.id === targetTabId
             ? {
               ...t,
               agentDir: project.path,
               sessionId: sessionId ?? null,
               view: 'chat',
               title: getFolderName(project.path),
+              cronTaskId: undefined, // Clear any previous cron task association
+              sidecarPort: undefined, // Clear any previous port
             }
             : t
         )
       );
+
+      if (targetTabId !== activeTabId) {
+        setActiveTabId(targetTabId);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[App] Failed to start:', errorMsg);
@@ -420,27 +494,110 @@ export default function App() {
     } finally {
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
     }
-  }, [activeTabId]);
+  }, [activeTabId, tabs]);
+
+  /**
+   * Handle session switch from within Chat (history dropdown)
+   * Implements Session singleton with all 4 scenarios
+   */
+  const handleSwitchSession = useCallback(async (tabId: string, sessionId: string) => {
+    // Scenario 1: Session already open in a Tab → Jump to that Tab
+    const existingTab = tabs.find(t => t.sessionId === sessionId);
+    if (existingTab) {
+      console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
+      setActiveTabId(existingTab.id);
+      return;
+    }
+
+    // Scenario 2: Session has running cron task (no Tab) → Connect to Cron Sidecar
+    const activation = await getSessionActivation(sessionId);
+    if (activation && activation.task_id) {
+      console.log(`[App] handleSwitchSession Scenario 2: Session ${sessionId} has cron task ${activation.task_id}`);
+
+      // Get current tab info to find agentDir
+      const currentTab = tabs.find(t => t.id === tabId);
+      if (!currentTab?.agentDir) {
+        console.error('[App] Cannot switch: current tab has no agentDir');
+        return;
+      }
+
+      // Connect Tab to cron task Sidecar
+      try {
+        const port = await connectTabToCronSidecar(tabId, activation.task_id);
+        await updateSessionTab(sessionId, tabId);
+
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === tabId
+              ? {
+                ...t,
+                sessionId,
+                cronTaskId: activation.task_id ?? undefined,
+                sidecarPort: port,
+              }
+              : t
+          )
+        );
+      } catch (error) {
+        console.error('[App] Failed to connect to cron Sidecar:', error);
+      }
+      return;
+    }
+
+    // Scenario 3: Current Tab has running cron task → Create new Tab
+    const currentTabCronTask = await getTabCronTask(tabId);
+    if (currentTabCronTask && currentTabCronTask.status === 'running') {
+      console.log(`[App] handleSwitchSession Scenario 3: Current tab has cron task, need to use handleLaunchProject`);
+      // This case should be blocked by Chat.tsx - cron task must be stopped first
+      // But as a safety measure, we don't switch
+      console.warn('[App] Cannot switch session while cron task is running');
+      return;
+    }
+
+    // Scenario 4: Normal switch → Update Tab's sessionId
+    console.log(`[App] handleSwitchSession Scenario 4: Switching tab ${tabId} to session ${sessionId}`);
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId
+          ? { ...t, sessionId }
+          : t
+      )
+    );
+  }, [tabs]);
 
   const handleBackToLauncher = useCallback(async () => {
     if (!activeTabId) return;
 
+    // Get current tab to access sessionId
+    const currentTab = tabs.find(t => t.id === activeTabId);
+
     // Check if this Tab has an active cron task before stopping Sidecar
     try {
       const cronTask = await getTabCronTask(activeTabId);
-      if (cronTask && (cronTask.status === 'running' || cronTask.status === 'paused')) {
+      if (cronTask && cronTask.status === 'running') {
         // Cron task is active - keep Sidecar running but clear tab association
         console.log(`[App] Tab ${activeTabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
         await updateCronTaskTab(cronTask.id, undefined);
+        // Update session activation to remove tab_id but keep task_id
+        if (currentTab?.sessionId) {
+          await updateSessionTab(currentTab.sessionId, undefined);
+        }
         // Don't stop Sidecar
       } else {
-        // No active cron task - stop Sidecar
+        // No active cron task - stop Sidecar and deactivate session
         void stopTabSidecar(activeTabId);
+        if (currentTab?.sessionId) {
+          await deactivateSession(currentTab.sessionId);
+        }
       }
     } catch (error) {
       console.error(`[App] Error checking cron task for tab ${activeTabId}:`, error);
       // On error, stop Sidecar to be safe
       void stopTabSidecar(activeTabId);
+      // Still try to deactivate session
+      if (currentTab?.sessionId) {
+        await deactivateSession(currentTab.sessionId).catch(() => {});
+      }
     }
 
     setTabs((prev) =>
@@ -450,7 +607,7 @@ export default function App() {
           : t
       )
     );
-  }, [activeTabId]);
+  }, [activeTabId, tabs]);
 
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
@@ -564,7 +721,7 @@ export default function App() {
       // Check for running cron tasks
       try {
         const tasks = await getAllCronTasks();
-        const runningTasks = tasks.filter(t => t.status === 'running' || t.status === 'paused');
+        const runningTasks = tasks.filter(t => t.status === 'running');
 
         if (runningTasks.length > 0) {
           // Show confirmation dialog
@@ -636,8 +793,12 @@ export default function App() {
                   sessionId={tab.sessionId}
                   isActive={isActive}
                   onGeneratingChange={(isGenerating) => updateTabGenerating(tab.id, isGenerating)}
+                  sidecarPort={tab.sidecarPort}
                 >
-                  <Chat onBack={handleBackToLauncher} />
+                  <Chat
+                    onBack={handleBackToLauncher}
+                    onSwitchSession={(sessionId) => handleSwitchSession(tab.id, sessionId)}
+                  />
                 </TabProvider>
               )}
             </div>
