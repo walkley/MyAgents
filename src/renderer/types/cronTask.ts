@@ -6,9 +6,10 @@
 export type CronRunMode = 'single_session' | 'new_session';
 
 /**
- * Task status
+ * Task status (simplified: only Running and Stopped)
+ * Stopped includes: manual stop, end conditions met, AI exit
  */
-export type CronTaskStatus = 'running' | 'paused' | 'stopped' | 'completed';
+export type CronTaskStatus = 'running' | 'stopped';
 
 /**
  * End conditions for a cron task
@@ -123,12 +124,8 @@ export function getCronStatusText(status: CronTaskStatus): string {
   switch (status) {
     case 'running':
       return '运行中';
-    case 'paused':
-      return '已暂停';
     case 'stopped':
       return '已停止';
-    case 'completed':
-      return '已完成';
     default:
       return status;
   }
@@ -141,12 +138,8 @@ export function getCronStatusColor(status: CronTaskStatus): string {
   switch (status) {
     case 'running':
       return 'text-green-600';
-    case 'paused':
-      return 'text-yellow-600';
     case 'stopped':
-      return 'text-red-600';
-    case 'completed':
-      return 'text-blue-600';
+      return 'text-gray-600';
     default:
       return 'text-[var(--ink-muted)]';
   }

@@ -7,6 +7,8 @@ export interface Tab {
     view: 'launcher' | 'chat' | 'settings';
     title: string;            // Display title for the tab
     isGenerating?: boolean;   // true = AI is outputting, used for close confirmation
+    cronTaskId?: string;      // If Tab is connected to a cron task Sidecar
+    sidecarPort?: number;     // Port of the connected Sidecar (for SSE connection)
 }
 
 export interface TabState {
