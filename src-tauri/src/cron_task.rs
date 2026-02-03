@@ -177,6 +177,8 @@ pub struct CronTaskManager {
     shutdown: Arc<RwLock<bool>>,
     /// Track which tasks are currently executing (for overlap prevention)
     executing_tasks: Arc<RwLock<HashSet<String>>>,
+    /// Track which tasks have active schedulers (prevents duplicate scheduler spawns)
+    active_schedulers: Arc<RwLock<HashSet<String>>>,
     /// Tauri app handle for emitting events (set after initialization)
     app_handle: Arc<RwLock<Option<AppHandle>>>,
 }
@@ -199,6 +201,7 @@ impl CronTaskManager {
             storage_path,
             shutdown: Arc::new(RwLock::new(false)),
             executing_tasks: Arc::new(RwLock::new(HashSet::new())),
+            active_schedulers: Arc::new(RwLock::new(HashSet::new())),
             app_handle: Arc::new(RwLock::new(None)),
         };
 
@@ -253,27 +256,68 @@ impl CronTaskManager {
             return Err(format!("Task {} is not in running status", task_id));
         }
 
+        // Check if scheduler is already running for this task
+        {
+            let active = self.active_schedulers.read().await;
+            if active.contains(task_id) {
+                log::info!("[CronTask] Scheduler already running for task {}, skipping", task_id);
+                return Ok(());
+            }
+        }
+
+        // Mark scheduler as active
+        {
+            let mut active = self.active_schedulers.write().await;
+            active.insert(task_id.to_string());
+        }
+
         let tasks = Arc::clone(&self.tasks);
         let shutdown = Arc::clone(&self.shutdown);
         let executing_tasks = Arc::clone(&self.executing_tasks);
+        let active_schedulers = Arc::clone(&self.active_schedulers);
         let app_handle = Arc::clone(&self.app_handle);
         let task_id_owned = task_id.to_string();
         let interval_mins = task.interval_minutes;
+        let last_executed = task.last_executed_at;
 
         // Spawn the scheduler loop
         tokio::spawn(async move {
             log::info!("[CronTask] Scheduler started for task {} (interval: {} min)", task_id_owned, interval_mins);
 
-            // Create interval timer
-            let mut timer = interval(Duration::from_secs(interval_mins as u64 * 60));
+            // Calculate initial wait time based on last execution
+            // This ensures correct timing even when scheduler is restarted
+            let interval_duration = Duration::from_secs(interval_mins as u64 * 60);
+            let initial_wait = if let Some(last_exec) = last_executed {
+                let now = Utc::now();
+                let next_exec = last_exec + chrono::Duration::minutes(interval_mins as i64);
+                if next_exec > now {
+                    // Wait until next scheduled time
+                    let wait_secs = (next_exec - now).num_seconds().max(0) as u64;
+                    log::info!(
+                        "[CronTask] Task {} next execution in {} seconds (based on lastExecutedAt)",
+                        task_id_owned, wait_secs
+                    );
+                    Duration::from_secs(wait_secs)
+                } else {
+                    // Already past due, execute soon (small delay to avoid immediate execution)
+                    log::info!("[CronTask] Task {} is past due, executing in 5 seconds", task_id_owned);
+                    Duration::from_secs(5)
+                }
+            } else {
+                // No previous execution, wait full interval
+                log::info!("[CronTask] Task {} no previous execution, waiting full interval", task_id_owned);
+                interval_duration
+            };
 
-            // Skip the first immediate tick - we don't want to trigger immediately
-            // The first execution happens when the task is created (if desired)
+            // Wait for initial period
+            tokio::time::sleep(initial_wait).await;
+
+            // Create interval timer for subsequent executions
+            let mut timer = interval(interval_duration);
+            // Skip the first immediate tick since we already waited
             timer.tick().await;
 
             loop {
-                // Wait for next interval
-                timer.tick().await;
 
                 // Check shutdown flag
                 {
@@ -424,6 +468,11 @@ impl CronTaskManager {
                 }
             }
 
+            // Clean up: remove from active schedulers
+            {
+                let mut active = active_schedulers.write().await;
+                active.remove(&task_id_owned);
+            }
             log::info!("[CronTask] Scheduler loop exited for task {}", task_id_owned);
         });
 
