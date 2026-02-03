@@ -378,6 +378,11 @@ impl SidecarManager {
         self.instances.keys().cloned().collect()
     }
 
+    /// Iterate over all instances (tab_id, instance)
+    pub fn iter_instances(&self) -> impl Iterator<Item = (&String, &SidecarInstance)> {
+        self.instances.iter()
+    }
+
     /// Stop all instances (including cron task instances)
     pub fn stop_all(&mut self) {
         log::info!(
@@ -1111,15 +1116,17 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
 
 /// Start a headless Sidecar for cron task execution
 /// Returns the port of the Sidecar (either existing or newly started)
+///
+/// Priority order:
+/// 1. Use existing cron task sidecar (if healthy)
+/// 2. Use existing Tab sidecar for the same workspace (if exists and healthy)
+/// 3. Create a new cron-specific sidecar
 pub fn start_cron_sidecar<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
     workspace_path: &str,
     task_id: &str,
 ) -> Result<u16, String> {
-    // Use a special tab ID format for cron tasks
-    let cron_tab_id = format!("__cron_{}__", task_id);
-
     log::info!(
         "[sidecar] Starting cron sidecar for task {} in workspace {}",
         task_id, workspace_path
@@ -1128,10 +1135,9 @@ pub fn start_cron_sidecar<R: Runtime>(
     // Emit debug event
     let _ = app_handle.emit("cron:debug", serde_json::json!({
         "taskId": task_id,
-        "message": "start_cron_sidecar: about to check existing sidecar"
+        "message": "start_cron_sidecar: checking for existing sidecars"
     }));
 
-    // Check if this cron task already has a Sidecar
     {
         let mut manager_guard = manager.lock().map_err(|e| {
             let _ = app_handle.emit("cron:debug", serde_json::json!({
@@ -1142,39 +1148,66 @@ pub fn start_cron_sidecar<R: Runtime>(
             e.to_string()
         })?;
 
-        let _ = app_handle.emit("cron:debug", serde_json::json!({
-            "taskId": task_id,
-            "message": "start_cron_sidecar: got mutex lock, checking existing sidecar"
-        }));
-
+        // Priority 1: Check if this cron task already has a Sidecar
         if let Some(info) = manager_guard.get_cron_task_sidecar_info(task_id) {
             if info.is_healthy {
                 log::info!(
-                    "[sidecar] Reusing existing Sidecar for cron task {} (port {})",
+                    "[sidecar] Reusing existing cron Sidecar for task {} (port {})",
                     task_id, info.port
                 );
                 let _ = app_handle.emit("cron:debug", serde_json::json!({
                     "taskId": task_id,
-                    "message": format!("start_cron_sidecar: reusing existing sidecar on port {}", info.port)
+                    "message": format!("start_cron_sidecar: reusing existing cron sidecar on port {}", info.port)
                 }));
                 return Ok(info.port);
             } else {
-                // Remove unhealthy instance
                 log::info!(
-                    "[sidecar] Removing unhealthy Sidecar for cron task {}",
+                    "[sidecar] Removing unhealthy cron Sidecar for task {}",
                     task_id
                 );
                 manager_guard.remove_cron_task_instance(task_id);
             }
         }
+
+        // Priority 2: Check if there's an existing Tab sidecar for the same workspace
+        // This is more efficient and the Tab sidecar is already fully initialized
+        let normalized_workspace = workspace_path.trim_end_matches(['/', '\\']);
+        for (tab_id, instance) in manager_guard.iter_instances() {
+            // Skip cron-specific sidecars (they start with __cron_)
+            if tab_id.starts_with("__cron_") {
+                continue;
+            }
+
+            // Check if this instance is for the same workspace
+            if let Some(ref agent_dir) = instance.agent_dir {
+                let instance_workspace = agent_dir.to_string_lossy();
+                let normalized_instance = instance_workspace.trim_end_matches(['/', '\\']);
+
+                if normalized_instance == normalized_workspace {
+                    // Found a Tab sidecar for the same workspace - use it
+                    let port = instance.port;
+                    log::info!(
+                        "[sidecar] Reusing Tab Sidecar {} for cron task {} (port {})",
+                        tab_id, task_id, port
+                    );
+                    let _ = app_handle.emit("cron:debug", serde_json::json!({
+                        "taskId": task_id,
+                        "message": format!("start_cron_sidecar: reusing Tab sidecar (tab={}) on port {}", tab_id, port)
+                    }));
+                    return Ok(port);
+                }
+            }
+        }
     }
 
+    // Priority 3: No existing sidecar found, create a new one
     let _ = app_handle.emit("cron:debug", serde_json::json!({
         "taskId": task_id,
-        "message": "start_cron_sidecar: about to start new sidecar"
+        "message": "start_cron_sidecar: no existing sidecar found, starting new one"
     }));
 
-    // Start a new Sidecar using the special cron tab ID
+    // Use a special tab ID format for cron tasks
+    let cron_tab_id = format!("__cron_{}__", task_id);
     let agent_dir = PathBuf::from(workspace_path);
     let port = start_tab_sidecar(app_handle, manager, &cron_tab_id, Some(agent_dir))
         .map_err(|e| {
