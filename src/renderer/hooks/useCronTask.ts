@@ -10,6 +10,7 @@ import {
   startCronScheduler,
   markTaskExecuting,
   markTaskComplete,
+  updateCronTaskSession,
 } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
@@ -48,12 +49,12 @@ export interface UseCronTaskOptions {
   onExecute?: (taskId: string, prompt: string, isFirstExecution: boolean, aiCanExit: boolean) => Promise<void>;
   /** Callback when task completes */
   onComplete?: (task: CronTask, reason?: string) => void;
-  /** SSE event source for listening to cron events */
-  sseEventSource?: EventSource | null;
+  /** Ref to register the cron task exit handler (provided by TabContext) */
+  onCronTaskExitRequestedRef?: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
 
 export function useCronTask(options: UseCronTaskOptions) {
-  const { workspacePath, sessionId, tabId, onExecute, onComplete, sseEventSource } = options;
+  const { workspacePath, sessionId, tabId, onExecute, onComplete, onCronTaskExitRequestedRef } = options;
 
   const [state, setState] = useState<CronTaskState>(initialState);
   const isExecutingRef = useRef(false);
@@ -61,6 +62,15 @@ export function useCronTask(options: UseCronTaskOptions) {
   optionsRef.current = options;
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Refs for Tauri event handlers to avoid recreating listeners on handler changes
+  // These refs are updated when handlers change, but the listeners always call through refs
+  const handleSchedulerStartedRef = useRef<((payload: { taskId: string; intervalMinutes: number; executionCount: number }) => void) | null>(null);
+  const handleExecutionStartingRef = useRef<((payload: { taskId: string; executionNumber: number; isFirstExecution: boolean }) => void) | null>(null);
+  const handleDebugEventRef = useRef<((payload: { taskId: string; message: string; error?: boolean }) => void) | null>(null);
+  const handleSchedulerTriggerRef = useRef<((payload: CronTaskTriggerPayload) => Promise<void>) | null>(null);
+  const handleExecutionCompleteRef = useRef<((payload: { taskId: string; success: boolean; executionCount: number }) => Promise<void>) | null>(null);
+  const handleExecutionErrorRef = useRef<((payload: { taskId: string; error: string }) => void) | null>(null);
 
   // Enable cron mode with initial config
   const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'>) => {
@@ -316,7 +326,18 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
   }, []);
 
+  // Update refs with latest handler functions
+  // This ensures listeners always call the latest handlers without needing to re-subscribe
+  handleSchedulerStartedRef.current = handleSchedulerStarted;
+  handleExecutionStartingRef.current = handleExecutionStarting;
+  handleDebugEventRef.current = handleDebugEvent;
+  handleSchedulerTriggerRef.current = handleSchedulerTrigger;
+  handleExecutionCompleteRef.current = handleExecutionComplete;
+  handleExecutionErrorRef.current = handleExecutionError;
+
   // Listen for Tauri events (cron:trigger-execution, cron:execution-complete, cron:execution-error, cron:scheduler-started, cron:execution-starting, cron:debug)
+  // Note: We use refs for handlers so this effect only runs once (on mount) and doesn't need
+  // to re-subscribe when tabId or other dependencies change
   useEffect(() => {
     if (!isTauriEnvironment()) return;
 
@@ -334,7 +355,7 @@ export function useCronTask(options: UseCronTaskOptions) {
       unlistenSchedulerStarted = await listen<{ taskId: string; intervalMinutes: number; executionCount: number }>(
         'cron:scheduler-started',
         (event) => {
-          handleSchedulerStarted(event.payload);
+          handleSchedulerStartedRef.current?.(event.payload);
         }
       );
 
@@ -342,7 +363,7 @@ export function useCronTask(options: UseCronTaskOptions) {
       unlistenExecutionStarting = await listen<{ taskId: string; executionNumber: number; isFirstExecution: boolean }>(
         'cron:execution-starting',
         (event) => {
-          handleExecutionStarting(event.payload);
+          handleExecutionStartingRef.current?.(event.payload);
         }
       );
 
@@ -350,27 +371,27 @@ export function useCronTask(options: UseCronTaskOptions) {
       unlistenDebug = await listen<{ taskId: string; message: string; error?: boolean }>(
         'cron:debug',
         (event) => {
-          handleDebugEvent(event.payload);
+          handleDebugEventRef.current?.(event.payload);
         }
       );
 
       // Legacy: trigger from Rust to frontend to execute
       unlistenTrigger = await listen<CronTaskTriggerPayload>('cron:trigger-execution', (event) => {
-        handleSchedulerTrigger(event.payload);
+        handleSchedulerTriggerRef.current?.(event.payload);
       });
 
       // New: Rust executed directly, notify frontend to update UI
       unlistenComplete = await listen<{ taskId: string; success: boolean; executionCount: number }>(
         'cron:execution-complete',
         (event) => {
-          handleExecutionComplete(event.payload);
+          handleExecutionCompleteRef.current?.(event.payload);
         }
       );
 
       unlistenError = await listen<{ taskId: string; error: string }>(
         'cron:execution-error',
         (event) => {
-          handleExecutionError(event.payload);
+          handleExecutionErrorRef.current?.(event.payload);
         }
       );
     };
@@ -385,29 +406,24 @@ export function useCronTask(options: UseCronTaskOptions) {
       if (unlistenComplete) unlistenComplete();
       if (unlistenError) unlistenError();
     };
-  }, [handleSchedulerStarted, handleExecutionStarting, handleDebugEvent, handleSchedulerTrigger, handleExecutionComplete, handleExecutionError]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- Handlers are accessed via refs to avoid listener churn
+  }, []);
 
-  // Listen for SSE events (cron:task-exit-requested from AI tool)
+  // Register handler for SSE events (cron:task-exit-requested from AI tool)
+  // The handler is registered via the ref provided by TabContext
   useEffect(() => {
-    if (!sseEventSource) return;
+    if (!onCronTaskExitRequestedRef) return;
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.taskId && data.reason) {
-          handleTaskExitRequested(data.taskId, data.reason);
-        }
-      } catch {
-        // Ignore parse errors
-      }
-    };
-
-    sseEventSource.addEventListener('cron:task-exit-requested', handleMessage);
+    // Register our handler
+    onCronTaskExitRequestedRef.current = handleTaskExitRequested;
 
     return () => {
-      sseEventSource.removeEventListener('cron:task-exit-requested', handleMessage);
+      // Unregister on cleanup
+      if (onCronTaskExitRequestedRef.current === handleTaskExitRequested) {
+        onCronTaskExitRequestedRef.current = null;
+      }
     };
-  }, [sseEventSource, handleTaskExitRequested]);
+  }, [onCronTaskExitRequestedRef, handleTaskExitRequested]);
 
   // Restore state from an existing cron task (for app restart recovery)
   const restoreFromTask = useCallback((task: CronTask) => {
@@ -427,6 +443,20 @@ export function useCronTask(options: UseCronTaskOptions) {
     });
   }, []);
 
+  // Update task's sessionId (called when session is created after task creation)
+  const updateSessionId = useCallback(async (newSessionId: string) => {
+    const currentTask = stateRef.current.task;
+    if (!currentTask) return;
+
+    try {
+      const updatedTask = await updateCronTaskSession(currentTask.id, newSessionId);
+      setState(prev => ({ ...prev, task: updatedTask }));
+      console.log('[useCronTask] Updated sessionId:', updatedTask.id, updatedTask.sessionId);
+    } catch (error) {
+      console.error('[useCronTask] Failed to update sessionId:', error);
+    }
+  }, []);
+
   return {
     state,
     enableCronMode,
@@ -436,5 +466,6 @@ export function useCronTask(options: UseCronTaskOptions) {
     stop,
     refresh,
     restoreFromTask,
+    updateSessionId,
   };
 }

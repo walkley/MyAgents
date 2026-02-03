@@ -2,7 +2,7 @@
 // Shows all active cron tasks with controls to open/stop them
 
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, Square, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
+import { Clock, StopCircle, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
 import { getAllCronTasks, stopCronTask } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatCronInterval, getCronStatusText } from '@/types/cronTask';
@@ -18,6 +18,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
+  const [pendingStopId, setPendingStopId] = useState<string | null>(null);
 
   // Load tasks
   const loadTasks = useCallback(async () => {
@@ -56,24 +57,31 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
     }
   }, [onClose]);
 
-  // Handle stop task
-  const handleStopTask = useCallback(async (task: CronTask) => {
-    const confirmed = window.confirm(
-      `确定要停止此定时任务吗？\n\n任务ID: ${task.id}\n已执行: ${task.executionCount} 次\n\n停止后任务将无法恢复。`
-    );
-    if (!confirmed) return;
+  // Handle stop task - show inline confirmation
+  const handleStopClick = useCallback((taskId: string) => {
+    setPendingStopId(taskId);
+  }, []);
 
-    setStoppingTaskId(task.id);
+  const handleConfirmStop = useCallback(async () => {
+    if (!pendingStopId) return;
+    const taskId = pendingStopId;
+    setPendingStopId(null);
+    setStoppingTaskId(taskId);
+
     try {
-      await stopCronTask(task.id);
+      await stopCronTask(taskId);
       // Reload tasks
       await loadTasks();
     } catch (err) {
-      alert(`停止任务失败: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(`停止任务失败: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setStoppingTaskId(null);
     }
-  }, [loadTasks]);
+  }, [pendingStopId, loadTasks]);
+
+  const handleCancelStop = useCallback(() => {
+    setPendingStopId(null);
+  }, []);
 
   if (!isOpen) return null;
 
@@ -154,21 +162,42 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
                     </div>
                     {/* Actions */}
                     <div className="ml-3 flex items-center gap-1">
-                      <button
-                        onClick={() => handleOpenTask(task)}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--accent)]/10 hover:text-[var(--accent)]"
-                        title="打开"
-                      >
-                        <ExternalLink className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleStopTask(task)}
-                        disabled={stoppingTaskId === task.id}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--error)]/10 hover:text-[var(--error)] disabled:opacity-50"
-                        title="停止"
-                      >
-                        <Square className="h-4 w-4" />
-                      </button>
+                      {/* Show confirmation buttons when pending stop */}
+                      {pendingStopId === task.id ? (
+                        <>
+                          <button
+                            onClick={handleConfirmStop}
+                            disabled={stoppingTaskId === task.id}
+                            className="rounded-lg bg-[var(--error)] px-2 py-1 text-xs font-medium text-white transition hover:bg-[var(--error)]/80 disabled:opacity-50"
+                          >
+                            确认停止
+                          </button>
+                          <button
+                            onClick={handleCancelStop}
+                            className="rounded-lg bg-[var(--paper-contrast)] px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition hover:bg-[var(--line)]"
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleOpenTask(task)}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--accent)]/10 hover:text-[var(--accent)]"
+                            title="打开"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => handleStopClick(task.id)}
+                            disabled={stoppingTaskId === task.id}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--error)]/10 hover:text-[var(--error)] disabled:opacity-50"
+                            title="停止"
+                          >
+                            <StopCircle className="h-4 w-4" />
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
 

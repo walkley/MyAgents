@@ -28,36 +28,89 @@ export const CRON_TASK_EXIT_REASON_PATTERN = /Reason:\s*(.+?)(?:\n|$)/;
 
 /**
  * Cron task context for tool execution
- * This is set by the agent session when executing a cron task
+ * Uses Map to avoid race conditions when multiple tasks execute concurrently
+ * Key: sessionId (or 'default' if not specified)
  */
-let currentCronTaskId: string | null = null;
-let currentCronTaskCanExit: boolean = false;
+interface CronTaskContext {
+  taskId: string;
+  canExit: boolean;
+  startedAt: number; // Timestamp for debugging
+}
+
+const cronTaskContextMap = new Map<string, CronTaskContext>();
+
+// Track the "active" session for backward compatibility
+// This is set when setCronTaskContext is called and used by exitCronTaskHandler
+let activeSessionKey: string | null = null;
 
 /**
  * Set the current cron task context
  * Called by agent-session before executing a cron task prompt
+ * @param taskId - The cron task ID
+ * @param canExit - Whether AI is allowed to exit this task
+ * @param sessionId - Optional session ID for isolation (defaults to 'default')
  */
-export function setCronTaskContext(taskId: string | null, canExit: boolean = false): void {
-  currentCronTaskId = taskId;
-  currentCronTaskCanExit = canExit;
-  console.log(`[cron-tools] Context set: taskId=${taskId}, canExit=${canExit}`);
+export function setCronTaskContext(taskId: string | null, canExit: boolean = false, sessionId?: string): void {
+  const key = sessionId || 'default';
+
+  if (taskId === null) {
+    // Clear context for this session
+    cronTaskContextMap.delete(key);
+    if (activeSessionKey === key) {
+      activeSessionKey = null;
+    }
+    console.log(`[cron-tools] Context cleared for session: ${key}`);
+  } else {
+    // Set context for this session
+    cronTaskContextMap.set(key, {
+      taskId,
+      canExit,
+      startedAt: Date.now()
+    });
+    activeSessionKey = key;
+    console.log(`[cron-tools] Context set: taskId=${taskId}, canExit=${canExit}, session=${key}`);
+  }
 }
 
 /**
  * Get the current cron task context
+ * @param sessionId - Optional session ID (uses active session if not specified)
  */
-export function getCronTaskContext(): { taskId: string | null; canExit: boolean } {
-  return { taskId: currentCronTaskId, canExit: currentCronTaskCanExit };
+export function getCronTaskContext(sessionId?: string): { taskId: string | null; canExit: boolean } {
+  const key = sessionId || activeSessionKey || 'default';
+  const context = cronTaskContextMap.get(key);
+
+  if (!context) {
+    return { taskId: null, canExit: false };
+  }
+
+  return { taskId: context.taskId, canExit: context.canExit };
 }
 
 /**
  * Clear the cron task context
  * Called after task execution completes
+ * @param sessionId - Optional session ID (clears active session if not specified)
  */
-export function clearCronTaskContext(): void {
-  currentCronTaskId = null;
-  currentCronTaskCanExit = false;
-  console.log('[cron-tools] Context cleared');
+export function clearCronTaskContext(sessionId?: string): void {
+  const key = sessionId || activeSessionKey || 'default';
+  cronTaskContextMap.delete(key);
+
+  if (activeSessionKey === key) {
+    activeSessionKey = null;
+  }
+
+  console.log(`[cron-tools] Context cleared for session: ${key}`);
+}
+
+/**
+ * Clear all cron task contexts
+ * Used for cleanup when sidecar shuts down
+ */
+export function clearAllCronTaskContexts(): void {
+  cronTaskContextMap.clear();
+  activeSessionKey = null;
+  console.log('[cron-tools] All contexts cleared');
 }
 
 /**
@@ -67,8 +120,11 @@ export function clearCronTaskContext(): void {
 async function exitCronTaskHandler(args: { reason: string }): Promise<CallToolResult> {
   const { reason } = args;
 
+  // Get the current cron task context (uses active session)
+  const context = getCronTaskContext();
+
   // Check if we're in a cron task context
-  if (!currentCronTaskId) {
+  if (!context.taskId) {
     return {
       content: [{
         type: 'text',
@@ -79,7 +135,7 @@ async function exitCronTaskHandler(args: { reason: string }): Promise<CallToolRe
   }
 
   // Check if AI is allowed to exit this task
-  if (!currentCronTaskCanExit) {
+  if (!context.canExit) {
     return {
       content: [{
         type: 'text',
@@ -89,12 +145,12 @@ async function exitCronTaskHandler(args: { reason: string }): Promise<CallToolRe
     };
   }
 
-  console.log(`[cron-tools] exit_cron_task called: taskId=${currentCronTaskId}, reason="${reason}"`);
+  console.log(`[cron-tools] exit_cron_task called: taskId=${context.taskId}, reason="${reason}"`);
 
   // Broadcast the completion event to frontend
   // The frontend will handle updating the task status via Tauri IPC
   broadcast('cron:task-exit-requested', {
-    taskId: currentCronTaskId,
+    taskId: context.taskId,
     reason,
     timestamp: new Date().toISOString()
   });

@@ -322,6 +322,24 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: true };
   }
 
+  // Extract server ID from tool name: mcp__<server-id>__<tool-name>
+  const parts = toolName.split('__');
+  if (parts.length < 3) {
+    return { allowed: false, reason: '无效的 MCP 工具名称' };
+  }
+  const serverId = parts[1];
+
+  // Special case: cron-tools is a built-in MCP server for cron task management
+  // Always allow when we're in a cron task context (regardless of user's MCP settings)
+  if (serverId === 'cron-tools') {
+    const cronContext = getCronTaskContext();
+    if (cronContext.taskId) {
+      return { allowed: true };
+    }
+    // Not in cron context - this tool shouldn't be available
+    return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
+  }
+
   // Case 1: MCP not set (null) - allow all (backward compatible)
   if (currentMcpServers === null) {
     return { allowed: true };
@@ -333,13 +351,6 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
   }
 
   // Case 3: User enabled specific MCP - check if this tool's server is enabled
-  // Extract server ID from tool name: mcp__<server-id>__<tool-name>
-  const parts = toolName.split('__');
-  if (parts.length < 3) {
-    return { allowed: false, reason: '无效的 MCP 工具名称' };
-  }
-  const serverId = parts[1];
-
   // Check if this server is in the enabled list
   const isEnabled = currentMcpServers.some(s => s.id === serverId);
   if (isEnabled) {
@@ -829,7 +840,7 @@ function persistMessagesToStorage(
   updateSessionMetadata(sessionId, { lastActiveAt: new Date().toISOString() });
 }
 
-function getSessionId(): string {
+export function getSessionId(): string {
   return sessionId;
 }
 
@@ -2313,6 +2324,17 @@ async function startStreamingSession(): Promise<void> {
             };
           }
 
+          // Special case: cron-tools is a built-in trusted server
+          // When allowed by checkMcpToolPermission, skip user confirmation entirely
+          // (AI should be able to exit cron task without user approval)
+          if (toolName.startsWith('mcp__cron-tools__')) {
+            console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
           // Special handling for AskUserQuestion - always requires user interaction
           if (toolName === 'AskUserQuestion') {
             console.log('[canUseTool] AskUserQuestion detected, prompting user');
@@ -2372,7 +2394,9 @@ async function startStreamingSession(): Promise<void> {
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {
         systemInitInfo = nextSystemInit;
-        broadcast('chat:system-init', { info: systemInitInfo });
+        // Include our sessionId (for SessionStore) alongside SDK's system info
+        // Frontend needs our sessionId to match against history records
+        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
 
         // Save SDK session_id for future resume functionality
         if (nextSystemInit.session_id) {

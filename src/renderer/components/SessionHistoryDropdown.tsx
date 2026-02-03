@@ -86,6 +86,7 @@ export default function SessionHistoryDropdown({
             setSessions(null);
             setCronTasks(null);
             setStatsSession(null);
+            setPendingDeleteId(null);
         };
     }, [isOpen, agentDir]);
 
@@ -103,14 +104,28 @@ export default function SessionHistoryDropdown({
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [isOpen]);
 
-    const handleDelete = async (e: React.MouseEvent, sessionId: string) => {
+    // Track pending delete to show confirmation UI
+    const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
+    const handleDeleteClick = (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
-        if (!confirm('确定要删除这条对话记录吗？')) return;
+        e.preventDefault();
+        setPendingDeleteId(sessionId);
+    };
+
+    const handleConfirmDelete = async () => {
+        if (!pendingDeleteId) return;
+        const sessionId = pendingDeleteId;
+        setPendingDeleteId(null);
 
         const success = await deleteSession(sessionId);
         if (success) {
             setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
         }
+    };
+
+    const handleCancelDelete = () => {
+        setPendingDeleteId(null);
     };
 
     const handleShowStats = (e: React.MouseEvent, session: SessionMetadata) => {
@@ -214,21 +229,41 @@ export default function SessionHistoryDropdown({
                                         </div>
                                     </div>
                                     <div className="flex flex-shrink-0 items-center gap-1">
-                                        <button
-                                            className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] group-hover:opacity-100"
-                                            onClick={(e) => handleShowStats(e, session)}
-                                            title="查看统计"
-                                        >
-                                            <BarChart2 className="h-3.5 w-3.5" />
-                                        </button>
-                                        {!isCurrent && (
-                                            <button
-                                                className="flex h-6 w-6 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--error-bg)] group-hover:opacity-100"
-                                                onClick={(e) => handleDelete(e, session.id)}
-                                                title="删除"
-                                            >
-                                                <Trash2 className="h-3.5 w-3.5 text-[var(--error)]" />
-                                            </button>
+                                        {/* Show confirmation buttons when pending delete */}
+                                        {pendingDeleteId === session.id ? (
+                                            <>
+                                                <button
+                                                    className="flex h-6 items-center justify-center rounded bg-[var(--error)] px-2 text-xs font-medium text-white transition-colors hover:bg-[var(--error)]/80"
+                                                    onClick={handleConfirmDelete}
+                                                >
+                                                    确认
+                                                </button>
+                                                <button
+                                                    className="flex h-6 items-center justify-center rounded bg-[var(--paper-contrast)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
+                                                    onClick={handleCancelDelete}
+                                                >
+                                                    取消
+                                                </button>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <button
+                                                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] group-hover:opacity-100"
+                                                    onClick={(e) => handleShowStats(e, session)}
+                                                    title="查看统计"
+                                                >
+                                                    <BarChart2 className="h-3.5 w-3.5" />
+                                                </button>
+                                                {!isCurrent && (
+                                                    <button
+                                                        className="flex h-6 w-6 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--error-bg)] group-hover:opacity-100"
+                                                        onClick={(e) => handleDeleteClick(e, session.id)}
+                                                        title="删除"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5 text-[var(--error)]" />
+                                                    </button>
+                                                )}
+                                            </>
                                         )}
                                     </div>
                                 </div>

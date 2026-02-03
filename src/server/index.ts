@@ -77,6 +77,7 @@ import {
   getAgentState,
   getLogLines,
   getMessages,
+  getSessionId,
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
@@ -610,19 +611,23 @@ async function main() {
           return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
         }
 
+        // Get current session ID for context isolation
+        const currentSessionId = getSessionId();
+
         // Set cron task context so the exit_cron_task tool knows which task is running
-        setCronTaskContext(taskId, aiCanExit ?? false);
+        // Pass sessionId for proper isolation between concurrent tasks
+        setCronTaskContext(taskId, aiCanExit ?? false, currentSessionId);
 
         // Wrap the prompt with cron task context
         const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
 
         try {
-          console.log(`[cron] execute taskId=${taskId} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
+          console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           await enqueueUserMessage(cronPrompt, [], permissionMode ?? 'auto', model, providerEnv);
           return jsonResponse({ success: true });
         } catch (error) {
           // Clear context on error
-          clearCronTaskContext();
+          clearCronTaskContext(currentSessionId);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
             500
@@ -651,6 +656,12 @@ async function main() {
         const effectiveRunMode = runMode ?? 'single_session';
         const { agentDir } = getAgentState();
 
+        // Clear any existing cron context before switching sessions
+        // This prevents context pollution when sessions change
+        clearCronTaskContext();
+
+        let effectiveSessionId = sessionId;
+
         if (effectiveRunMode === 'new_session') {
           // Create a fresh session for each execution (no memory of previous runs)
           const newSession = createSession(agentDir);
@@ -659,6 +670,7 @@ async function main() {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
             return jsonResponse({ success: false, error: 'Failed to create new session for execution.' }, 500);
           }
+          effectiveSessionId = newSession.id;
           console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
         } else if (sessionId) {
           // single_session mode: switch to the task's stored session (keeps context)
@@ -671,7 +683,8 @@ async function main() {
         }
 
         // Set cron task context so the exit_cron_task tool knows which task is running
-        setCronTaskContext(taskId, aiCanExit ?? false);
+        // Pass sessionId for proper isolation between concurrent tasks
+        setCronTaskContext(taskId, aiCanExit ?? false, effectiveSessionId);
 
         // Wrap the prompt with cron task context
         const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
@@ -688,7 +701,7 @@ async function main() {
 
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
-            clearCronTaskContext();
+            clearCronTaskContext(effectiveSessionId);
             return jsonResponse({
               success: false,
               error: 'Execution timed out after 10 minutes'
@@ -732,7 +745,7 @@ async function main() {
           }
 
           // Clear context after execution
-          clearCronTaskContext();
+          clearCronTaskContext(effectiveSessionId);
 
           console.log(`[cron] execute-sync taskId=${taskId} completed, aiRequestedExit=${aiRequestedExit}, exitReason=${exitReason}`);
 
@@ -743,7 +756,7 @@ async function main() {
           });
         } catch (error) {
           // Clear context on error
-          clearCronTaskContext();
+          clearCronTaskContext(effectiveSessionId);
           console.error(`[cron] execute-sync taskId=${taskId} error:`, error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },

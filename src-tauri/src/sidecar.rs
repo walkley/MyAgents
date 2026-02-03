@@ -98,23 +98,31 @@ const SIDECAR_MARKER: &str = "--myagents-sidecar";
 /// 1. Bun sidecar processes (identified by SIDECAR_MARKER)
 /// 2. SDK child processes (claude-agent-sdk/cli.js)
 /// 3. MCP child processes (~/.myagents/mcp/)
+///
+/// Note: This runs BEFORE logging is initialized, so we use eprintln! for debugging
 pub fn cleanup_stale_sidecars() {
-    log::info!("[sidecar] Cleaning up stale sidecar processes...");
+    // Use eprintln! because this runs before tauri_plugin_log is initialized
+    eprintln!("[sidecar] Cleaning up stale sidecar processes...");
 
     #[cfg(unix)]
     {
         // 1. Clean up bun sidecar processes (our main sidecar)
-        kill_processes_by_pattern("sidecar", SIDECAR_MARKER, true);
+        let sidecar_count = kill_processes_by_pattern("sidecar", SIDECAR_MARKER, true);
 
         // 2. Clean up SDK child processes
         // These are spawned by SDK and don't have our marker
         // Pattern matches: bun .../claude-agent-sdk/cli.js
-        kill_processes_by_pattern("SDK", "claude-agent-sdk/cli.js", true);
+        let sdk_count = kill_processes_by_pattern("SDK", "claude-agent-sdk/cli.js", true);
 
         // 3. Clean up MCP child processes from our installation
         // Pattern matches: bun ~/.myagents/mcp/.../cli.js
         // This is specific to our MCP installation path, won't affect other apps
-        kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
+        let mcp_count = kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
+
+        eprintln!(
+            "[sidecar] Startup cleanup complete: {} sidecar, {} SDK, {} MCP processes cleaned",
+            sidecar_count, sdk_count, mcp_count
+        );
     }
 
     #[cfg(windows)]
@@ -150,12 +158,14 @@ pub fn cleanup_stale_sidecars() {
 }
 
 /// Find PIDs by command line pattern, excluding current process
+/// Note: Uses "--" separator before pattern to handle patterns starting with "-"
+/// (e.g., "--myagents-sidecar" would otherwise be interpreted as a pgrep option)
 #[cfg(unix)]
 fn find_pids_by_pattern(pattern: &str) -> Vec<i32> {
     let current_pid = std::process::id() as i32;
 
     Command::new("pgrep")
-        .args(["-f", pattern])
+        .args(["-f", "--", pattern])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -174,14 +184,17 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<i32> {
 /// - name: descriptive name for logging
 /// - pattern: command line pattern to match
 /// - force_kill: if true, use SIGKILL for processes that don't respond to SIGTERM
+/// Returns: number of processes killed
+///
+/// Note: Uses eprintln! because this may run before tauri_plugin_log is initialized
 #[cfg(unix)]
-fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) {
+fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) -> usize {
     let pids = find_pids_by_pattern(pattern);
     if pids.is_empty() {
-        return;
+        return 0;
     }
 
-    log::info!("[sidecar] Found {} {} processes, sending SIGTERM...", pids.len(), name);
+    eprintln!("[sidecar] Found {} {} processes, sending SIGTERM...", pids.len(), name);
 
     // First try SIGTERM for graceful shutdown
     for pid in &pids {
@@ -191,7 +204,7 @@ fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) {
     }
 
     if !force_kill {
-        return;
+        return pids.len(); // Assume all killed (can't verify without waiting)
     }
 
     // Wait briefly for graceful shutdown
@@ -200,7 +213,7 @@ fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) {
     // Check if any processes survived, use SIGKILL if needed
     let remaining = find_pids_by_pattern(pattern);
     if !remaining.is_empty() {
-        log::warn!(
+        eprintln!(
             "[sidecar] {} {} processes didn't respond to SIGTERM, using SIGKILL...",
             remaining.len(), name
         );
@@ -213,7 +226,8 @@ fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) {
 
     let final_remaining = find_pids_by_pattern(pattern);
     let killed_count = pids.len() - final_remaining.len();
-    log::info!("[sidecar] {} cleanup complete, killed {}/{} processes", name, killed_count, pids.len());
+    eprintln!("[sidecar] {} cleanup complete, killed {}/{} processes", name, killed_count, pids.len());
+    killed_count
 }
 
 
@@ -489,6 +503,60 @@ impl SidecarManager {
         self.cron_task_instances.remove(task_id)
     }
 
+    /// Stop an orphaned Tab sidecar that was being used by a cron task
+    /// This is called when a cron task stops and was using a Tab sidecar (not a dedicated cron sidecar)
+    /// The sidecar is only stopped if no Tab or other cron task is still using it
+    pub fn stop_orphaned_tab_sidecar_for_cron(&mut self, task_id: &str) -> bool {
+        // Find the session activation for this task to get the port
+        let port_and_tab = {
+            let activation = self.session_activations.values()
+                .find(|a| a.task_id.as_deref() == Some(task_id));
+
+            match activation {
+                Some(a) => (a.port, a.tab_id.clone()),
+                None => {
+                    log::debug!(
+                        "[sidecar] No session activation found for task {} (may use dedicated cron sidecar)",
+                        task_id
+                    );
+                    return false;
+                }
+            }
+        };
+
+        let (port, tab_id) = port_and_tab;
+
+        // If the session activation has a tab_id, the Tab is still using the sidecar - don't stop it
+        if tab_id.is_some() {
+            log::debug!(
+                "[sidecar] Sidecar on port {} is still used by Tab {:?}, not stopping",
+                port, tab_id
+            );
+            return false;
+        }
+
+        // Find and remove the Tab sidecar instance with this port
+        let tab_to_remove: Option<String> = self.instances.iter()
+            .find(|(_, instance)| instance.port == port)
+            .map(|(id, _)| id.clone());
+
+        if let Some(tab_id) = tab_to_remove {
+            if let Some(_instance) = self.instances.remove(&tab_id) {
+                log::info!(
+                    "[sidecar] Stopped orphaned Tab sidecar (tab={}) for cron task {} on port {}",
+                    tab_id, task_id, port
+                );
+                return true;
+            }
+        }
+
+        log::debug!(
+            "[sidecar] No orphaned sidecar found on port {} for cron task {}",
+            port, task_id
+        );
+        false
+    }
+
     /// Check if a cron task has a running Sidecar
     #[allow(dead_code)]
     pub fn has_cron_task_instance(&self, task_id: &str) -> bool {
@@ -496,15 +564,45 @@ impl SidecarManager {
     }
 
     /// Get cron task Sidecar info
+    /// This checks both dedicated cron sidecars AND Tab sidecars that are being reused for cron tasks
     pub fn get_cron_task_sidecar_info(&mut self, task_id: &str) -> Option<SidecarInfo> {
-        let instance = self.cron_task_instances.get_mut(task_id)?;
-        Some(SidecarInfo {
-            port: instance.port,
-            workspace_path: instance.agent_dir.as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            is_healthy: instance.is_running(),
-        })
+        // Priority 1: Check dedicated cron task sidecars
+        if let Some(instance) = self.cron_task_instances.get_mut(task_id) {
+            return Some(SidecarInfo {
+                port: instance.port,
+                workspace_path: instance.agent_dir.as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                is_healthy: instance.is_running(),
+            });
+        }
+
+        // Priority 2: Check if there's a session activation with this task_id
+        // This handles the case where a Tab sidecar is being reused for cron task
+        let activation = self.session_activations.values()
+            .find(|a| a.task_id.as_deref() == Some(task_id))?;
+
+        let port = activation.port;
+        let workspace_path = activation.workspace_path.clone();
+
+        // Find the Tab sidecar instance to check health
+        // The sidecar could be in instances (Tab sidecar) with any tab_id
+        for instance in self.instances.values_mut() {
+            if instance.port == port {
+                return Some(SidecarInfo {
+                    port,
+                    workspace_path,
+                    is_healthy: instance.is_running(),
+                });
+            }
+        }
+
+        // Sidecar was in session_activations but not in instances - might have been stopped
+        log::warn!(
+            "[sidecar] Session activation found for task {} on port {} but no running instance",
+            task_id, port
+        );
+        None
     }
 }
 

@@ -6,10 +6,12 @@
  * is delayed (e.g., macOS permission dialogs)
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Clock, FolderOpen, MessageSquare, RefreshCw } from 'lucide-react';
 
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { getAllCronTasks } from '@/api/cronTaskClient';
+import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
 
 interface RecentTasksProps {
@@ -32,10 +34,20 @@ function SectionHeader() {
 
 export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) {
     const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([]);
+    const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [retryCount, setRetryCount] = useState(0);
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Map sessionId to active cron task (running only)
+    const sessionCronTaskMap = useMemo(() => {
+        return new Map(
+            cronTasks
+                .filter(t => t.status === 'running')
+                .map(t => [t.sessionId, t])
+        );
+    }, [cronTasks]);
 
     const fetchSessions = useCallback(async (currentRetryCount = 0) => {
         if (currentRetryCount === 0) {
@@ -44,12 +56,17 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
         setError(null);
 
         try {
-            const sessions = await getSessions();
+            // Fetch sessions and cron tasks in parallel
+            const [sessions, tasks] = await Promise.all([
+                getSessions(),
+                getAllCronTasks().catch(() => [] as CronTask[]), // Cron tasks are optional
+            ]);
             // Sort by lastActiveAt descending and take top 3
             const sorted = sessions
                 .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime())
                 .slice(0, 3);
             setRecentSessions(sorted);
+            setCronTasks(tasks);
             setRetryCount(0); // Reset retry count on success
         } catch (err) {
             console.error('[RecentTasks] Failed to load sessions:', err);
@@ -154,6 +171,8 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                     const project = getProjectForSession(session);
                     if (!project) return null;
 
+                    const hasCronTask = sessionCronTaskMap.has(session.id);
+
                     return (
                         <button
                             key={session.id}
@@ -165,6 +184,13 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                                 <Clock className="h-2.5 w-2.5" />
                                 <span>{formatTime(session.lastActiveAt)}</span>
                             </div>
+
+                            {/* Cron task tag */}
+                            {hasCronTask && (
+                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                                    定时
+                                </span>
+                            )}
 
                             {/* Session title */}
                             <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">

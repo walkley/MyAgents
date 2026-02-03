@@ -94,6 +94,10 @@ export const recordCronExecution = (taskId: string): Promise<CronTask> =>
 export const updateCronTaskTab = (taskId: string, tabId?: string): Promise<CronTask> =>
   invokeCommand('cmd_update_cron_task_tab', { taskId, tabId });
 
+/** Update task's session ID (called when session is created after task creation) */
+export const updateCronTaskSession = (taskId: string, sessionId: string): Promise<CronTask> =>
+  invokeCommand('cmd_update_cron_task_session', { taskId, sessionId });
+
 /** Get tasks that need recovery (tasks that were running before app restart) */
 export const getTasksToRecover = (): Promise<CronTask[]> =>
   invokeCommandWithFallback('cmd_get_tasks_to_recover', undefined, []);

@@ -104,6 +104,9 @@ export interface TabContextValue extends TabState {
 
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
+
+    // Cron task exit event handler (set by useCronTask hook)
+    onCronTaskExitRequested: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
 
 /**
@@ -146,6 +149,7 @@ const defaultContextValue: TabContextValue = {
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
+    onCronTaskExitRequested: { current: null },
 };
 
 /**

@@ -36,6 +36,10 @@ pub fn run() {
     let sidecar_state_for_tray_exit = sidecar_state.clone();
 
     // Track if cleanup has been performed to avoid duplicate cleanup
+    // All clones share the same underlying AtomicBool - whichever exit path
+    // triggers first will do cleanup, and all others will see the flag as true
+    // and skip. The separate variables are needed because each is moved into
+    // a different closure (window event, tray exit, app exit).
     let cleanup_done = Arc::new(AtomicBool::new(false));
     let cleanup_done_for_window = cleanup_done.clone();
     let cleanup_done_for_exit = cleanup_done.clone();
@@ -97,6 +101,7 @@ pub fn run() {
             cron_task::cmd_get_tab_cron_task,
             cron_task::cmd_record_cron_execution,
             cron_task::cmd_update_cron_task_tab,
+            cron_task::cmd_update_cron_task_session,
             cron_task::cmd_get_tasks_to_recover,
             // Cron scheduler commands
             cron_task::cmd_start_cron_scheduler,

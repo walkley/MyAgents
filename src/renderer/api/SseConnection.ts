@@ -45,6 +45,7 @@ const JSON_EVENTS = new Set([
     'chat:agent-error',
     'permission:request', // Permission prompt for tool usage
     'ask-user-question:request', // AskUserQuestion tool prompt
+    'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
 ]);
 
 // Event types that can be JSON or plain string

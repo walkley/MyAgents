@@ -34,6 +34,42 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+/// Atomic file save helper - writes to temp file first, then renames
+/// This prevents data corruption if the process crashes mid-write
+async fn atomic_save_tasks(
+    storage_path: &PathBuf,
+    tasks: &Arc<RwLock<HashMap<String, CronTask>>>,
+) -> Result<(), String> {
+    // Read tasks under lock
+    let tasks_snapshot = {
+        let tasks_guard = tasks.read().await;
+        tasks_guard.values().cloned().collect::<Vec<_>>()
+    };
+    // Lock released here
+
+    let store = CronTaskStore { tasks: tasks_snapshot };
+
+    let content = serde_json::to_string_pretty(&store)
+        .map_err(|e| format!("Failed to serialize cron tasks: {}", e))?;
+
+    // Ensure directory exists
+    if let Some(parent) = storage_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create cron tasks directory: {}", e))?;
+    }
+
+    // Write to temp file first, then rename (atomic on most filesystems)
+    let temp_path = storage_path.with_extension("tmp");
+    fs::write(&temp_path, &content)
+        .map_err(|e| format!("Failed to write cron tasks temp file: {}", e))?;
+
+    fs::rename(&temp_path, storage_path)
+        .map_err(|e| format!("Failed to rename cron tasks file: {}", e))?;
+
+    log::debug!("[CronTask] Atomically saved {} tasks to disk", store.tasks.len());
+    Ok(())
+}
+
 /// Run mode for cron tasks
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -273,6 +309,7 @@ impl CronTaskManager {
         let executing_tasks = Arc::clone(&self.executing_tasks);
         let active_schedulers = Arc::clone(&self.active_schedulers);
         let app_handle = Arc::clone(&self.app_handle);
+        let storage_path = self.storage_path.clone();
         let task_id_owned = task_id.to_string();
         let interval_mins = task.interval_minutes;
         let last_executed = task.last_executed_at;
@@ -540,16 +577,9 @@ impl CronTaskManager {
                     }
                 }
 
-                // Save updated state
-                if let Some(parent) = dirs::home_dir() {
-                    let storage_path = parent.join(".myagents").join("cron_tasks.json");
-                    let tasks_guard = tasks.read().await;
-                    let store = CronTaskStore {
-                        tasks: tasks_guard.values().cloned().collect(),
-                    };
-                    if let Ok(content) = serde_json::to_string_pretty(&store) {
-                        let _ = fs::write(&storage_path, content);
-                    }
+                // Save updated state atomically (temp file + rename)
+                if let Err(e) = atomic_save_tasks(&storage_path, &tasks).await {
+                    log::warn!("[CronTask] Failed to save task state: {}", e);
                 }
 
                 // Wait for the next interval before checking/executing again
@@ -589,27 +619,9 @@ impl CronTaskManager {
         executing.contains(task_id)
     }
 
-    /// Save tasks to disk
+    /// Save tasks to disk using atomic writes (temp file + rename)
     async fn save_to_disk(&self) -> Result<(), String> {
-        let tasks = self.tasks.read().await;
-        let store = CronTaskStore {
-            tasks: tasks.values().cloned().collect(),
-        };
-
-        let content = serde_json::to_string_pretty(&store)
-            .map_err(|e| format!("Failed to serialize cron tasks: {}", e))?;
-
-        // Ensure directory exists
-        if let Some(parent) = self.storage_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create cron tasks directory: {}", e))?;
-        }
-
-        fs::write(&self.storage_path, content)
-            .map_err(|e| format!("Failed to write cron tasks file: {}", e))?;
-
-        log::debug!("[CronTask] Saved {} tasks to disk", tasks.len());
-        Ok(())
+        atomic_save_tasks(&self.storage_path, &self.tasks).await
     }
 
     /// Create a new cron task (does not start it)
@@ -770,22 +782,33 @@ impl CronTaskManager {
     }
 
     /// Internal helper to stop the cron task Sidecar
-    /// With the new architecture (1 Tab = 1 Sidecar), cron tasks have their own Sidecars
+    /// This handles both dedicated cron sidecars and Tab sidecars that were being reused
     async fn stop_cron_task_sidecar_internal(&self, _workspace_path: &str, task_id: &str) {
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
             if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
                 match sidecar_state.lock() {
                     Ok(mut manager) => {
-                        // Remove the cron task Sidecar instance
+                        // First try: Remove dedicated cron task Sidecar instance
                         if let Some(_instance) = manager.remove_cron_task_instance(task_id) {
                             log::info!(
-                                "[CronTask] Stopped cron task Sidecar for task {}",
+                                "[CronTask] Stopped dedicated cron task Sidecar for task {}",
+                                task_id
+                            );
+                            return;
+                        }
+
+                        // Second try: Stop orphaned Tab sidecar that was being reused by this cron task
+                        // This handles the case where Tab was closed while cron task was running
+                        if manager.stop_orphaned_tab_sidecar_for_cron(task_id) {
+                            log::info!(
+                                "[CronTask] Stopped orphaned Tab sidecar for cron task {}",
                                 task_id
                             );
                         } else {
+                            // The sidecar is either still used by a Tab, or already stopped
                             log::debug!(
-                                "[CronTask] No Sidecar instance found for task {} (may have been stopped already)",
+                                "[CronTask] No Sidecar to stop for task {} (may be used by Tab or already stopped)",
                                 task_id
                             );
                         }
@@ -887,6 +910,22 @@ impl CronTaskManager {
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         task.tab_id = tab_id;
+        let task_clone = task.clone();
+        drop(tasks);
+
+        self.save_to_disk().await?;
+
+        Ok(task_clone)
+    }
+
+    /// Update task's session ID (called when session is created after task creation)
+    pub async fn update_task_session(&self, task_id: &str, session_id: String) -> Result<CronTask, String> {
+        let mut tasks = self.tasks.write().await;
+        let task = tasks.get_mut(task_id)
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
+
+        log::info!("[CronTask] Updating task {} sessionId: {:?} -> {}", task_id, task.session_id, session_id);
+        task.session_id = session_id;
         let task_clone = task.clone();
         drop(tasks);
 
@@ -1224,6 +1263,13 @@ pub async fn cmd_record_cron_execution(task_id: String) -> Result<CronTask, Stri
 pub async fn cmd_update_cron_task_tab(task_id: String, tab_id: Option<String>) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
     manager.update_task_tab(&task_id, tab_id).await
+}
+
+/// Update task's session ID (called when session is created after task creation)
+#[tauri::command]
+pub async fn cmd_update_cron_task_session(task_id: String, session_id: String) -> Result<CronTask, String> {
+    let manager = get_cron_task_manager();
+    manager.update_task_session(&task_id, session_id).await
 }
 
 /// Get tasks that need recovery (tasks that were running before app restart)

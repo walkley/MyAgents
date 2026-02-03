@@ -66,6 +66,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     respondAskUserQuestion,
     apiPost,
     setSessionState,
+    onCronTaskExitRequested,
   } = useTabState();
 
   // Get config to find current project provider
@@ -125,6 +126,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     startTask: startCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
+    updateSessionId: updateCronTaskSessionId,
   } = useCronTask({
     workspacePath: agentDir,
     sessionId: sessionId ?? '',
@@ -143,7 +145,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
     },
+    // Register for SSE cron:task-exit-requested events via TabContext
+    onCronTaskExitRequestedRef: onCronTaskExitRequested,
   });
+
+  // Sync cron task's sessionId when session is created after task creation
+  // This happens when user starts a cron task from an empty session
+  const sessionIdSyncedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const task = cronState.task;
+    if (!task || !sessionId) return;
+
+    // If task has empty sessionId but we now have a real sessionId, update the task
+    // Use ref to prevent duplicate updates for the same sessionId
+    if (task.sessionId === '' && sessionId && sessionIdSyncedRef.current !== sessionId) {
+      sessionIdSyncedRef.current = sessionId;
+      console.log(`[Chat] Syncing cron task sessionId: taskId=${task.id}, sessionId=${sessionId}`);
+      void updateCronTaskSessionId(sessionId);
+    }
+  }, [cronState.task, sessionId, updateCronTaskSessionId]);
 
   // File drop zone for chat area (HTML5 drag-drop for non-Tauri/development)
   const handleFileDrop = useCallback((files: File[]) => {
@@ -258,10 +278,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           } catch (schedulerError) {
             console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
           }
-        } else if (cronState.task && cronState.task.sessionId !== sessionId) {
-          // Current cron state is for a different session - clear it
+        } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
+          // Current cron state is for a different session - clear FRONTEND state only
           // This happens when user switches from a cron-task session to a regular session
-          console.log('[Chat] Clearing cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
+          // Note: Only clear if cronState.task.sessionId is NOT empty (empty means task was just created)
+          //
+          // IMPORTANT: We do NOT call stopCronTask() here because:
+          // 1. The task should continue running for its original session
+          // 2. The Rust scheduler executes on session-specific Sidecar
+          // 3. When user goes back to the original session, state will be restored (above code)
+          // 4. Per PRD: "暂停后允许手动对话" - task continues while user interacts with other sessions
+          console.log('[Chat] Clearing frontend cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
           disableCronMode();
         }
 
@@ -587,18 +614,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
                 agentDir={agentDir}
                 currentSessionId={sessionId}
                 onSelectSession={(id) => {
-                  // Block session switch if cron task is running
-                  // User must stop the cron task first before switching
-                  if (cronState.task?.status === 'running') {
-                    console.log('[Chat] Cannot switch session while cron task is running');
-                    return;
-                  }
+                  // Note: If cron task is running, App.tsx handleSwitchSession will create a new tab
                   track('session_switch');
                   // Use Session singleton logic via App.tsx if available
                   if (onSwitchSession) {
                     onSwitchSession(id);
                   } else {
-                    // Fallback: direct load in current Tab
+                    // Fallback: direct load in current Tab (only if no cron task running)
+                    if (cronState.task?.status === 'running') {
+                      console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
+                      return;
+                    }
                     void loadSession(id);
                   }
                 }}

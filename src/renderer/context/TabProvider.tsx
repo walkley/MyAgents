@@ -193,6 +193,9 @@ export default function TabProvider({
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
     const [currentSessionId, setCurrentSessionId] = useState<string | null>(sessionId);
+    // Ref to track currentSessionId in SSE event handlers (avoid stale closure)
+    const currentSessionIdRef = useRef<string | null>(currentSessionId);
+    currentSessionIdRef.current = currentSessionId;
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
@@ -228,6 +231,8 @@ export default function TabProvider({
     const seenIdsRef = useRef<Set<string>>(new Set());
     // Flag to skip message-replay after user clicks "new session"
     const isNewSessionRef = useRef(false);
+    // Ref for cron task exit handler (set by useCronTask hook via context)
+    const onCronTaskExitRequestedRef = useRef<((taskId: string, reason: string) => void) | null>(null);
     // Pending attachments to merge with next user message from SSE replay
     const pendingAttachmentsRef = useRef<{
         id: string;
@@ -263,6 +268,9 @@ export default function TabProvider({
         // Clear pending prompts to prevent stale UI
         setPendingPermission(null);
         setPendingAskUserQuestion(null);
+        // Clear current session ID - no active session until first message creates one
+        // This ensures history dropdown shows no selection for new conversations
+        setCurrentSessionId(null);
 
         // 2. Tell backend to reset (this will also broadcast chat:init)
         try {
@@ -835,9 +843,17 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
+                    // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
+                    // This ensures currentSessionId stays in sync with the actual session
+                    // Use our sessionId (for SessionStore matching) not SDK's session_id
+                    const newSessionId = payload.sessionId;
+                    if (newSessionId && currentSessionIdRef.current !== newSessionId) {
+                        console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
+                        setCurrentSessionId(newSessionId);
+                    }
                 }
                 break;
             }
@@ -866,6 +882,19 @@ export default function TabProvider({
                 const payload = data as { message: string } | null;
                 if (payload?.message) {
                     setAgentError(payload.message);
+                }
+                break;
+            }
+
+            // Cron task exit requested by AI via exit_cron_task tool
+            case 'cron:task-exit-requested': {
+                const payload = data as { taskId: string; reason: string; timestamp: string } | null;
+                if (payload?.taskId && payload?.reason) {
+                    console.log(`[TabProvider ${tabId}] Cron task exit requested: taskId=${payload.taskId}, reason=${payload.reason}`);
+                    // Call the handler if registered by useCronTask
+                    if (onCronTaskExitRequestedRef.current) {
+                        onCronTaskExitRequestedRef.current(payload.taskId, payload.reason);
+                    }
                 }
                 break;
             }
@@ -1353,6 +1382,8 @@ export default function TabProvider({
         apiDelete: apiDeleteJson,
         respondPermission,
         respondAskUserQuestion,
+        // Cron task exit handler ref (mutable, no need in deps)
+        onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, isConnected,

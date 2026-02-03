@@ -369,6 +369,7 @@ export default function App() {
       // ========================================
       if (sessionId) {
         const activation = await getSessionActivation(sessionId);
+        console.log(`[App] Scenario 2 check: sessionId=${sessionId}, activation=`, activation);
         if (activation && activation.task_id) {
           // Session is activated by a cron task - connect Tab to its Sidecar
           console.log(`[App] Scenario 2: Session ${sessionId} has cron task ${activation.task_id} on port ${activation.port}`);
@@ -544,13 +545,58 @@ export default function App() {
       return;
     }
 
-    // Scenario 3: Current Tab has running cron task → Create new Tab
+    // Scenario 3: Current Tab has running cron task → Create new Tab + new Sidecar
     const currentTabCronTask = await getTabCronTask(tabId);
     if (currentTabCronTask && currentTabCronTask.status === 'running') {
-      console.log(`[App] handleSwitchSession Scenario 3: Current tab has cron task, need to use handleLaunchProject`);
-      // This case should be blocked by Chat.tsx - cron task must be stopped first
-      // But as a safety measure, we don't switch
-      console.warn('[App] Cannot switch session while cron task is running');
+      console.log(`[App] handleSwitchSession Scenario 3: Current tab ${tabId} has cron task, creating new tab`);
+
+      // Check max tabs limit
+      if (tabs.length >= MAX_TABS) {
+        console.warn('[App] Cannot create new tab: max tabs reached');
+        return;
+      }
+
+      // Get agentDir from current tab
+      const currentTab = tabs.find(t => t.id === tabId);
+      if (!currentTab?.agentDir) {
+        console.error('[App] Cannot switch: current tab has no agentDir');
+        return;
+      }
+
+      // Create new tab
+      const newTab = createNewTab();
+      setTabs((prev) => [...prev, newTab]);
+      setLoadingTabs((prev) => ({ ...prev, [newTab.id]: true }));
+
+      try {
+        // Start new Sidecar for new tab
+        await startTabSidecar(newTab.id, currentTab.agentDir);
+
+        // Update new tab state
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === newTab.id
+              ? {
+                ...t,
+                agentDir: currentTab.agentDir,
+                sessionId,
+                view: 'chat',
+                title: getFolderName(currentTab.agentDir ?? ''),
+              }
+              : t
+          )
+        );
+
+        // Jump to new tab
+        setActiveTabId(newTab.id);
+        console.log(`[App] handleSwitchSession Scenario 3: Created new tab ${newTab.id} for session ${sessionId}`);
+      } catch (error) {
+        console.error('[App] Failed to start Sidecar for new tab:', error);
+        // Remove the failed tab
+        setTabs((prev) => prev.filter(t => t.id !== newTab.id));
+      } finally {
+        setLoadingTabs((prev) => ({ ...prev, [newTab.id]: false }));
+      }
       return;
     }
 
