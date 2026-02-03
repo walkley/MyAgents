@@ -31,9 +31,11 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 interface ChatProps {
   onBack?: () => void;
   onNewSession?: () => void;
+  /** Called when user selects a different session from history - uses Session singleton logic */
+  onSwitchSession?: (sessionId: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -121,8 +123,6 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     disableCronMode,
     updateConfig: updateCronConfig,
     startTask: startCronTask,
-    pause: pauseCronTask,
-    resume: resumeCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
   } = useCronTask({
@@ -242,7 +242,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
       try {
         const task = await getSessionCronTask(sessionId);
 
-        if (task && (task.status === 'running' || task.status === 'paused')) {
+        if (task && task.status === 'running') {
           console.log('[Chat] Restoring cron task for session:', sessionId, task.id, 'to tab:', tabId);
 
           // Update task's tabId to this new tab
@@ -251,14 +251,12 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
           // Restore UI state
           restoreCronTask(task);
 
-          // If task is running, restart the scheduler (it may have been stopped when tab was closed)
-          if (task.status === 'running') {
-            try {
-              await startCronScheduler(task.id);
-              console.log('[Chat] Restarted cron scheduler for task:', task.id);
-            } catch (schedulerError) {
-              console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
-            }
+          // Restart the scheduler (it may have been stopped when tab was closed)
+          try {
+            await startCronScheduler(task.id);
+            console.log('[Chat] Restarted cron scheduler for task:', task.id);
+          } catch (schedulerError) {
+            console.warn('[Chat] Could not restart scheduler (may already be running):', schedulerError);
           }
         } else if (cronState.task && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear it
@@ -596,7 +594,13 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                     return;
                   }
                   track('session_switch');
-                  void loadSession(id);
+                  // Use Session singleton logic via App.tsx if available
+                  if (onSwitchSession) {
+                    onSwitchSession(id);
+                  } else {
+                    // Fallback: direct load in current Tab
+                    void loadSession(id);
+                  }
                 }}
                 isOpen={showHistory}
                 onClose={() => setShowHistory(false)}
@@ -722,8 +726,6 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             onCronButtonClick={() => setShowCronSettings(true)}
             onCronSettings={() => setShowCronSettings(true)}
             onCronCancel={disableCronMode}
-            onCronPause={pauseCronTask}
-            onCronResume={resumeCronTask}
             onCronStop={async () => {
               // Stop the task and restore the original prompt to the input
               const originalPrompt = await stopCronTask();
