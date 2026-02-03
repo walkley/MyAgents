@@ -2,7 +2,7 @@
 // Handles sidecar lifecycle and provides server URL for HTTP communication
 
 import { invoke } from '@tauri-apps/api/core';
-import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
+import { isTauriEnvironment } from '@/utils/browserMock';
 
 /** Sidecar status returned from Rust backend */
 export interface SidecarStatus {
@@ -669,6 +669,7 @@ export function resetTabServerUrlCache(tabId: string): void {
 export interface SessionActivation {
     session_id: string;
     tab_id: string | null;
+    task_id: string | null;  // If activated by cron task, contains the task ID
     port: number;
     workspace_path: string;
     is_cron_task: boolean;
@@ -724,6 +725,7 @@ export async function getSessionActivation(sessionId: string): Promise<SessionAc
 export async function activateSession(
     sessionId: string,
     tabId: string | null,
+    taskId: string | null,
     port: number,
     workspacePath: string,
     isCronTask: boolean = false
@@ -736,11 +738,12 @@ export async function activateSession(
         await invoke('cmd_activate_session', {
             sessionId,
             tabId: tabId ?? null,
+            taskId: taskId ?? null,
             port,
             workspacePath,
             isCronTask,
         });
-        console.debug(`[tauriClient] Session ${sessionId} activated by tab ${tabId || 'cron'}`);
+        console.debug(`[tauriClient] Session ${sessionId} activated by tab ${tabId || 'cron'}, task: ${taskId || 'none'}`);
     } catch (error) {
         console.error(`[tauriClient] Failed to activate session ${sessionId}:`, error);
         throw error;
@@ -770,57 +773,20 @@ export async function deactivateSession(sessionId: string): Promise<void> {
  * @param sessionId - Session identifier
  * @param newTabId - New Tab identifier
  */
-export async function updateSessionTab(sessionId: string, newTabId: string): Promise<void> {
+export async function updateSessionTab(sessionId: string, newTabId: string | null | undefined): Promise<void> {
     if (!isTauri()) {
         return;
     }
 
     try {
-        await invoke('cmd_update_session_tab', { sessionId, newTabId });
-        console.debug(`[tauriClient] Session ${sessionId} transferred to tab ${newTabId}`);
+        await invoke('cmd_update_session_tab', { sessionId, newTabId: newTabId ?? null });
+        console.debug(`[tauriClient] Session ${sessionId} transferred to tab ${newTabId ?? 'none'}`);
     } catch (error) {
         console.error(`[tauriClient] Failed to update session tab for ${sessionId}:`, error);
         throw error;
     }
 }
 
-/**
- * Register a Tab as a user of a workspace's Sidecar (reference counting)
- * Used when connecting a Tab to an existing Sidecar (e.g., cron task scenario)
- * @param workspacePath - Workspace directory path
- * @param tabId - Tab identifier
- */
-export async function registerTabUser(workspacePath: string, tabId: string): Promise<void> {
-    if (!isTauri()) {
-        return;
-    }
-
-    try {
-        await invoke('cmd_register_tab_user', { workspacePath, tabId });
-        console.debug(`[tauriClient] Tab ${tabId} registered as user of workspace ${workspacePath}`);
-    } catch (error) {
-        console.error(`[tauriClient] Failed to register tab user:`, error);
-        throw error;
-    }
-}
-
-/**
- * Get Sidecar info for a workspace
- * @param workspacePath - Workspace directory path
- * @returns SidecarInfo if a Sidecar is running for this workspace, null otherwise
- */
-export async function getWorkspaceSidecar(workspacePath: string): Promise<SidecarInfo | null> {
-    if (!isTauri()) {
-        return null;
-    }
-
-    try {
-        return await invoke<SidecarInfo | null>('cmd_get_workspace_sidecar', { workspacePath });
-    } catch (error) {
-        console.error(`[tauriClient] Failed to get workspace sidecar for ${workspacePath}:`, error);
-        return null;
-    }
-}
 
 /**
  * Start a headless Sidecar for cron task execution
@@ -842,6 +808,31 @@ export async function startCronSidecar(workspacePath: string, taskId: string): P
         return port;
     } catch (error) {
         console.error(`[tauriClient] Failed to start cron sidecar for task ${taskId}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Connect a Tab to an existing cron task Sidecar
+ * Used when opening a session that has a running cron task
+ * @param tabId - Tab identifier
+ * @param taskId - Cron task identifier
+ * @returns Port number of the Sidecar
+ */
+export async function connectTabToCronSidecar(tabId: string, taskId: string): Promise<number> {
+    if (!isTauri()) {
+        return 3000;
+    }
+
+    try {
+        const port = await invoke<number>('cmd_connect_tab_to_cron_sidecar', {
+            tabId,
+            taskId,
+        });
+        console.debug(`[tauriClient] Tab ${tabId} connected to cron task ${taskId} Sidecar on port ${port}`);
+        return port;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to connect tab ${tabId} to cron sidecar ${taskId}:`, error);
         throw error;
     }
 }

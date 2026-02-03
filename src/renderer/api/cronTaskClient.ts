@@ -56,17 +56,9 @@ export const createCronTask = (config: CronTaskConfig): Promise<CronTask> =>
 export const startCronTask = (taskId: string): Promise<CronTask> =>
   invokeCommand('cmd_start_cron_task', { taskId });
 
-/** Pause a cron task */
-export const pauseCronTask = (taskId: string): Promise<CronTask> =>
-  invokeCommand('cmd_pause_cron_task', { taskId });
-
-/** Stop a cron task (cannot be restarted) */
-export const stopCronTask = (taskId: string): Promise<CronTask> =>
-  invokeCommand('cmd_stop_cron_task', { taskId });
-
-/** Complete a cron task with optional exit reason */
-export const completeCronTask = (taskId: string, exitReason?: string): Promise<CronTask> =>
-  invokeCommand('cmd_complete_cron_task', { taskId, exitReason });
+/** Stop a cron task with optional exit reason */
+export const stopCronTask = (taskId: string, exitReason?: string): Promise<CronTask> =>
+  invokeCommand('cmd_stop_cron_task', { taskId, exitReason });
 
 /** Delete a cron task */
 export const deleteCronTask = (taskId: string): Promise<void> =>
@@ -84,11 +76,11 @@ export const getAllCronTasks = (): Promise<CronTask[]> =>
 export const getWorkspaceCronTasks = (workspacePath: string): Promise<CronTask[]> =>
   invokeCommandWithFallback('cmd_get_workspace_cron_tasks', { workspacePath }, []);
 
-/** Get active cron task for a session (running or paused) */
+/** Get active cron task for a session (running only) */
 export const getSessionCronTask = (sessionId: string): Promise<CronTask | null> =>
   invokeCommandWithFallback('cmd_get_session_cron_task', { sessionId }, null);
 
-/** Get active cron task for a tab (running or paused) */
+/** Get active cron task for a tab (running only) */
 export const getTabCronTask = (tabId: string): Promise<CronTask | null> =>
   invokeCommandWithFallback('cmd_get_tab_cron_task', { tabId }, null);
 
