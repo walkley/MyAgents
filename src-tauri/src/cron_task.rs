@@ -282,6 +282,44 @@ impl CronTaskManager {
         tokio::spawn(async move {
             log::info!("[CronTask] Scheduler started for task {} (interval: {} min, executions: {})", task_id_owned, interval_mins, execution_count);
 
+            // Wait for app_handle to be available (with timeout)
+            // This handles the race condition where scheduler starts before initialize_cron_manager completes
+            let mut app_handle_ready = false;
+            for i in 0..50 {  // 5 seconds max wait (50 * 100ms)
+                let handle_opt = app_handle.read().await;
+                if handle_opt.is_some() {
+                    app_handle_ready = true;
+                    break;
+                }
+                drop(handle_opt);
+                if i == 0 {
+                    log::warn!("[CronTask] App handle not ready for task {}, waiting...", task_id_owned);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            if !app_handle_ready {
+                log::error!("[CronTask] App handle not available after 5 seconds, aborting scheduler for task {}", task_id_owned);
+                // Clean up: remove from active schedulers
+                {
+                    let mut active = active_schedulers.write().await;
+                    active.remove(&task_id_owned);
+                }
+                return;
+            }
+
+            // Emit scheduler started event to frontend
+            {
+                let handle_opt = app_handle.read().await;
+                if let Some(ref handle) = *handle_opt {
+                    let _ = handle.emit("cron:scheduler-started", serde_json::json!({
+                        "taskId": task_id_owned,
+                        "intervalMinutes": interval_mins,
+                        "executionCount": execution_count
+                    }));
+                }
+            }
+
             // Calculate initial wait time
             // - First execution (execution_count == 0): execute immediately (2s delay for UI readiness)
             // - Subsequent executions: calculate based on last_executed_at
@@ -368,6 +406,8 @@ impl CronTaskManager {
                     let executing = executing_tasks.read().await;
                     if executing.contains(&task_id_owned) {
                         log::warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
+                        // Wait for next interval before checking again
+                        timer.tick().await;
                         continue;
                     }
                 }
@@ -379,7 +419,9 @@ impl CronTaskManager {
                 };
 
                 let Some(handle) = handle_opt else {
-                    log::error!("[CronTask] No app handle available for task {}", task_id_owned);
+                    log::error!("[CronTask] No app handle available for task {}, will retry next interval", task_id_owned);
+                    // Wait for next interval before retrying (prevents tight loop)
+                    timer.tick().await;
                     continue;
                 };
 
@@ -391,6 +433,13 @@ impl CronTaskManager {
 
                 let is_first = task.execution_count == 0;
                 log::info!("[CronTask] Executing task {} (execution #{})", task_id_owned, task.execution_count + 1);
+
+                // Emit execution starting event to frontend
+                let _ = handle.emit("cron:execution-starting", serde_json::json!({
+                    "taskId": task_id_owned,
+                    "executionNumber": task.execution_count + 1,
+                    "isFirstExecution": is_first
+                }));
 
                 // Execute directly via Sidecar
                 let execution_result = execute_task_directly(&handle, &task, is_first).await;
@@ -470,6 +519,11 @@ impl CronTaskManager {
                         let _ = fs::write(&storage_path, content);
                     }
                 }
+
+                // Wait for the next interval before checking/executing again
+                // This is critical - without this, the loop would run continuously
+                log::info!("[CronTask] Task {} waiting {} minutes for next execution", task_id_owned, interval_mins);
+                timer.tick().await;
             }
 
             // Clean up: remove from active schedulers
