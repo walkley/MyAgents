@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::proxy_config;
 
@@ -1125,15 +1125,38 @@ pub fn start_cron_sidecar<R: Runtime>(
         task_id, workspace_path
     );
 
+    // Emit debug event
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": task_id,
+        "message": "start_cron_sidecar: about to check existing sidecar"
+    }));
+
     // Check if this cron task already has a Sidecar
     {
-        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        let mut manager_guard = manager.lock().map_err(|e| {
+            let _ = app_handle.emit("cron:debug", serde_json::json!({
+                "taskId": task_id,
+                "message": format!("start_cron_sidecar: mutex lock FAILED: {}", e),
+                "error": true
+            }));
+            e.to_string()
+        })?;
+
+        let _ = app_handle.emit("cron:debug", serde_json::json!({
+            "taskId": task_id,
+            "message": "start_cron_sidecar: got mutex lock, checking existing sidecar"
+        }));
+
         if let Some(info) = manager_guard.get_cron_task_sidecar_info(task_id) {
             if info.is_healthy {
                 log::info!(
                     "[sidecar] Reusing existing Sidecar for cron task {} (port {})",
                     task_id, info.port
                 );
+                let _ = app_handle.emit("cron:debug", serde_json::json!({
+                    "taskId": task_id,
+                    "message": format!("start_cron_sidecar: reusing existing sidecar on port {}", info.port)
+                }));
                 return Ok(info.port);
             } else {
                 // Remove unhealthy instance
@@ -1146,9 +1169,27 @@ pub fn start_cron_sidecar<R: Runtime>(
         }
     }
 
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": task_id,
+        "message": "start_cron_sidecar: about to start new sidecar"
+    }));
+
     // Start a new Sidecar using the special cron tab ID
     let agent_dir = PathBuf::from(workspace_path);
-    let port = start_tab_sidecar(app_handle, manager, &cron_tab_id, Some(agent_dir))?;
+    let port = start_tab_sidecar(app_handle, manager, &cron_tab_id, Some(agent_dir))
+        .map_err(|e| {
+            let _ = app_handle.emit("cron:debug", serde_json::json!({
+                "taskId": task_id,
+                "message": format!("start_cron_sidecar: start_tab_sidecar FAILED: {}", e),
+                "error": true
+            }));
+            e
+        })?;
+
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": task_id,
+        "message": format!("start_cron_sidecar: new sidecar started on port {}", port)
+    }));
 
     // Move the instance from regular instances to cron_task_instances
     {
@@ -1552,12 +1593,29 @@ pub async fn execute_cron_task<R: Runtime>(
         payload.task_id, workspace_path
     );
 
+    // Emit debug event
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": payload.task_id,
+        "message": "execute_cron_task: about to call start_cron_sidecar"
+    }));
+
     // Start or reuse Sidecar for this workspace
     let port = start_cron_sidecar(app_handle, manager, workspace_path, &payload.task_id)
         .map_err(|e| {
             log::error!("[sidecar] start_cron_sidecar failed for task {}: {}", payload.task_id, e);
+            let _ = app_handle.emit("cron:debug", serde_json::json!({
+                "taskId": payload.task_id,
+                "message": format!("execute_cron_task: start_cron_sidecar FAILED: {}", e),
+                "error": true
+            }));
             e
         })?;
+
+    // Emit debug event
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": payload.task_id,
+        "message": format!("execute_cron_task: sidecar ready on port {}", port)
+    }));
 
     log::info!(
         "[sidecar] Cron sidecar ready for task {} on port {}",

@@ -941,13 +941,31 @@ async fn execute_task_directly(
 ) -> Result<(bool, Option<String>), String> {
     log::info!("[CronTask] execute_task_directly starting for task {}", task.id);
 
+    // Emit debug event: entering function
+    let _ = handle.emit("cron:debug", serde_json::json!({
+        "taskId": task.id,
+        "message": "execute_task_directly: entering function"
+    }));
+
     // Get SidecarManager state
-    let sidecar_state = handle
-        .try_state::<ManagedSidecarManager>()
-        .ok_or_else(|| {
+    let sidecar_state = match handle.try_state::<ManagedSidecarManager>() {
+        Some(state) => {
+            let _ = handle.emit("cron:debug", serde_json::json!({
+                "taskId": task.id,
+                "message": "execute_task_directly: got SidecarManager state"
+            }));
+            state
+        }
+        None => {
             log::error!("[CronTask] SidecarManager state not available for task {}", task.id);
-            "SidecarManager state not available".to_string()
-        })?;
+            let _ = handle.emit("cron:debug", serde_json::json!({
+                "taskId": task.id,
+                "message": "execute_task_directly: SidecarManager state NOT available",
+                "error": true
+            }));
+            return Err("SidecarManager state not available".to_string());
+        }
+    };
 
     log::info!("[CronTask] Got SidecarManager state for task {}", task.id);
 
@@ -973,14 +991,29 @@ async fn execute_task_directly(
         run_mode: Some(run_mode_str.to_string()),
     };
 
+    let _ = handle.emit("cron:debug", serde_json::json!({
+        "taskId": task.id,
+        "message": format!("execute_task_directly: calling execute_cron_task, workspace={}", task.workspace_path)
+    }));
+
     log::info!("[CronTask] Built payload for task {}, calling execute_cron_task with workspace: {}", task.id, task.workspace_path);
 
     // Execute via Sidecar
     let result = execute_cron_task(handle, &sidecar_state, &task.workspace_path, payload).await
         .map_err(|e| {
             log::error!("[CronTask] execute_cron_task failed for task {}: {}", task.id, e);
+            let _ = handle.emit("cron:debug", serde_json::json!({
+                "taskId": task.id,
+                "message": format!("execute_task_directly: execute_cron_task FAILED: {}", e),
+                "error": true
+            }));
             e
         })?;
+
+    let _ = handle.emit("cron:debug", serde_json::json!({
+        "taskId": task.id,
+        "message": "execute_task_directly: execute_cron_task completed successfully"
+    }));
 
     log::info!("[CronTask] execute_cron_task completed for task {}", task.id);
 
