@@ -3,7 +3,7 @@ import { arrayMove } from '@dnd-kit/sortable';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation } from '@/api/tauriClient';
+import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -125,6 +125,12 @@ export default function App() {
 
       for (const task of tasksToRecover) {
         try {
+          // Start Sidecar first so it's ready when scheduler triggers or user opens session
+          // This ensures Sidecar reuse works correctly
+          console.log(`[App] Starting Sidecar for cron task ${task.id} (workspace: ${task.workspacePath})`);
+          await startCronSidecar(task.workspacePath, task.id);
+          console.log(`[App] Sidecar started for cron task ${task.id}`);
+
           // Restart the scheduler for each running task
           await startCronScheduler(task.id);
           console.log(`[App] Cron task ${task.id} scheduler restarted`);

@@ -1118,9 +1118,9 @@ pub async fn cmd_get_tasks_to_recover() -> Result<Vec<CronTask>, String> {
     Ok(manager.get_tasks_to_recover().await)
 }
 
-/// Start the scheduler for a task (called after first execution completes)
-/// Note: CronTask user registration is now done in cmd_start_cron_task (earlier timing)
-/// This function only starts the scheduler loop and activates the session
+/// Start the scheduler for a task
+/// This function is called both for initial task start and for recovery after app restart.
+/// It ensures CronTask user is registered (idempotent) and starts the scheduler loop.
 #[tauri::command]
 pub async fn cmd_start_cron_scheduler(
     app_handle: tauri::AppHandle,
@@ -1128,14 +1128,25 @@ pub async fn cmd_start_cron_scheduler(
 ) -> Result<(), String> {
     let manager = get_cron_task_manager();
 
-    // Get task info for session activation
+    // Get task info for session activation and user registration
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-    // Activate session for legacy compatibility (CronTask user already registered in cmd_start_cron_task)
+    // Register CronTask user and activate session
+    // Note: register_user is idempotent (uses HashSet), so safe to call on recovery too
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut sidecar_manager) = sidecar_state.lock() {
-            // Activate session
+            // Register CronTask user (ensures Sidecar won't be stopped when Tab closes)
+            sidecar_manager.register_user(
+                &task.workspace_path,
+                UserRef::CronTask(task.id.clone()),
+            );
+            log::info!(
+                "[CronTask] Registered CronTask user {} for workspace {}",
+                task.id, task.workspace_path
+            );
+
+            // Activate session if Tab's Sidecar instance exists
             if let Some(tab_id) = &task.tab_id {
                 if let Some(instance) = sidecar_manager.get_instance(tab_id) {
                     let port = instance.port;
