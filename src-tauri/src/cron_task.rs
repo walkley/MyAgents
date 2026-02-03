@@ -1293,22 +1293,45 @@ pub async fn cmd_start_cron_scheduler(
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-    // Activate session if Tab's Sidecar instance exists
-    // The cron task will get its own Sidecar when it starts executing
+    // Activate session - try Tab Sidecar first, then Cron Task Sidecar
+    // This handles both normal start (Tab exists) and app restart recovery (only Cron Sidecar exists)
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut sidecar_manager) = sidecar_state.lock() {
+            let mut activated = false;
+
+            // Priority 1: Try Tab's Sidecar first (normal start case)
             if let Some(tab_id) = &task.tab_id {
                 if let Some(instance) = sidecar_manager.get_instance(tab_id) {
                     let port = instance.port;
                     log::info!(
-                        "[CronTask] Activating session {} as cron task on port {}",
+                        "[CronTask] Activating session {} as cron task on Tab Sidecar port {}",
                         task.session_id, port
                     );
                     sidecar_manager.activate_session(
                         task.session_id.clone(),
                         task.tab_id.clone(),
-                        Some(task_id.clone()),  // task_id for Tab connection
+                        Some(task_id.clone()),
                         port,
+                        task.workspace_path.clone(),
+                        true, // is_cron_task = true
+                    );
+                    activated = true;
+                }
+            }
+
+            // Priority 2: Try Cron Task Sidecar (app restart recovery case)
+            // When app restarts, Tab hasn't opened yet but Cron Sidecar was started by recoverCronTasks
+            if !activated {
+                if let Some(info) = sidecar_manager.get_cron_task_sidecar_info(&task_id) {
+                    log::info!(
+                        "[CronTask] Activating session {} as cron task on Cron Sidecar port {}",
+                        task.session_id, info.port
+                    );
+                    sidecar_manager.activate_session(
+                        task.session_id.clone(),
+                        task.tab_id.clone(),
+                        Some(task_id.clone()),
+                        info.port,
                         task.workspace_path.clone(),
                         true, // is_cron_task = true
                     );
