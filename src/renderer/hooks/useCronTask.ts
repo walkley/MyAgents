@@ -4,14 +4,12 @@ import type { CronTask, CronTaskConfig, CronEndConditions, CronRunMode, CronTask
 import {
   createCronTask,
   startCronTask,
-  pauseCronTask,
   stopCronTask,
   getCronTask,
   recordCronExecution,
   startCronScheduler,
   markTaskExecuting,
   markTaskComplete,
-  completeCronTask,
 } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
@@ -140,37 +138,6 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
   }, [workspacePath, sessionId, tabId]);
 
-  // Pause the task
-  const pause = useCallback(async () => {
-    const currentTask = stateRef.current.task;
-    if (!currentTask) return;
-
-    try {
-      const pausedTask = await pauseCronTask(currentTask.id);
-      setState(prev => ({ ...prev, task: pausedTask }));
-      // Rust scheduler will detect status change and stop scheduling
-      console.log('[useCronTask] Task paused:', pausedTask.id);
-    } catch (error) {
-      console.error('[useCronTask] Failed to pause task:', error);
-    }
-  }, []);
-
-  // Resume the task
-  const resume = useCallback(async () => {
-    const currentTask = stateRef.current.task;
-    if (!currentTask) return;
-
-    try {
-      const resumedTask = await startCronTask(currentTask.id);
-      setState(prev => ({ ...prev, task: resumedTask }));
-      // Restart the Rust scheduler
-      await startCronScheduler(currentTask.id);
-      console.log('[useCronTask] Task resumed with scheduler:', resumedTask.id);
-    } catch (error) {
-      console.error('[useCronTask] Failed to resume task:', error);
-    }
-  }, []);
-
   // Stop the task
   // Returns the original prompt so it can be restored to the input field
   const stop = useCallback(async (): Promise<string | null> => {
@@ -203,8 +170,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       const task = await getCronTask(currentTask.id);
       setState(prev => ({ ...prev, task }));
 
-      // Check if task is completed
-      if (task.status === 'completed') {
+      // Check if task is stopped (end conditions met or AI exit)
+      if (task.status === 'stopped' && task.exitReason) {
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(task, task.exitReason ?? undefined);
         }
@@ -223,17 +190,17 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     console.log('[useCronTask] AI requested task exit:', taskId, reason);
     try {
-      const completedTask = await completeCronTask(taskId, reason);
-      setState(prev => ({ ...prev, task: completedTask }));
+      const stoppedTask = await stopCronTask(taskId, reason);
+      setState(prev => ({ ...prev, task: stoppedTask }));
 
       if (optionsRef.current.onComplete) {
-        optionsRef.current.onComplete(completedTask, reason);
+        optionsRef.current.onComplete(stoppedTask, reason);
       }
 
       // Reset state
       setState(initialState);
     } catch (error) {
-      console.error('[useCronTask] Failed to complete task:', error);
+      console.error('[useCronTask] Failed to stop task:', error);
     }
   }, []);
 
@@ -271,8 +238,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       const updatedTask = await recordCronExecution(payload.taskId);
       setState(prev => ({ ...prev, task: updatedTask }));
 
-      // Check if task completed
-      if (updatedTask.status === 'completed') {
+      // Check if task stopped (end conditions met)
+      if (updatedTask.status === 'stopped') {
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(updatedTask, updatedTask.exitReason ?? undefined);
         }
@@ -297,8 +264,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       const task = await getCronTask(payload.taskId);
       setState(prev => ({ ...prev, task }));
 
-      // Check if task completed
-      if (task.status === 'completed') {
+      // Check if task stopped (end conditions met or AI exit)
+      if (task.status === 'stopped') {
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(task, task.exitReason ?? undefined);
         }
@@ -411,8 +378,6 @@ export function useCronTask(options: UseCronTaskOptions) {
     disableCronMode,
     updateConfig,
     startTask,
-    pause,
-    resume,
     stop,
     refresh,
     restoreFromTask,

@@ -33,12 +33,12 @@ export default function SessionHistoryDropdown({
     const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
 
-    // Map sessionId to active cron task (running or paused)
+    // Map sessionId to active cron task (running only)
     const sessionCronTaskMap = useMemo(() => {
         if (!cronTasks) return new Map<string, CronTask>();
         return new Map(
             cronTasks
-                .filter(t => t.status === 'running' || t.status === 'paused')
+                .filter(t => t.status === 'running')
                 .map(t => [t.sessionId, t])
         );
     }, [cronTasks]);

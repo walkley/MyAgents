@@ -76,10 +76,6 @@ interface SimpleChatInputProps {
   onCronSettings?: () => void;
   /** Callback when cron is cancelled (from status bar X button) */
   onCronCancel?: () => void;
-  /** Callback when cron task is paused */
-  onCronPause?: () => void;
-  /** Callback when cron task is resumed */
-  onCronResume?: () => void;
   /** Callback when cron task is stopped */
   onCronStop?: () => void;
   /** Callback when input text changes (for cron prompt tracking) */
@@ -142,8 +138,6 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onCronButtonClick,
   onCronSettings,
   onCronCancel,
-  onCronPause,
-  onCronResume,
   onCronStop,
   onInputChange,
 }, ref) {
@@ -1085,8 +1079,8 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded
         }`}>
-          {/* Cron task overlay - shows when task is running/paused */}
-          {cronTask && (cronTask.status === 'running' || cronTask.status === 'paused') && (
+          {/* Cron task overlay - shows when task is running */}
+          {cronTask && cronTask.status === 'running' && (
             <CronTaskOverlay
               status={cronTask.status}
               intervalMinutes={cronTask.intervalMinutes}
@@ -1094,8 +1088,6 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
               nextExecutionTime={cronTask.lastExecutedAt
                 ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
                 : undefined}
-              onPause={() => onCronPause?.()}
-              onResume={() => onCronResume?.()}
               onStop={() => onCronStop?.()}
               onSettings={() => onCronSettings?.()}
             />

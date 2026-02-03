@@ -25,8 +25,8 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
     setError(null);
     try {
       const allTasks = await getAllCronTasks();
-      // Filter to show only active tasks (running or paused)
-      const activeTasks = allTasks.filter(t => t.status === 'running' || t.status === 'paused');
+      // Filter to show only active tasks (running)
+      const activeTasks = allTasks.filter(t => t.status === 'running');
       setTasks(activeTasks);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load tasks');

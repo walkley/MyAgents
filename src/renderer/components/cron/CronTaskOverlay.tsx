@@ -1,7 +1,7 @@
 // Cron Task Overlay - Covers input area when task is running
 // Follows design_guide.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
-import { Clock, Pause, Square, Settings2, Play } from 'lucide-react';
+import { Clock, Square, Settings2 } from 'lucide-react';
 import type { CronTaskStatus } from '@/types/cronTask';
 import { formatCronInterval } from '@/types/cronTask';
 
@@ -10,8 +10,6 @@ interface CronTaskOverlayProps {
   intervalMinutes: number;
   executionCount: number;
   nextExecutionTime?: Date;
-  onPause: () => void;
-  onResume: () => void;
   onStop: () => void;
   onSettings: () => void;
 }
@@ -21,13 +19,10 @@ export default function CronTaskOverlay({
   intervalMinutes,
   executionCount,
   nextExecutionTime,
-  onPause,
-  onResume,
   onStop,
   onSettings
 }: CronTaskOverlayProps) {
   const isRunning = status === 'running';
-  const isPaused = status === 'paused';
 
   // State to force re-render for countdown update
   const [, setTick] = useState(0);
@@ -66,23 +61,15 @@ export default function CronTaskOverlay({
       {/* Left: Status Info */}
       <div className="flex items-center gap-3">
         {/* Status Icon */}
-        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-          isPaused
-            ? 'bg-[var(--warning)]/10'
-            : 'bg-[var(--accent-warm)]/10'
-        }`}>
-          <Clock className={`h-4 w-4 ${
-            isPaused
-              ? 'text-[var(--warning)]'
-              : 'text-[var(--accent-warm)]'
-          } ${isRunning ? 'animate-pulse' : ''}`} />
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm)]/10">
+          <Clock className={`h-4 w-4 text-[var(--accent-warm)] ${isRunning ? 'animate-pulse' : ''}`} />
         </div>
 
         {/* Status Text */}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-[13px] font-medium text-[var(--ink)]">
-              定时任务{isRunning ? '运行中' : '已暂停'}
+              定时任务运行中
             </span>
             {isRunning && timeUntilNext && (
               <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--ink-muted)]">
@@ -94,37 +81,12 @@ export default function CronTaskOverlay({
             <span>每 {formatCronInterval(intervalMinutes)}</span>
             <span className="text-[var(--line-strong)]">·</span>
             <span>已执行 {executionCount} 次</span>
-            {isPaused && (
-              <>
-                <span className="text-[var(--line-strong)]">·</span>
-                <span className="text-[var(--warning)]">暂停中可手动对话</span>
-              </>
-            )}
           </div>
         </div>
       </div>
 
-      {/* Right: Control Buttons - PRD specifies "设置" and "停止" */}
+      {/* Right: Control Buttons - PRD specifies "设置" and "停止" only */}
       <div className="flex shrink-0 items-center gap-2">
-        {/* Pause/Resume Button */}
-        {isRunning ? (
-          <button
-            onClick={onPause}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          >
-            <Pause className="h-3.5 w-3.5" />
-            暂停
-          </button>
-        ) : (
-          <button
-            onClick={onResume}
-            className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-          >
-            <Play className="h-3.5 w-3.5" />
-            恢复
-          </button>
-        )}
-
         {/* Settings Button - Ghost style per design guide */}
         <button
           onClick={onSettings}
