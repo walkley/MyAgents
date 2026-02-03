@@ -1547,8 +1547,22 @@ pub async fn execute_cron_task<R: Runtime>(
     workspace_path: &str,
     payload: CronExecutePayload,
 ) -> Result<CronExecuteResponse, String> {
+    log::info!(
+        "[sidecar] execute_cron_task called for task {} in workspace {}",
+        payload.task_id, workspace_path
+    );
+
     // Start or reuse Sidecar for this workspace
-    let port = start_cron_sidecar(app_handle, manager, workspace_path, &payload.task_id)?;
+    let port = start_cron_sidecar(app_handle, manager, workspace_path, &payload.task_id)
+        .map_err(|e| {
+            log::error!("[sidecar] start_cron_sidecar failed for task {}: {}", payload.task_id, e);
+            e
+        })?;
+
+    log::info!(
+        "[sidecar] Cron sidecar ready for task {} on port {}",
+        payload.task_id, port
+    );
 
     // Activate session as cron task (prevents Sidecar from being killed if Tab closes)
     if let Some(ref session_id) = payload.session_id {

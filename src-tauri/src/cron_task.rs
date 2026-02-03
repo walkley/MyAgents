@@ -441,8 +441,40 @@ impl CronTaskManager {
                     "isFirstExecution": is_first
                 }));
 
-                // Execute directly via Sidecar
-                let execution_result = execute_task_directly(&handle, &task, is_first).await;
+                log::info!("[CronTask] About to call execute_task_directly for task {}", task_id_owned);
+
+                // Emit debug event for frontend visibility
+                let _ = handle.emit("cron:debug", serde_json::json!({
+                    "taskId": task_id_owned,
+                    "message": "About to call execute_task_directly"
+                }));
+
+                // Execute directly via Sidecar with timeout to prevent indefinite hanging
+                let execution_result = tokio::time::timeout(
+                    Duration::from_secs(660), // 11 minutes timeout
+                    execute_task_directly(&handle, &task, is_first)
+                ).await;
+
+                let execution_result = match execution_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        log::error!("[CronTask] Task {} execution timed out after 11 minutes", task_id_owned);
+                        let _ = handle.emit("cron:debug", serde_json::json!({
+                            "taskId": task_id_owned,
+                            "message": "Execution timed out after 11 minutes",
+                            "error": true
+                        }));
+                        Err("Execution timed out".to_string())
+                    }
+                };
+
+                log::info!("[CronTask] execute_task_directly returned for task {}: {:?}", task_id_owned, execution_result.is_ok());
+
+                // Emit debug event for frontend visibility
+                let _ = handle.emit("cron:debug", serde_json::json!({
+                    "taskId": task_id_owned,
+                    "message": format!("execute_task_directly returned: success={}", execution_result.is_ok())
+                }));
 
                 // Mark task as no longer executing
                 {
@@ -907,10 +939,17 @@ async fn execute_task_directly(
     task: &CronTask,
     is_first_execution: bool,
 ) -> Result<(bool, Option<String>), String> {
+    log::info!("[CronTask] execute_task_directly starting for task {}", task.id);
+
     // Get SidecarManager state
     let sidecar_state = handle
         .try_state::<ManagedSidecarManager>()
-        .ok_or_else(|| "SidecarManager state not available".to_string())?;
+        .ok_or_else(|| {
+            log::error!("[CronTask] SidecarManager state not available for task {}", task.id);
+            "SidecarManager state not available".to_string()
+        })?;
+
+    log::info!("[CronTask] Got SidecarManager state for task {}", task.id);
 
     // Convert run_mode enum to string for payload
     let run_mode_str = match task.run_mode {
@@ -934,8 +973,16 @@ async fn execute_task_directly(
         run_mode: Some(run_mode_str.to_string()),
     };
 
+    log::info!("[CronTask] Built payload for task {}, calling execute_cron_task with workspace: {}", task.id, task.workspace_path);
+
     // Execute via Sidecar
-    let result = execute_cron_task(handle, &sidecar_state, &task.workspace_path, payload).await?;
+    let result = execute_cron_task(handle, &sidecar_state, &task.workspace_path, payload).await
+        .map_err(|e| {
+            log::error!("[CronTask] execute_cron_task failed for task {}: {}", task.id, e);
+            e
+        })?;
+
+    log::info!("[CronTask] execute_cron_task completed for task {}", task.id);
 
     // Send notification if enabled
     if task.notify_enabled {

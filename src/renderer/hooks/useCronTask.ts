@@ -305,7 +305,18 @@ export function useCronTask(options: UseCronTaskOptions) {
     console.log('[useCronTask] Execution starting:', payload);
   }, []);
 
-  // Listen for Tauri events (cron:trigger-execution, cron:execution-complete, cron:execution-error, cron:scheduler-started, cron:execution-starting)
+  // Handle debug events from Rust (for debugging visibility)
+  const handleDebugEvent = useCallback((payload: { taskId: string; message: string; error?: boolean }) => {
+    const currentTask = stateRef.current.task;
+    if (!currentTask || currentTask.id !== payload.taskId) return;
+    if (payload.error) {
+      console.error('[useCronTask] Debug:', payload.message);
+    } else {
+      console.log('[useCronTask] Debug:', payload.message);
+    }
+  }, []);
+
+  // Listen for Tauri events (cron:trigger-execution, cron:execution-complete, cron:execution-error, cron:scheduler-started, cron:execution-starting, cron:debug)
   useEffect(() => {
     if (!isTauriEnvironment()) return;
 
@@ -314,6 +325,7 @@ export function useCronTask(options: UseCronTaskOptions) {
     let unlistenError: (() => void) | null = null;
     let unlistenSchedulerStarted: (() => void) | null = null;
     let unlistenExecutionStarting: (() => void) | null = null;
+    let unlistenDebug: (() => void) | null = null;
 
     const setupListeners = async () => {
       const { listen } = await import('@tauri-apps/api/event');
@@ -331,6 +343,14 @@ export function useCronTask(options: UseCronTaskOptions) {
         'cron:execution-starting',
         (event) => {
           handleExecutionStarting(event.payload);
+        }
+      );
+
+      // Debug events from Rust
+      unlistenDebug = await listen<{ taskId: string; message: string; error?: boolean }>(
+        'cron:debug',
+        (event) => {
+          handleDebugEvent(event.payload);
         }
       );
 
@@ -360,11 +380,12 @@ export function useCronTask(options: UseCronTaskOptions) {
     return () => {
       if (unlistenSchedulerStarted) unlistenSchedulerStarted();
       if (unlistenExecutionStarting) unlistenExecutionStarting();
+      if (unlistenDebug) unlistenDebug();
       if (unlistenTrigger) unlistenTrigger();
       if (unlistenComplete) unlistenComplete();
       if (unlistenError) unlistenError();
     };
-  }, [handleSchedulerStarted, handleExecutionStarting, handleSchedulerTrigger, handleExecutionComplete, handleExecutionError]);
+  }, [handleSchedulerStarted, handleExecutionStarting, handleDebugEvent, handleSchedulerTrigger, handleExecutionComplete, handleExecutionError]);
 
   // Listen for SSE events (cron:task-exit-requested from AI tool)
   useEffect(() => {
