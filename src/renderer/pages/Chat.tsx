@@ -755,6 +755,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               if (originalPrompt) {
                 chatInputRef.current?.setValue(originalPrompt);
               }
+              // Notify App.tsx to switch Tab back to normal Sidecar
+              // This clears sidecarPort and cronTaskId, triggering TabProvider recreation
+              window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.CRON_TASK_STOPPED, {
+                detail: { tabId, agentDir }
+              }));
             }}
             onInputChange={(text) => setCronPrompt(text)}
           />

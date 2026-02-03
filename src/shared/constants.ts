@@ -52,4 +52,6 @@ export const CUSTOM_EVENTS = {
     OPEN_SETTINGS: 'open-settings',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
+    /** Fired when a cron task is stopped and Tab needs to switch back to normal Sidecar */
+    CRON_TASK_STOPPED: 'cron-task-stopped',
 } as const;

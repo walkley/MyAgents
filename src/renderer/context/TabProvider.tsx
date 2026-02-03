@@ -1067,6 +1067,31 @@ export default function TabProvider({
         };
     }, [tabId]);
 
+    // Track previous sidecarPort to detect changes
+    const prevSidecarPortRef = useRef<number | undefined>(sidecarPort);
+
+    // Reconnect SSE when sidecarPort changes (e.g., switching from Cron Sidecar to Tab Sidecar)
+    useEffect(() => {
+        const prevPort = prevSidecarPortRef.current;
+        prevSidecarPortRef.current = sidecarPort;
+
+        // Skip on initial mount or if port didn't actually change
+        if (prevPort === undefined && sidecarPort === undefined) return;
+        if (prevPort === sidecarPort) return;
+
+        console.log(`[TabProvider ${tabId}] sidecarPort changed: ${prevPort} -> ${sidecarPort}, reconnecting SSE`);
+
+        // Disconnect existing SSE connection
+        if (sseRef.current) {
+            void sseRef.current.disconnect();
+            sseRef.current = null;
+            setIsConnected(false);
+        }
+
+        // Reconnect with new port (connectSse will use the new sidecarPort via closure)
+        void connectSse();
+    }, [sidecarPort, tabId, connectSse]);
+
     // Send message with optional images, permission mode, and model
     const sendMessage = useCallback(async (
         text: string,

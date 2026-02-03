@@ -787,6 +787,37 @@ export default function App() {
     };
   }, [tabs]);
 
+  // Listen for CRON_TASK_STOPPED event (switch Tab back to normal Sidecar)
+  useEffect(() => {
+    const handleCronTaskStopped = (event: CustomEvent<{ tabId: string; agentDir: string }>) => {
+      const { tabId, agentDir } = event.detail;
+      console.log(`[App] Cron task stopped for tab ${tabId}, switching to normal Sidecar`);
+
+      // Use void to handle async operation without making handler async
+      void (async () => {
+        try {
+          // 1. Start a new Tab Sidecar (this will replace any existing one)
+          await startTabSidecar(tabId, agentDir);
+          console.log(`[App] Started normal Tab Sidecar for tab ${tabId}`);
+
+          // 2. Clear Tab's cron state (sidecarPort and cronTaskId)
+          // This triggers TabProvider recreation with new sidecarPort=undefined
+          setTabs(prev => prev.map(t =>
+            t.id === tabId
+              ? { ...t, sidecarPort: undefined, cronTaskId: undefined }
+              : t
+          ));
+        } catch (error) {
+          console.error(`[App] Failed to switch tab ${tabId} to normal Sidecar:`, error);
+        }
+      })();
+    };
+    window.addEventListener(CUSTOM_EVENTS.CRON_TASK_STOPPED, handleCronTaskStopped as EventListener);
+    return () => {
+      window.removeEventListener(CUSTOM_EVENTS.CRON_TASK_STOPPED, handleCronTaskStopped as EventListener);
+    };
+  }, []);
+
   // System tray event handling (minimize to tray, exit confirmation)
   useTrayEvents({
     minimizeToTray: config.minimizeToTray,
