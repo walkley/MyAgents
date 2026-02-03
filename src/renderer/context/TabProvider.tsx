@@ -91,6 +91,8 @@ interface TabProviderProps {
     isActive?: boolean;
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
+    /** If provided, use this port instead of looking up from Rust (for cron task Sidecar) */
+    sidecarPort?: number;
 }
 
 /**
@@ -105,11 +107,23 @@ async function handleApiResponse<T>(response: Response): Promise<T> {
 }
 
 /**
+ * Get the base URL for a Tab's Sidecar
+ * @param tabId - Tab identifier
+ * @param fixedPort - If provided, use this port instead of looking up from Rust
+ */
+async function getBaseUrl(tabId: string, fixedPort?: number): Promise<string> {
+    if (fixedPort !== undefined) {
+        return `http://127.0.0.1:${fixedPort}`;
+    }
+    return getTabServerUrl(tabId);
+}
+
+/**
  * Create a Tab-scoped POST function
  */
-function createPostJson(tabId: string) {
+function createPostJson(tabId: string, fixedPort?: number) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, fixedPort);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
@@ -123,9 +137,9 @@ function createPostJson(tabId: string) {
 /**
  * Create a Tab-scoped GET function
  */
-function createApiGetJson(tabId: string) {
+function createApiGetJson(tabId: string, fixedPort?: number) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, fixedPort);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url);
         return handleApiResponse<T>(response);
@@ -135,9 +149,9 @@ function createApiGetJson(tabId: string) {
 /**
  * Create a Tab-scoped PUT function
  */
-function createApiPutJson(tabId: string) {
+function createApiPutJson(tabId: string, fixedPort?: number) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, fixedPort);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
@@ -151,9 +165,9 @@ function createApiPutJson(tabId: string) {
 /**
  * Create a Tab-scoped DELETE function
  */
-function createApiDelete(tabId: string) {
+function createApiDelete(tabId: string, fixedPort?: number) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, fixedPort);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, { method: 'DELETE' });
         return handleApiResponse<T>(response);
@@ -167,12 +181,14 @@ export default function TabProvider({
     sessionId = null,
     isActive,
     onGeneratingChange,
+    sidecarPort,
 }: TabProviderProps) {
     // Create Tab-scoped API functions
-    const postJson = useMemo(() => createPostJson(tabId), [tabId]);
-    const apiGetJson = useMemo(() => createApiGetJson(tabId), [tabId]);
-    const apiPutJson = useMemo(() => createApiPutJson(tabId), [tabId]);
-    const apiDeleteJson = useMemo(() => createApiDelete(tabId), [tabId]);
+    // If sidecarPort is provided (e.g., connected to cron task Sidecar), use it directly
+    const postJson = useMemo(() => createPostJson(tabId, sidecarPort), [tabId, sidecarPort]);
+    const apiGetJson = useMemo(() => createApiGetJson(tabId, sidecarPort), [tabId, sidecarPort]);
+    const apiPutJson = useMemo(() => createApiPutJson(tabId, sidecarPort), [tabId, sidecarPort]);
+    const apiDeleteJson = useMemo(() => createApiDelete(tabId, sidecarPort), [tabId, sidecarPort]);
 
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
@@ -1235,12 +1251,24 @@ export default function TabProvider({
         }
     }, [sessionId, isConnected, tabId, loadSession]);
 
-    // Reset the loaded flag when sessionId changes to a different value
+    // Track previous sessionId to detect changes
+    const prevSessionIdRef = useRef<string | null | undefined>(sessionId);
+
+    // Reset the loaded flag and reload when sessionId changes
     useEffect(() => {
+        const prevSessionId = prevSessionIdRef.current;
+        prevSessionIdRef.current = sessionId;
+
         if (!sessionId) {
+            // SessionId cleared - reset flag
             initialSessionLoadedRef.current = false;
+        } else if (prevSessionId !== undefined && prevSessionId !== sessionId && isConnected) {
+            // SessionId changed to a different value - load the new session
+            console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading new session`);
+            initialSessionLoadedRef.current = true;
+            void loadSession(sessionId);
         }
-    }, [sessionId]);
+    }, [sessionId, isConnected, tabId, loadSession]);
 
     // Respond to permission request
     const respondPermission = useCallback(async (decision: 'deny' | 'allow_once' | 'always_allow') => {
