@@ -300,27 +300,86 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
   }, [tabId]);
 
-  // Listen for Tauri events (cron:trigger-execution)
+  // Handle Rust scheduler execution complete event
+  // This is emitted after Rust directly executes via Sidecar (not via frontend)
+  const handleExecutionComplete = useCallback(async (payload: { taskId: string; success: boolean; executionCount: number }) => {
+    const currentTask = stateRef.current.task;
+    if (!currentTask || currentTask.id !== payload.taskId) return;
+
+    console.log('[useCronTask] Execution complete from Rust scheduler:', payload);
+
+    // Refresh task state from server to get updated lastExecutedAt and executionCount
+    try {
+      const task = await getCronTask(payload.taskId);
+      setState(prev => ({ ...prev, task }));
+
+      // Check if task completed
+      if (task.status === 'completed') {
+        if (optionsRef.current.onComplete) {
+          optionsRef.current.onComplete(task, task.exitReason ?? undefined);
+        }
+        setState(initialState);
+      }
+    } catch (error) {
+      console.error('[useCronTask] Failed to refresh task after execution:', error);
+    }
+  }, []);
+
+  // Handle Rust scheduler execution error event
+  const handleExecutionError = useCallback((payload: { taskId: string; error: string }) => {
+    const currentTask = stateRef.current.task;
+    if (!currentTask || currentTask.id !== payload.taskId) return;
+
+    console.error('[useCronTask] Execution error from Rust scheduler:', payload);
+    // Task will continue to next interval, just log the error
+    // Optionally refresh to get updated lastError
+    getCronTask(payload.taskId).then(task => {
+      setState(prev => ({ ...prev, task }));
+    }).catch(() => {
+      // Ignore refresh errors
+    });
+  }, []);
+
+  // Listen for Tauri events (cron:trigger-execution, cron:execution-complete, cron:execution-error)
   useEffect(() => {
     if (!isTauriEnvironment()) return;
 
-    let unlistenFn: (() => void) | null = null;
+    let unlistenTrigger: (() => void) | null = null;
+    let unlistenComplete: (() => void) | null = null;
+    let unlistenError: (() => void) | null = null;
 
-    const setupListener = async () => {
+    const setupListeners = async () => {
       const { listen } = await import('@tauri-apps/api/event');
-      unlistenFn = await listen<CronTaskTriggerPayload>('cron:trigger-execution', (event) => {
+
+      // Legacy: trigger from Rust to frontend to execute
+      unlistenTrigger = await listen<CronTaskTriggerPayload>('cron:trigger-execution', (event) => {
         handleSchedulerTrigger(event.payload);
       });
+
+      // New: Rust executed directly, notify frontend to update UI
+      unlistenComplete = await listen<{ taskId: string; success: boolean; executionCount: number }>(
+        'cron:execution-complete',
+        (event) => {
+          handleExecutionComplete(event.payload);
+        }
+      );
+
+      unlistenError = await listen<{ taskId: string; error: string }>(
+        'cron:execution-error',
+        (event) => {
+          handleExecutionError(event.payload);
+        }
+      );
     };
 
-    setupListener();
+    setupListeners();
 
     return () => {
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      if (unlistenTrigger) unlistenTrigger();
+      if (unlistenComplete) unlistenComplete();
+      if (unlistenError) unlistenError();
     };
-  }, [handleSchedulerTrigger]);
+  }, [handleSchedulerTrigger, handleExecutionComplete, handleExecutionError]);
 
   // Listen for SSE events (cron:task-exit-requested from AI tool)
   useEffect(() => {
