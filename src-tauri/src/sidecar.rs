@@ -1624,7 +1624,25 @@ pub async fn execute_cron_task<R: Runtime>(
 
     // Activate session as cron task (prevents Sidecar from being killed if Tab closes)
     if let Some(ref session_id) = payload.session_id {
-        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        let _ = app_handle.emit("cron:debug", serde_json::json!({
+            "taskId": payload.task_id,
+            "message": "execute_cron_task: about to lock mutex for session activation"
+        }));
+
+        let mut manager_guard = manager.lock().map_err(|e| {
+            let _ = app_handle.emit("cron:debug", serde_json::json!({
+                "taskId": payload.task_id,
+                "message": format!("execute_cron_task: mutex lock FAILED: {}", e),
+                "error": true
+            }));
+            e.to_string()
+        })?;
+
+        let _ = app_handle.emit("cron:debug", serde_json::json!({
+            "taskId": payload.task_id,
+            "message": "execute_cron_task: got mutex lock, activating session"
+        }));
+
         manager_guard.activate_session(
             session_id.clone(),
             None,  // No tab_id for cron tasks
@@ -1633,6 +1651,12 @@ pub async fn execute_cron_task<R: Runtime>(
             workspace_path.to_string(),
             true,  // is_cron_task = true
         );
+
+        let _ = app_handle.emit("cron:debug", serde_json::json!({
+            "taskId": payload.task_id,
+            "message": "execute_cron_task: session activated"
+        }));
+
         log::info!(
             "[sidecar] Cron task {} activated session {} as cron (port {})",
             payload.task_id, session_id, port
@@ -1640,6 +1664,12 @@ pub async fn execute_cron_task<R: Runtime>(
     }
 
     let url = format!("http://127.0.0.1:{}/cron/execute-sync", port);
+
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": payload.task_id,
+        "message": format!("execute_cron_task: about to send HTTP request to {}", url)
+    }));
+
     log::info!(
         "[sidecar] Executing cron task {} via {}",
         payload.task_id, url
@@ -1652,6 +1682,11 @@ pub async fn execute_cron_task<R: Runtime>(
         .no_proxy() // Disable proxy for localhost
         .build()
         .map_err(|e| format!("[sidecar] Failed to create HTTP client: {}", e))?;
+
+    let _ = app_handle.emit("cron:debug", serde_json::json!({
+        "taskId": payload.task_id,
+        "message": "execute_cron_task: HTTP client created, sending request..."
+    }));
 
     // Send request to Sidecar
     let response = client
