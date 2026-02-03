@@ -3,7 +3,7 @@ import { arrayMove } from '@dnd-kit/sortable';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar } from '@/api/tauriClient';
+import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, startCronSidecar, getWorkspaceSidecar, updateSessionTab, registerTabUser } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -323,25 +323,55 @@ export default function App() {
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
 
     try {
-      // Check if the session is already activated by another Tab (Session singleton constraint)
+      // Check if the session is already activated by another Tab or CronTask (Session singleton constraint)
       if (sessionId) {
         const activation = await getSessionActivation(sessionId);
-        if (activation && activation.tab_id && activation.tab_id !== activeTabId) {
-          // Session is already open in another Tab - jump to that Tab instead of showing error
-          console.log(`[App] Session ${sessionId} already active in tab ${activation.tab_id}, jumping to it`);
+        if (activation) {
+          // Session is already activated
+          if (activation.tab_id && activation.tab_id !== activeTabId) {
+            // Session is open in another Tab - check if that Tab exists
+            const targetTab = tabs.find(t => t.id === activation.tab_id);
+            if (targetTab) {
+              // Jump to the existing Tab
+              console.log(`[App] Session ${sessionId} already active in tab ${activation.tab_id}, jumping to it`);
+              setActiveTabId(activation.tab_id);
+              setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+              return;
+            }
+          }
 
-          // Check if the target Tab exists
-          const targetTab = tabs.find(t => t.id === activation.tab_id);
-          if (targetTab) {
-            // Jump to the existing Tab
-            setActiveTabId(activation.tab_id);
+          // Tab doesn't exist or no tab_id (cron task running without Tab)
+          // Connect this Tab to the existing Sidecar instead of creating a new one
+          console.log(`[App] Session ${sessionId} activated by cron task, connecting current tab to existing Sidecar on port ${activation.port}`);
+
+          // Check if workspace Sidecar exists
+          const sidecarInfo = await getWorkspaceSidecar(project.path);
+          if (sidecarInfo && sidecarInfo.port > 0) {
+            // Sidecar exists - register this Tab as a user and update session's tab_id
+            await registerTabUser(project.path, activeTabId);
+            await updateSessionTab(sessionId, activeTabId);
+
+            console.log(`[App] Connected tab ${activeTabId} to existing Sidecar on port ${sidecarInfo.port}`);
+
+            // Update tab to chat view
+            setTabs((prev) =>
+              prev.map((t) =>
+                t.id === activeTabId
+                  ? {
+                    ...t,
+                    agentDir: project.path,
+                    sessionId: sessionId ?? null,
+                    view: 'chat',
+                    title: getFolderName(project.path),
+                  }
+                  : t
+              )
+            );
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
             return;
-          } else {
-            // Tab doesn't exist (e.g., cron task running without Tab)
-            // Connect this Tab to the existing Sidecar
-            console.log(`[App] Target tab ${activation.tab_id} not found, connecting current tab to existing Sidecar`);
           }
+          // Sidecar doesn't exist - fall through to create new one
+          console.log(`[App] No existing Sidecar found for workspace, creating new one`);
         }
       }
 

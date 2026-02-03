@@ -279,15 +279,21 @@ impl CronTaskManager {
         let task_id_owned = task_id.to_string();
         let interval_mins = task.interval_minutes;
         let last_executed = task.last_executed_at;
+        let execution_count = task.execution_count;
 
         // Spawn the scheduler loop
         tokio::spawn(async move {
-            log::info!("[CronTask] Scheduler started for task {} (interval: {} min)", task_id_owned, interval_mins);
+            log::info!("[CronTask] Scheduler started for task {} (interval: {} min, executions: {})", task_id_owned, interval_mins, execution_count);
 
-            // Calculate initial wait time based on last execution
-            // This ensures correct timing even when scheduler is restarted
+            // Calculate initial wait time
+            // - First execution (execution_count == 0): execute immediately (2s delay for UI readiness)
+            // - Subsequent executions: calculate based on last_executed_at
             let interval_duration = Duration::from_secs(interval_mins as u64 * 60);
-            let initial_wait = if let Some(last_exec) = last_executed {
+            let initial_wait = if execution_count == 0 {
+                // First execution - execute immediately with small delay for UI to be ready
+                log::info!("[CronTask] Task {} first execution, starting in 2 seconds", task_id_owned);
+                Duration::from_secs(2)
+            } else if let Some(last_exec) = last_executed {
                 let now = Utc::now();
                 let next_exec = last_exec + chrono::Duration::minutes(interval_mins as i64);
                 if next_exec > now {
@@ -299,13 +305,14 @@ impl CronTaskManager {
                     );
                     Duration::from_secs(wait_secs)
                 } else {
-                    // Already past due, execute soon (small delay to avoid immediate execution)
+                    // Already past due, execute soon
                     log::info!("[CronTask] Task {} is past due, executing in 5 seconds", task_id_owned);
                     Duration::from_secs(5)
                 }
             } else {
-                // No previous execution, wait full interval
-                log::info!("[CronTask] Task {} no previous execution, waiting full interval", task_id_owned);
+                // No previous execution but execution_count > 0 (edge case, shouldn't happen)
+                // Wait full interval to be safe
+                log::info!("[CronTask] Task {} no lastExecutedAt but count={}, waiting full interval", task_id_owned, execution_count);
                 interval_duration
             };
 

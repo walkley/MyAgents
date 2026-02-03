@@ -785,6 +785,26 @@ export async function updateSessionTab(sessionId: string, newTabId: string): Pro
 }
 
 /**
+ * Register a Tab as a user of a workspace's Sidecar (reference counting)
+ * Used when connecting a Tab to an existing Sidecar (e.g., cron task scenario)
+ * @param workspacePath - Workspace directory path
+ * @param tabId - Tab identifier
+ */
+export async function registerTabUser(workspacePath: string, tabId: string): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('cmd_register_tab_user', { workspacePath, tabId });
+        console.debug(`[tauriClient] Tab ${tabId} registered as user of workspace ${workspacePath}`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to register tab user:`, error);
+        throw error;
+    }
+}
+
+/**
  * Get Sidecar info for a workspace
  * @param workspacePath - Workspace directory path
  * @returns SidecarInfo if a Sidecar is running for this workspace, null otherwise

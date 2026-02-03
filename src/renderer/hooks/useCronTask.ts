@@ -124,25 +124,9 @@ export function useCronTask(options: UseCronTaskOptions) {
         isStarting: false,
       }));
 
-      // Execute immediately for first time
-      if (optionsRef.current.onExecute) {
-        await markTaskExecuting(task.id);
-        try {
-          await optionsRef.current.onExecute(
-            task.id,
-            currentConfig.prompt,
-            true, // isFirstExecution
-            currentConfig.endConditions.aiCanExit
-          );
-        } finally {
-          await markTaskComplete(task.id);
-        }
-      }
-
-      // Record execution
-      await recordCronExecution(task.id);
-
-      // Start the Rust-layer scheduler for subsequent executions
+      // Start the Rust-layer scheduler
+      // The scheduler will execute immediately for first time (execution_count == 0)
+      // This ensures consistent execution path for both first and subsequent executions
       await startCronScheduler(task.id);
 
       console.log('[useCronTask] Task started with scheduler:', startedTask.id);
