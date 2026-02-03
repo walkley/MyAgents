@@ -1178,12 +1178,38 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
 }
 
 /// Get the server URL for a specific Tab
+/// This function checks multiple sources:
+/// 1. Direct Tab sidecar instances (normal case)
+/// 2. Session activations where this Tab is connected to a cron task's sidecar
 pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Result<String, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
+    // Priority 1: Check direct Tab sidecar instances
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         if instance.is_running() {
             return Ok(format!("http://127.0.0.1:{}", instance.port));
+        }
+    }
+
+    // Priority 2: Check if this Tab is connected to a cron task's sidecar via session_activations
+    // This handles the case where Tab opened a cron task session (connectTabToCronSidecar)
+    let activation_port = manager_guard.session_activations.values()
+        .find(|a| a.tab_id.as_deref() == Some(tab_id))
+        .map(|a| a.port);
+
+    if let Some(port) = activation_port {
+        // Verify the sidecar is still healthy by checking cron_task_instances or instances
+        let is_healthy = manager_guard.cron_task_instances.values_mut()
+            .any(|i| i.port == port && i.is_running())
+            || manager_guard.instances.values_mut()
+                .any(|i| i.port == port && i.is_running());
+
+        if is_healthy {
+            log::info!(
+                "[sidecar] Tab {} using cron sidecar on port {} (via session_activation)",
+                tab_id, port
+            );
+            return Ok(format!("http://127.0.0.1:{}", port));
         }
     }
 
@@ -1191,9 +1217,11 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
 }
 
 /// Get status for a Tab's sidecar
+/// This function checks multiple sources (same as get_tab_server_url)
 pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> Result<SidecarStatus, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
+    // Priority 1: Check direct Tab sidecar instances
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         return Ok(SidecarStatus {
             running: instance.is_running(),
@@ -1201,6 +1229,25 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
             agent_dir: instance.agent_dir.as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
+        });
+    }
+
+    // Priority 2: Check if this Tab is connected to a cron task's sidecar via session_activations
+    let activation_info = manager_guard.session_activations.values()
+        .find(|a| a.tab_id.as_deref() == Some(tab_id))
+        .map(|a| (a.port, a.workspace_path.clone()));
+
+    if let Some((port, workspace_path)) = activation_info {
+        // Check if the sidecar is healthy
+        let is_running = manager_guard.cron_task_instances.values_mut()
+            .any(|i| i.port == port && i.is_running())
+            || manager_guard.instances.values_mut()
+                .any(|i| i.port == port && i.is_running());
+
+        return Ok(SidecarStatus {
+            running: is_running,
+            port,
+            agent_dir: workspace_path,
         });
     }
 
