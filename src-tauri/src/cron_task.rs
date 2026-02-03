@@ -20,7 +20,7 @@ use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
 use crate::sidecar::{
-    execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv, UserRef,
+    execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
 };
 
 /// Normalize a path for comparison (removes trailing slashes)
@@ -44,18 +44,15 @@ pub enum RunMode {
     NewSession,
 }
 
-/// Task status
+/// Task status (simplified: only Running and Stopped)
+/// Stopped includes: manual stop, end conditions met, AI exit
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     /// Task is running and will execute at intervals
     Running,
-    /// Task is paused (can be resumed)
-    Paused,
-    /// Task was stopped manually
+    /// Task was stopped (includes: manual stop, end conditions met, AI exit)
     Stopped,
-    /// Task completed (all end conditions met)
-    Completed,
 }
 
 /// End conditions for a cron task
@@ -361,7 +358,7 @@ impl CronTaskManager {
                     log::info!("[CronTask] Task {} reached end condition, completing", task_id_owned);
                     // Complete task and deactivate session
                     if let Some(ref handle) = *app_handle.read().await {
-                        complete_task_internal(handle, &tasks, &task_id_owned, None).await;
+                        stop_task_internal(handle, &tasks, &task_id_owned, None).await;
                     }
                     break;
                 }
@@ -420,7 +417,7 @@ impl CronTaskManager {
                         // Check if AI requested exit
                         if let Some(reason) = ai_exit_reason {
                             log::info!("[CronTask] Task {} AI requested exit: {}", task_id_owned, reason);
-                            complete_task_internal(&handle, &tasks, &task_id_owned, Some(reason)).await;
+                            stop_task_internal(&handle, &tasks, &task_id_owned, Some(reason)).await;
                             break;
                         }
 
@@ -432,7 +429,7 @@ impl CronTaskManager {
                         if let Some(t) = task_updated {
                             if check_end_conditions_static(&t) {
                                 log::info!("[CronTask] Task {} reached end condition after execution", task_id_owned);
-                                complete_task_internal(&handle, &tasks, &task_id_owned, None).await;
+                                stop_task_internal(&handle, &tasks, &task_id_owned, None).await;
                                 break;
                             }
                         }
@@ -544,7 +541,7 @@ impl CronTaskManager {
             interval_minutes: config.interval_minutes,
             end_conditions: config.end_conditions,
             run_mode: config.run_mode,
-            status: TaskStatus::Paused, // Start paused, caller must explicitly start
+            status: TaskStatus::Stopped, // Start stopped, caller must explicitly start
             execution_count: 0,
             created_at: Utc::now(),
             last_executed_at: None,
@@ -598,38 +595,33 @@ impl CronTaskManager {
         result
     }
 
-    /// Get active task for a specific session (running or paused)
+    /// Get active task for a specific session (running only)
     pub async fn get_active_task_for_session(&self, session_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
-            .find(|t| {
-                t.session_id == session_id
-                    && (t.status == TaskStatus::Running || t.status == TaskStatus::Paused)
-            })
+            .find(|t| t.session_id == session_id && t.status == TaskStatus::Running)
             .cloned()
     }
 
-    /// Get active task for a specific tab (running or paused)
+    /// Get active task for a specific tab (running only)
     pub async fn get_active_task_for_tab(&self, tab_id: &str) -> Option<CronTask> {
         let tasks = self.tasks.read().await;
         tasks
             .values()
-            .find(|t| {
-                t.tab_id.as_deref() == Some(tab_id)
-                    && (t.status == TaskStatus::Running || t.status == TaskStatus::Paused)
-            })
+            .find(|t| t.tab_id.as_deref() == Some(tab_id) && t.status == TaskStatus::Running)
             .cloned()
     }
 
     /// Start a task (begin scheduling)
+    /// Can start a task in Stopped status (e.g., after creation or after previous stop)
     pub async fn start_task(&self, task_id: &str) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
         let task = tasks.get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-        if task.status == TaskStatus::Completed || task.status == TaskStatus::Stopped {
-            return Err(format!("Cannot start task in {} status", serde_json::to_string(&task.status).unwrap_or_default()));
+        if task.status == TaskStatus::Running {
+            return Err("Task is already running".to_string());
         }
 
         task.status = TaskStatus::Running;
@@ -642,29 +634,10 @@ impl CronTaskManager {
         Ok(task_clone)
     }
 
-    /// Pause a task
-    pub async fn pause_task(&self, task_id: &str) -> Result<CronTask, String> {
-        let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
-
-        if task.status != TaskStatus::Running {
-            return Err(format!("Cannot pause task in {} status", serde_json::to_string(&task.status).unwrap_or_default()));
-        }
-
-        task.status = TaskStatus::Paused;
-        let task_clone = task.clone();
-        drop(tasks);
-
-        self.save_to_disk().await?;
-        log::info!("[CronTask] Paused task: {}", task_id);
-
-        Ok(task_clone)
-    }
-
-    /// Stop a task (cannot be restarted)
+    /// Stop a task (with optional exit reason)
     /// Also deactivates the associated session and unregisters the CronTask user
-    pub async fn stop_task(&self, task_id: &str) -> Result<CronTask, String> {
+    /// exit_reason can be set when AI calls ExitCronTask tool or end conditions are met
+    pub async fn stop_task(&self, task_id: &str, exit_reason: Option<String>) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
         let task = tasks.get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
@@ -672,43 +645,18 @@ impl CronTaskManager {
         let session_id = task.session_id.clone();
         let workspace_path = task.workspace_path.clone();
         task.status = TaskStatus::Stopped;
-        let task_clone = task.clone();
-        drop(tasks);
-
-        // Unregister CronTask user (reference counting)
-        self.unregister_cron_task_user_internal(&workspace_path, task_id).await;
-
-        // Deactivate session via app handle
-        self.deactivate_session_internal(&session_id).await;
-
-        self.save_to_disk().await?;
-        log::info!("[CronTask] Stopped task: {} (session {} deactivated, CronTask user unregistered)", task_id, session_id);
-
-        Ok(task_clone)
-    }
-
-    /// Complete a task (with optional exit reason from AI)
-    /// Also deactivates the associated session and unregisters the CronTask user
-    pub async fn complete_task(&self, task_id: &str, exit_reason: Option<String>) -> Result<CronTask, String> {
-        let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
-
-        let session_id = task.session_id.clone();
-        let workspace_path = task.workspace_path.clone();
-        task.status = TaskStatus::Completed;
         task.exit_reason = exit_reason;
         let task_clone = task.clone();
         drop(tasks);
 
-        // Unregister CronTask user (reference counting)
-        self.unregister_cron_task_user_internal(&workspace_path, task_id).await;
+        // Stop the cron task Sidecar
+        self.stop_cron_task_sidecar_internal(&workspace_path, task_id).await;
 
         // Deactivate session via app handle
         self.deactivate_session_internal(&session_id).await;
 
         self.save_to_disk().await?;
-        log::info!("[CronTask] Completed task: {} (session {} deactivated, CronTask user unregistered)", task_id, session_id);
+        log::info!("[CronTask] Stopped task: {} (session {} deactivated, Sidecar stopped)", task_id, session_id);
 
         Ok(task_clone)
     }
@@ -735,36 +683,41 @@ impl CronTaskManager {
         }
     }
 
-    /// Internal helper to unregister a CronTask user from the workspace (reference counting)
-    async fn unregister_cron_task_user_internal(&self, workspace_path: &str, task_id: &str) {
+    /// Internal helper to stop the cron task Sidecar
+    /// With the new architecture (1 Tab = 1 Sidecar), cron tasks have their own Sidecars
+    async fn stop_cron_task_sidecar_internal(&self, _workspace_path: &str, task_id: &str) {
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
             if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
                 match sidecar_state.lock() {
                     Ok(mut manager) => {
-                        let user = UserRef::CronTask(task_id.to_string());
-                        let should_stop = manager.unregister_user(workspace_path, &user);
-                        log::info!(
-                            "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
-                            task_id, workspace_path, should_stop
-                        );
-                        // Note: We don't actually stop the Sidecar here - that's handled by stop_tab_sidecar
-                        // when all users are unregistered
+                        // Remove the cron task Sidecar instance
+                        if let Some(_instance) = manager.remove_cron_task_instance(task_id) {
+                            log::info!(
+                                "[CronTask] Stopped cron task Sidecar for task {}",
+                                task_id
+                            );
+                        } else {
+                            log::debug!(
+                                "[CronTask] No Sidecar instance found for task {} (may have been stopped already)",
+                                task_id
+                            );
+                        }
                     }
                     Err(e) => {
-                        log::error!("[CronTask] Cannot unregister CronTask {}: lock poisoned: {}", task_id, e);
+                        log::error!("[CronTask] Cannot stop cron task Sidecar {}: lock poisoned: {}", task_id, e);
                     }
                 }
             } else {
-                log::warn!("[CronTask] Cannot unregister CronTask {}: SidecarManager state not found", task_id);
+                log::warn!("[CronTask] Cannot stop cron task Sidecar {}: SidecarManager state not found", task_id);
             }
         } else {
-            log::warn!("[CronTask] Cannot unregister CronTask {}: app handle not available", task_id);
+            log::warn!("[CronTask] Cannot stop cron task Sidecar {}: app handle not available", task_id);
         }
     }
 
     /// Delete a task
-    /// Also deactivates the associated session if task was active and unregisters the CronTask user
+    /// Also deactivates the associated session and stops the Sidecar if task was running
     pub async fn delete_task(&self, task_id: &str) -> Result<(), String> {
         let mut tasks = self.tasks.write().await;
         let task = tasks.remove(task_id)
@@ -772,17 +725,17 @@ impl CronTaskManager {
 
         let session_id = task.session_id.clone();
         let workspace_path = task.workspace_path.clone();
-        let was_active = task.status == TaskStatus::Running || task.status == TaskStatus::Paused;
+        let was_running = task.status == TaskStatus::Running;
         drop(tasks);
 
-        // Unregister CronTask user and deactivate session if task was active
-        if was_active {
-            self.unregister_cron_task_user_internal(&workspace_path, task_id).await;
+        // Stop cron task Sidecar and deactivate session if task was running
+        if was_running {
+            self.stop_cron_task_sidecar_internal(&workspace_path, task_id).await;
             self.deactivate_session_internal(&session_id).await;
         }
 
         self.save_to_disk().await?;
-        log::info!("[CronTask] Deleted task: {} (was_active: {}, unregistered: {})", task_id, was_active, was_active);
+        log::info!("[CronTask] Deleted task: {} (was_running: {}, sidecar_stopped: {})", task_id, was_running, was_running);
 
         Ok(())
     }
@@ -797,9 +750,9 @@ impl CronTaskManager {
         task.last_executed_at = Some(Utc::now());
 
         // Check end conditions
-        let should_complete = self.check_end_conditions(task);
-        if should_complete {
-            task.status = TaskStatus::Completed;
+        let should_stop = self.check_end_conditions(task);
+        if should_stop {
+            task.status = TaskStatus::Stopped;
         }
 
         let task_clone = task.clone();
@@ -944,8 +897,9 @@ async fn execute_task_directly(
     Ok((result.success, ai_exit_reason))
 }
 
-/// Complete a task, unregister CronTask user, and deactivate its session (internal helper)
-async fn complete_task_internal(
+/// Stop a task, unregister CronTask user, and deactivate its session (internal helper)
+/// Used by scheduler when end conditions are met or AI requests exit
+async fn stop_task_internal(
     handle: &AppHandle,
     tasks: &Arc<RwLock<HashMap<String, CronTask>>>,
     task_id: &str,
@@ -957,25 +911,25 @@ async fn complete_task_internal(
         tasks_guard.get(task_id).map(|t| (t.session_id.clone(), t.workspace_path.clone()))
     };
 
-    let Some((session_id, workspace_path)) = task_info else {
-        log::warn!("[CronTask] Task {} not found in complete_task_internal", task_id);
+    let Some((session_id, _workspace_path)) = task_info else {
+        log::warn!("[CronTask] Task {} not found in stop_task_internal", task_id);
         return;
     };
 
-    // Unregister CronTask user (reference counting) and deactivate session
+    // Stop cron task Sidecar and deactivate session
     if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut manager) = sidecar_state.lock() {
-            // Unregister CronTask user
-            let user = UserRef::CronTask(task_id.to_string());
-            let should_stop = manager.unregister_user(&workspace_path, &user);
-            log::info!(
-                "[CronTask] Unregistered CronTask {} from workspace {}, should_stop: {}",
-                task_id, workspace_path, should_stop
-            );
+            // Stop the cron task Sidecar
+            if let Some(_instance) = manager.remove_cron_task_instance(task_id) {
+                log::info!(
+                    "[CronTask] Stopped cron task Sidecar for task {}",
+                    task_id
+                );
+            }
 
             // Deactivate session
             manager.deactivate_session(&session_id);
-            log::info!("[CronTask] Deactivated session {} for completed task {}", session_id, task_id);
+            log::info!("[CronTask] Deactivated session {} for stopped task {}", session_id, task_id);
         }
     }
 
@@ -983,7 +937,7 @@ async fn complete_task_internal(
     {
         let mut tasks_guard = tasks.write().await;
         if let Some(task) = tasks_guard.get_mut(task_id) {
-            task.status = TaskStatus::Completed;
+            task.status = TaskStatus::Stopped;
             task.exit_reason = exit_reason.clone();
         }
     }
@@ -1000,13 +954,13 @@ async fn complete_task_internal(
         }
     }
 
-    // Emit completion event
-    let _ = handle.emit("cron:task-completed", serde_json::json!({
+    // Emit stopped event
+    let _ = handle.emit("cron:task-stopped", serde_json::json!({
         "taskId": task_id,
         "exitReason": exit_reason
     }));
 
-    log::info!("[CronTask] Task {} completed", task_id);
+    log::info!("[CronTask] Task {} stopped", task_id);
 }
 
 /// Send system notification for task execution
@@ -1054,58 +1008,29 @@ pub async fn cmd_create_cron_task(config: CronTaskConfig) -> Result<CronTask, St
 }
 
 /// Start a cron task
-/// Also registers the CronTask as a user of the workspace's Sidecar (reference counting)
-/// This ensures the Sidecar stays alive even if the Tab closes during the first execution
+/// The cron task Sidecar will be started on-demand when the first execution runs
 #[tauri::command]
 pub async fn cmd_start_cron_task(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     task_id: String,
 ) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
     let task = manager.start_task(&task_id).await?;
 
-    // Register CronTask user immediately when task starts
-    // This is crucial: we need to register BEFORE the first execution starts,
-    // otherwise closing the Tab during first execution would stop the Sidecar
-    if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
-        if let Ok(mut sidecar_manager) = sidecar_state.lock() {
-            sidecar_manager.register_user(
-                &task.workspace_path,
-                UserRef::CronTask(task.id.clone()),
-            );
-            log::info!(
-                "[CronTask] Registered CronTask {} as user of workspace {} (on start)",
-                task.id, task.workspace_path
-            );
-        } else {
-            log::warn!("[CronTask] Failed to lock SidecarManager to register CronTask user");
-        }
-    } else {
-        log::warn!("[CronTask] SidecarManager state not available for CronTask user registration");
-    }
+    log::info!(
+        "[CronTask] Started cron task {} for workspace {}",
+        task.id, task.workspace_path
+    );
 
     Ok(task)
 }
 
-/// Pause a cron task
+/// Stop a cron task (with optional exit reason)
+/// exit_reason can be set when AI calls ExitCronTask or end conditions are met
 #[tauri::command]
-pub async fn cmd_pause_cron_task(task_id: String) -> Result<CronTask, String> {
+pub async fn cmd_stop_cron_task(task_id: String, exit_reason: Option<String>) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
-    manager.pause_task(&task_id).await
-}
-
-/// Stop a cron task
-#[tauri::command]
-pub async fn cmd_stop_cron_task(task_id: String) -> Result<CronTask, String> {
-    let manager = get_cron_task_manager();
-    manager.stop_task(&task_id).await
-}
-
-/// Complete a cron task (with optional exit reason)
-#[tauri::command]
-pub async fn cmd_complete_cron_task(task_id: String, exit_reason: Option<String>) -> Result<CronTask, String> {
-    let manager = get_cron_task_manager();
-    manager.complete_task(&task_id, exit_reason).await
+    manager.stop_task(&task_id, exit_reason).await
 }
 
 /// Delete a cron task
@@ -1137,7 +1062,7 @@ pub async fn cmd_get_workspace_cron_tasks(workspace_path: String) -> Result<Vec<
     Ok(manager.get_tasks_for_workspace(&workspace_path).await)
 }
 
-/// Get active cron task for a session (running or paused)
+/// Get active cron task for a session (running only)
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_get_session_cron_task(sessionId: String) -> Result<Option<CronTask>, String> {
@@ -1145,7 +1070,7 @@ pub async fn cmd_get_session_cron_task(sessionId: String) -> Result<Option<CronT
     Ok(manager.get_active_task_for_session(&sessionId).await)
 }
 
-/// Get active cron task for a tab (running or paused)
+/// Get active cron task for a tab (running only)
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_get_tab_cron_task(tabId: String) -> Result<Option<CronTask>, String> {
@@ -1184,25 +1109,14 @@ pub async fn cmd_start_cron_scheduler(
 ) -> Result<(), String> {
     let manager = get_cron_task_manager();
 
-    // Get task info for session activation and user registration
+    // Get task info for session activation
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-    // Register CronTask user and activate session
-    // Note: register_user is idempotent (uses HashSet), so safe to call on recovery too
+    // Activate session if Tab's Sidecar instance exists
+    // The cron task will get its own Sidecar when it starts executing
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
         if let Ok(mut sidecar_manager) = sidecar_state.lock() {
-            // Register CronTask user (ensures Sidecar won't be stopped when Tab closes)
-            sidecar_manager.register_user(
-                &task.workspace_path,
-                UserRef::CronTask(task.id.clone()),
-            );
-            log::info!(
-                "[CronTask] Registered CronTask user {} for workspace {}",
-                task.id, task.workspace_path
-            );
-
-            // Activate session if Tab's Sidecar instance exists
             if let Some(tab_id) = &task.tab_id {
                 if let Some(instance) = sidecar_manager.get_instance(tab_id) {
                     let port = instance.port;
@@ -1213,6 +1127,7 @@ pub async fn cmd_start_cron_scheduler(
                     sidecar_manager.activate_session(
                         task.session_id.clone(),
                         task.tab_id.clone(),
+                        Some(task_id.clone()),  // task_id for Tab connection
                         port,
                         task.workspace_path.clone(),
                         true, // is_cron_task = true

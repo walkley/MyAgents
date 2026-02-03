@@ -14,13 +14,9 @@ use sidecar::{
     cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
     // Session activation commands
     cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
-    cmd_update_session_tab, cmd_get_workspace_sidecar, cmd_start_cron_sidecar,
+    cmd_update_session_tab, cmd_start_cron_sidecar, cmd_connect_tab_to_cron_sidecar,
     // Cron task execution command
     cmd_execute_cron_task,
-    // User registration commands (reference counting for Sidecar lifecycle)
-    cmd_register_tab_user, cmd_register_cron_task_user,
-    cmd_unregister_tab_user, cmd_unregister_cron_task_user,
-    cmd_get_workspace_users, cmd_workspace_has_users,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -92,9 +88,7 @@ pub fn run() {
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,
-            cron_task::cmd_pause_cron_task,
             cron_task::cmd_stop_cron_task,
-            cron_task::cmd_complete_cron_task,
             cron_task::cmd_delete_cron_task,
             cron_task::cmd_get_cron_task,
             cron_task::cmd_get_cron_tasks,
@@ -114,17 +108,10 @@ pub fn run() {
             cmd_activate_session,
             cmd_deactivate_session,
             cmd_update_session_tab,
-            cmd_get_workspace_sidecar,
             cmd_start_cron_sidecar,
+            cmd_connect_tab_to_cron_sidecar,
             // Cron task execution (Rust -> Sidecar direct call)
             cmd_execute_cron_task,
-            // User registration commands (reference counting for Sidecar lifecycle)
-            cmd_register_tab_user,
-            cmd_register_cron_task_user,
-            cmd_unregister_tab_user,
-            cmd_unregister_cron_task_user,
-            cmd_get_workspace_users,
-            cmd_workspace_has_users,
         ])
         .setup(|app| {
             // Initialize logging for all builds
