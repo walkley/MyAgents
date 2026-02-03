@@ -69,6 +69,9 @@ interface SimpleChatInputProps {
     intervalMinutes: number;
     executionCount: number;
     lastExecutedAt?: string;
+    endConditions?: {
+      maxExecutions?: number;
+    };
   } | null;
   /** Callback when cron button is clicked */
   onCronButtonClick?: () => void;
@@ -1085,6 +1088,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
               status={cronTask.status}
               intervalMinutes={cronTask.intervalMinutes}
               executionCount={cronTask.executionCount}
+              maxExecutions={cronTask.endConditions?.maxExecutions}
               nextExecutionTime={cronTask.lastExecutedAt
                 ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
                 : undefined}

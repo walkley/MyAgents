@@ -1,7 +1,7 @@
 // Cron Task Overlay - Covers input area when task is running
 // Follows design_guide.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
-import { Clock, Square, Settings2 } from 'lucide-react';
+import { Clock, Square, Pencil } from 'lucide-react';
 import type { CronTaskStatus } from '@/types/cronTask';
 import { formatCronInterval } from '@/types/cronTask';
 
@@ -9,18 +9,35 @@ interface CronTaskOverlayProps {
   status: CronTaskStatus;
   intervalMinutes: number;
   executionCount: number;
+  maxExecutions?: number; // For showing progress like "1/3"
   nextExecutionTime?: Date;
   onStop: () => void;
   onSettings: () => void;
+}
+
+// Animated clock icon for running state
+function AnimatedClockIcon({ isRunning }: { isRunning: boolean }) {
+  return (
+    <div className="relative">
+      <Clock className={`h-4 w-4 text-[var(--accent)] ${isRunning ? '' : 'opacity-60'}`} />
+      {isRunning && (
+        <span className="absolute -right-0.5 -top-0.5 h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-40" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--accent)]" />
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function CronTaskOverlay({
   status,
   intervalMinutes,
   executionCount,
+  maxExecutions,
   nextExecutionTime,
   onStop,
-  onSettings
+  onSettings,
 }: CronTaskOverlayProps) {
   const isRunning = status === 'running';
 
@@ -39,67 +56,96 @@ export default function CronTaskOverlay({
   }, [isRunning, nextExecutionTime]);
 
   // Calculate time until next execution
-  const getTimeUntilNext = (): string | null => {
+  const getTimeDisplay = (): { text: string; isCountdown: boolean } | null => {
     if (!nextExecutionTime || !isRunning) return null;
+
     const now = new Date();
     const diff = nextExecutionTime.getTime() - now.getTime();
-    if (diff <= 0) return '即将执行';
 
-    const minutes = Math.floor(diff / 60000);
-    const seconds = Math.floor((diff % 60000) / 1000);
-
-    if (minutes > 0) {
-      return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    if (diff <= 0) {
+      return { text: '执行中...', isCountdown: false };
     }
-    return `${seconds}s`;
+
+    const totalSeconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const mins = minutes % 60;
+      return {
+        text: `${hours}:${mins.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`,
+        isCountdown: true
+      };
+    }
+
+    return {
+      text: `${minutes}:${seconds.toString().padStart(2, '0')}`,
+      isCountdown: true
+    };
   };
 
-  const timeUntilNext = getTimeUntilNext();
+  const timeDisplay = getTimeDisplay();
+
+  // Format execution count with progress
+  const getExecutionText = () => {
+    if (maxExecutions) {
+      return `已执行 ${executionCount}/${maxExecutions} 次`;
+    }
+    return `已执行 ${executionCount} 次`;
+  };
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
+    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-[var(--accent)]/20 bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
       {/* Left: Status Info */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 min-w-0">
         {/* Status Icon */}
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm)]/10">
-          <Clock className={`h-4 w-4 text-[var(--accent-warm)] ${isRunning ? 'animate-pulse' : ''}`} />
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--accent)]/10">
+          <AnimatedClockIcon isRunning={isRunning} />
         </div>
 
         {/* Status Text */}
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[13px] font-medium text-[var(--ink)]">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium text-[var(--ink)]">
               定时任务运行中
             </span>
-            {isRunning && timeUntilNext && (
-              <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--ink-muted)]">
-                {timeUntilNext}
+            {timeDisplay && (
+              <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${
+                timeDisplay.isCountdown
+                  ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                  : 'bg-[var(--paper-inset)] text-[var(--ink-secondary)]'
+              }`}>
+                {timeDisplay.isCountdown && (
+                  <span className="text-[10px] font-normal text-[var(--ink-muted)]">下次</span>
+                )}
+                {timeDisplay.text}
               </span>
             )}
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--ink-muted)]">
+          <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--ink-muted)]">
             <span>每 {formatCronInterval(intervalMinutes)}</span>
             <span className="text-[var(--line-strong)]">·</span>
-            <span>已执行 {executionCount} 次</span>
+            <span>{getExecutionText()}</span>
           </div>
         </div>
       </div>
 
-      {/* Right: Control Buttons - PRD specifies "设置" and "停止" only */}
+      {/* Right: Control Buttons */}
       <div className="flex shrink-0 items-center gap-2">
-        {/* Settings Button - Ghost style per design guide */}
+        {/* Settings Button */}
         <button
           onClick={onSettings}
-          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
         >
-          <Settings2 className="h-3.5 w-3.5" />
-          设置
+          <Pencil className="h-3.5 w-3.5" />
+          修改
         </button>
 
-        {/* Stop Button - Danger style per design guide */}
+        {/* Stop Button */}
         <button
           onClick={onStop}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--error)] px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-[var(--error)]/90"
+          className="flex items-center gap-1.5 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/5 px-3 py-1.5 text-xs font-medium text-[var(--error)] transition-colors hover:bg-[var(--error)]/10"
         >
           <Square className="h-3.5 w-3.5" />
           停止
