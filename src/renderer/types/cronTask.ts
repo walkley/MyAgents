@@ -45,7 +45,16 @@ export interface CronTask {
   exitReason?: string;
   permissionMode?: string;
   model?: string;
+  providerEnv?: { baseUrl?: string; apiKey?: string };
   lastError?: string;
+}
+
+/**
+ * Provider environment for third-party API access
+ */
+export interface CronTaskProviderEnv {
+  baseUrl?: string;
+  apiKey?: string;
 }
 
 /**
@@ -63,6 +72,7 @@ export interface CronTaskConfig {
   tabId?: string;
   permissionMode?: string;
   model?: string;
+  providerEnv?: CronTaskProviderEnv;
 }
 
 /**

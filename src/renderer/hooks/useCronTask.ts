@@ -24,6 +24,12 @@ export interface CronTaskState {
     endConditions: CronEndConditions;
     runMode: CronRunMode;
     notifyEnabled: boolean;
+    /** Model to use for task execution (captured at task creation time) */
+    model?: string;
+    /** Permission mode (captured at task creation time) */
+    permissionMode?: string;
+    /** Provider environment (captured at task creation time) */
+    providerEnv?: { baseUrl?: string; apiKey?: string };
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;
@@ -73,6 +79,9 @@ export function useCronTask(options: UseCronTaskOptions) {
   const handleExecutionErrorRef = useRef<((payload: { taskId: string; error: string }) => void) | null>(null);
 
   // Enable cron mode with initial config
+  // Note: model, permissionMode, and providerEnv are captured here to ensure the task uses
+  // the same settings that were active when the user enabled cron mode,
+  // not the settings at execution time (which might have changed)
   const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'>) => {
     setState({
       isEnabled: true,
@@ -82,6 +91,9 @@ export function useCronTask(options: UseCronTaskOptions) {
         endConditions: config.endConditions,
         runMode: config.runMode,
         notifyEnabled: config.notifyEnabled,
+        model: config.model,
+        permissionMode: config.permissionMode,
+        providerEnv: config.providerEnv,
       },
       task: null,
       isStarting: false,
@@ -126,7 +138,7 @@ export function useCronTask(options: UseCronTaskOptions) {
     setState(prev => ({ ...prev, isStarting: true, error: null }));
 
     try {
-      // Create the task
+      // Create the task with model, permissionMode, and providerEnv captured at enableCronMode time
       const task = await createCronTask({
         workspacePath,
         sessionId,
@@ -136,6 +148,9 @@ export function useCronTask(options: UseCronTaskOptions) {
         endConditions: currentConfig.endConditions,
         runMode: currentConfig.runMode,
         notifyEnabled: currentConfig.notifyEnabled,
+        model: currentConfig.model,
+        permissionMode: currentConfig.permissionMode,
+        providerEnv: currentConfig.providerEnv,
       });
 
       // Start the task (updates status to 'running')
@@ -451,6 +466,9 @@ export function useCronTask(options: UseCronTaskOptions) {
         endConditions: task.endConditions,
         runMode: task.runMode,
         notifyEnabled: task.notifyEnabled,
+        model: task.model,
+        permissionMode: task.permissionMode,
+        providerEnv: task.providerEnv,
       },
       task,
       isStarting: false,

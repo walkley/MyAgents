@@ -817,7 +817,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
         initialPrompt={cronPrompt}
         initialConfig={cronState.config}
         onConfirm={(config) => {
-          enableCronMode(config);
+          // Pass current model, permissionMode, and providerEnv to ensure the cron task
+          // uses the same settings that are active when user enables cron mode
+          const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
+            baseUrl: currentProvider.config.baseUrl,
+            apiKey: apiKeys[currentProvider.id],
+          } : undefined;
+          enableCronMode({
+            ...config,
+            model: selectedModel,
+            permissionMode: permissionMode,
+            providerEnv: providerEnv,
+          });
           setShowCronSettings(false);
         }}
       />
