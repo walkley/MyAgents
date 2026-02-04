@@ -1298,7 +1298,9 @@ export default function TabProvider({
         // 1. sessionId is provided
         // 2. SSE is connected (sidecar is ready)
         // 3. We haven't loaded this session yet
-        if (sessionId && isConnected && !initialSessionLoadedRef.current) {
+        // 4. It's NOT a pending session (pending-xxx sessions are new and don't exist in backend yet)
+        const isPendingSession = sessionId?.startsWith('pending-');
+        if (sessionId && isConnected && !initialSessionLoadedRef.current && !isPendingSession) {
             initialSessionLoadedRef.current = true;
             console.log(`[TabProvider ${tabId}] Auto-loading initial session: ${sessionId}`);
             void loadSession(sessionId);
@@ -1318,9 +1320,15 @@ export default function TabProvider({
             initialSessionLoadedRef.current = false;
         } else if (prevSessionId !== undefined && prevSessionId !== sessionId && isConnected) {
             // SessionId changed to a different value - load the new session
-            console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading new session`);
-            initialSessionLoadedRef.current = true;
-            void loadSession(sessionId);
+            // Skip loading if it's a pending session (new session, doesn't exist in backend yet)
+            const isPendingSession = sessionId.startsWith('pending-');
+            if (!isPendingSession) {
+                console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading new session`);
+                initialSessionLoadedRef.current = true;
+                void loadSession(sessionId);
+            } else {
+                console.log(`[TabProvider ${tabId}] SessionId changed to pending session ${sessionId}, skipping load`);
+            }
         }
     }, [sessionId, isConnected, tabId, loadSession]);
 
