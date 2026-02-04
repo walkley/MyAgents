@@ -1319,15 +1319,25 @@ export default function TabProvider({
             // SessionId cleared - reset flag
             initialSessionLoadedRef.current = false;
         } else if (prevSessionId !== undefined && prevSessionId !== sessionId && isConnected) {
-            // SessionId changed to a different value - load the new session
-            // Skip loading if it's a pending session (new session, doesn't exist in backend yet)
+            // SessionId changed to a different value
+            // Skip loading if:
+            // 1. New sessionId is a pending session (doesn't exist in backend yet)
+            // 2. Previous sessionId was a pending session (backend just assigned real ID, we're already in that session)
             const isPendingSession = sessionId.startsWith('pending-');
-            if (!isPendingSession) {
+            const wasPendingSession = prevSessionId?.startsWith('pending-');
+
+            if (isPendingSession) {
+                console.log(`[TabProvider ${tabId}] SessionId changed to pending session ${sessionId}, skipping load`);
+            } else if (wasPendingSession) {
+                // Backend assigned real session ID - we're already in this session, don't reload
+                // Reloading would call /sessions/switch which aborts the current AI generation!
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
+                initialSessionLoadedRef.current = true;
+            } else {
+                // Normal session switch (e.g., from history dropdown)
                 console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading new session`);
                 initialSessionLoadedRef.current = true;
                 void loadSession(sessionId);
-            } else {
-                console.log(`[TabProvider ${tabId}] SessionId changed to pending session ${sessionId}, skipping load`);
             }
         }
     }, [sessionId, isConnected, tabId, loadSession]);
