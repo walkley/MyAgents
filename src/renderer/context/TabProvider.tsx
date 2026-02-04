@@ -1291,55 +1291,55 @@ export default function TabProvider({
 
     // Track whether initial session has been loaded
     const initialSessionLoadedRef = useRef(false);
-
-    // Auto-load session when initial sessionId is provided and SSE is connected
-    useEffect(() => {
-        // Only load if:
-        // 1. sessionId is provided
-        // 2. SSE is connected (sidecar is ready)
-        // 3. We haven't loaded this session yet
-        // 4. It's NOT a pending session (pending-xxx sessions are new and don't exist in backend yet)
-        const isPendingSession = sessionId?.startsWith('pending-');
-        if (sessionId && isConnected && !initialSessionLoadedRef.current && !isPendingSession) {
-            initialSessionLoadedRef.current = true;
-            console.log(`[TabProvider ${tabId}] Auto-loading initial session: ${sessionId}`);
-            void loadSession(sessionId);
-        }
-    }, [sessionId, isConnected, tabId, loadSession]);
-
-    // Track previous sessionId to detect changes
+    // Track previous sessionId to detect changes (must be before the effect that uses it)
     const prevSessionIdRef = useRef<string | null | undefined>(sessionId);
 
-    // Reset the loaded flag and reload when sessionId changes
+    // Unified session loading effect - handles both initial load and session changes
     useEffect(() => {
         const prevSessionId = prevSessionIdRef.current;
         prevSessionIdRef.current = sessionId;
 
+        // No sessionId - reset flag and return
         if (!sessionId) {
-            // SessionId cleared - reset flag
             initialSessionLoadedRef.current = false;
-        } else if (prevSessionId !== undefined && prevSessionId !== sessionId && isConnected) {
-            // SessionId changed to a different value
-            // Skip loading if:
-            // 1. New sessionId is a pending session (doesn't exist in backend yet)
-            // 2. Previous sessionId was a pending session (backend just assigned real ID, we're already in that session)
-            const isPendingSession = sessionId.startsWith('pending-');
-            const wasPendingSession = prevSessionId?.startsWith('pending-');
-
-            if (isPendingSession) {
-                console.log(`[TabProvider ${tabId}] SessionId changed to pending session ${sessionId}, skipping load`);
-            } else if (wasPendingSession) {
-                // Backend assigned real session ID - we're already in this session, don't reload
-                // Reloading would call /sessions/switch which aborts the current AI generation!
-                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
-                initialSessionLoadedRef.current = true;
-            } else {
-                // Normal session switch (e.g., from history dropdown)
-                console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading new session`);
-                initialSessionLoadedRef.current = true;
-                void loadSession(sessionId);
-            }
+            return;
         }
+
+        // Not connected yet - wait
+        if (!isConnected) {
+            return;
+        }
+
+        const isPendingSession = sessionId.startsWith('pending-');
+        const wasPendingSession = prevSessionId?.startsWith('pending-');
+
+        // Case 1: Current sessionId is pending - skip (doesn't exist in backend yet)
+        if (isPendingSession) {
+            console.log(`[TabProvider ${tabId}] Session is pending (${sessionId}), skipping load`);
+            return;
+        }
+
+        // Case 2: Upgraded from pending to real - skip (we're already in this session)
+        // This happens when backend creates the real session after first message
+        if (wasPendingSession) {
+            console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
+            initialSessionLoadedRef.current = true;
+            return;
+        }
+
+        // Case 3: Already loaded this session - skip
+        if (initialSessionLoadedRef.current && prevSessionId === sessionId) {
+            return;
+        }
+
+        // Case 4: Need to load session (initial load or session switch)
+        if (prevSessionId !== sessionId) {
+            console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading session`);
+        } else {
+            console.log(`[TabProvider ${tabId}] Initial session load: ${sessionId}`);
+        }
+        initialSessionLoadedRef.current = true;
+        void loadSession(sessionId);
     }, [sessionId, isConnected, tabId, loadSession]);
 
     // Respond to permission request
