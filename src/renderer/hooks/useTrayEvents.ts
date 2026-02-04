@@ -3,6 +3,7 @@
 
 import { useEffect, useCallback, useRef } from 'react';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { setWindowVisible } from '@/services/notificationService';
 
 interface TrayEventsOptions {
   /** Whether minimize to tray is enabled */
@@ -64,11 +65,22 @@ export function useTrayEvents(options: TrayEventsOptions) {
     let unlistenCloseRequested: (() => void) | null = null;
     let unlistenOpenSettings: (() => void) | null = null;
     let unlistenExitRequested: (() => void) | null = null;
+    let unlistenFocusChanged: (() => void) | null = null;
 
     const setupListeners = async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const window = getCurrentWindow();
+
+        // Listen for window focus changes (including when window is shown from tray)
+        unlistenFocusChanged = await window.onFocusChanged(({ payload: focused }) => {
+          console.log('[useTrayEvents] Window focus changed:', focused);
+          if (focused) {
+            // Window is now visible and focused
+            setWindowVisible(true);
+          }
+        });
 
         // Listen for window close request (X button)
         unlistenCloseRequested = await listen('window:close-requested', async () => {
@@ -79,6 +91,7 @@ export function useTrayEvents(options: TrayEventsOptions) {
             // Hide to tray instead of closing
             const window = getCurrentWindow();
             await window.hide();
+            setWindowVisible(false); // Update notification service state
             console.log('[useTrayEvents] Window hidden to tray');
           } else {
             // Check if exit callback returns true (can exit)
@@ -133,6 +146,7 @@ export function useTrayEvents(options: TrayEventsOptions) {
       if (unlistenCloseRequested) unlistenCloseRequested();
       if (unlistenOpenSettings) unlistenOpenSettings();
       if (unlistenExitRequested) unlistenExitRequested();
+      if (unlistenFocusChanged) unlistenFocusChanged();
     };
   }, []);
 

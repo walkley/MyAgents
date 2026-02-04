@@ -6,6 +6,7 @@ use std::fs;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{MenuBuilder, MenuItemBuilder},
+    image::Image,
     Emitter, Manager, Runtime,
 };
 
@@ -28,11 +29,34 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
         .item(&exit_item)
         .build()?;
 
+    // Load tray icon - use template icon on macOS for proper menu bar appearance
+    #[cfg(target_os = "macos")]
+    let tray_icon = {
+        // Load template icon from embedded bytes (22x22 for best menu bar appearance)
+        let icon_bytes = include_bytes!("../icons/trayIconTemplate@2x.png");
+        Image::from_bytes(icon_bytes).unwrap_or_else(|_| {
+            log::warn!("[Tray] Failed to load template icon, using default");
+            app.default_window_icon().unwrap().clone()
+        })
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let tray_icon = app.default_window_icon().unwrap().clone();
+
     // Build the tray icon
-    let _tray = TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+    let mut tray_builder = TrayIconBuilder::new()
+        .icon(tray_icon)
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .tooltip("MyAgents")
+        .show_menu_on_left_click(false);
+
+    // On macOS, mark as template image so system can adjust colors for light/dark mode
+    #[cfg(target_os = "macos")]
+    {
+        tray_builder = tray_builder.icon_as_template(true);
+    }
+
+    let _tray = tray_builder
         .on_menu_event(move |app, event| {
             match event.id().as_ref() {
                 MENU_OPEN => {

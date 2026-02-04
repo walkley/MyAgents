@@ -483,8 +483,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultProviderId: 'anthropic-sub',
   defaultPermissionMode: 'auto',
   theme: 'light',
-  minimizeToTray: false,
+  minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
-  autoStart: false,
+  autoStart: false,       // 默认不开启开机启动
   cronNotifications: true,
 };

@@ -196,12 +196,12 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     // Autostart hook for managing launch on startup
     const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
 
-    // Determine initial section: use initialSection if valid, otherwise default to 'general'
+    // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
             return initialSection as SettingsSection;
         }
-        return 'general';
+        return 'providers';
     };
 
     const [activeSection, setActiveSection] = useState<SettingsSection>(getInitialSection);
@@ -1124,15 +1124,6 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                 <nav className="space-y-1">
                     <button
-                        onClick={() => setActiveSection('general')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
-                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                            }`}
-                    >
-                        通用
-                    </button>
-                    <button
                         onClick={() => setActiveSection('providers')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'providers'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1158,6 +1149,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             }`}
                     >
                         工具 & MCP
+                    </button>
+                    <button
+                        onClick={() => setActiveSection('general')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        通用
                     </button>
                     <button
                         onClick={() => setActiveSection('about')}
@@ -1198,7 +1198,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                                 {/* Auto Start */}
                                 <div className="mt-4 flex items-center justify-between">
-                                    <div>
+                                    <div className="flex-1 pr-4">
                                         <p className="text-sm font-medium text-[var(--ink)]">开机启动</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             系统启动时自动运行 MyAgents
@@ -1214,16 +1214,16 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             }
                                         }}
                                         disabled={autostartLoading}
-                                        className={`relative h-6 w-11 rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 flex-shrink-0 rounded-full transition-colors ${
                                             autostartLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                                         } ${
                                             autostartEnabled
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[var(--paper-inset)]'
+                                                : 'bg-[#C4C4C4]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
                                                 autostartEnabled ? 'translate-x-5' : 'translate-x-0.5'
                                             }`}
                                         />
@@ -1232,7 +1232,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                                 {/* Minimize to Tray */}
                                 <div className="mt-4 flex items-center justify-between">
-                                    <div>
+                                    <div className="flex-1 pr-4">
                                         <p className="text-sm font-medium text-[var(--ink)]">最小化到托盘</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             关闭窗口时最小化到系统托盘而非退出应用
@@ -1243,14 +1243,14 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             updateConfig({ minimizeToTray: !config.minimizeToTray });
                                             toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
                                         }}
-                                        className={`relative h-6 w-11 cursor-pointer rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.minimizeToTray
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[var(--paper-inset)]'
+                                                : 'bg-[#C4C4C4]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
                                                 config.minimizeToTray ? 'translate-x-5' : 'translate-x-0.5'
                                             }`}
                                         />
@@ -1260,14 +1260,14 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                             {/* Notification Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">通知设置</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
 
-                                {/* Cron Task Notifications */}
+                                {/* Task Notifications */}
                                 <div className="mt-4 flex items-center justify-between">
-                                    <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">心跳循环通知</p>
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">启用通知</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            心跳循环执行完成时发送系统通知
+                                            AI 完成任务或需要用户确认时通知提醒
                                         </p>
                                     </div>
                                     <button
@@ -1275,14 +1275,14 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             updateConfig({ cronNotifications: !config.cronNotifications });
                                             toast.success(config.cronNotifications ? '已关闭任务通知' : '已开启任务通知');
                                         }}
-                                        className={`relative h-6 w-11 cursor-pointer rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.cronNotifications
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[var(--paper-inset)]'
+                                                : 'bg-[#C4C4C4]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
                                                 config.cronNotifications ? 'translate-x-5' : 'translate-x-0.5'
                                             }`}
                                         />

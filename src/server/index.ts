@@ -482,6 +482,12 @@ async function main() {
         });
       }
 
+      // 🩺 Health check endpoint - used by Rust sidecar manager
+      // Must be as simple as possible to verify HTTP handler is responsive
+      if (pathname === '/health' && request.method === 'GET') {
+        return jsonResponse({ status: 'ok', timestamp: Date.now() });
+      }
+
       // 🔍 Debug endpoint: Expose logger diagnostics via HTTP
       if (pathname === '/debug/logger' && request.method === 'GET') {
         const diagnostics = getLoggerDiagnostics();

@@ -79,6 +79,8 @@ const BASE_PORT: u16 = 31415;
 const HEALTH_CHECK_MAX_ATTEMPTS: u32 = 60;
 const HEALTH_CHECK_DELAY_MS: u64 = 100;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
+// HTTP health check for existing sidecar - shorter timeout since sidecar should respond immediately
+const HTTP_HEALTH_CHECK_TIMEOUT_MS: u64 = 500;
 const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 // Port range: 500 ports (31415-31914)
 const PORT_RANGE: u16 = 500;
@@ -1049,7 +1051,11 @@ fn find_server_script<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<PathBuf>
     None
 }
 
-/// Wait for a sidecar to become healthy
+/// Wait for a new sidecar to become healthy using TCP-level check
+/// For initial startup, TCP check is sufficient and more reliable because:
+/// - Bun starts listening on TCP port before HTTP handler is fully ready
+/// - TCP check has been proven stable in production
+/// Note: For REUSING an existing sidecar, use check_sidecar_http_health() instead
 fn wait_for_health(port: u16) -> Result<(), String> {
     let delay = Duration::from_millis(HEALTH_CHECK_DELAY_MS);
 
@@ -1059,7 +1065,7 @@ fn wait_for_health(port: u16) -> Result<(), String> {
             Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS),
         ) {
             Ok(_) => {
-                log::info!("[sidecar] Healthy after {} attempts on port {}", attempt, port);
+                log::info!("[sidecar] TCP health check passed after {} attempts on port {}", attempt, port);
                 return Ok(());
             }
             Err(_) => {
@@ -1071,9 +1077,32 @@ fn wait_for_health(port: u16) -> Result<(), String> {
     }
 
     Err(format!(
-        "Sidecar failed to become healthy after {} attempts",
-        HEALTH_CHECK_MAX_ATTEMPTS
+        "Sidecar failed TCP health check after {} attempts on port {}",
+        HEALTH_CHECK_MAX_ATTEMPTS, port
     ))
+}
+
+/// Quick HTTP health check for existing sidecar (non-blocking style with short timeout)
+/// Returns true if the sidecar HTTP server is responsive
+fn check_sidecar_http_health(port: u16) -> bool {
+    let health_url = format!("http://127.0.0.1:{}/health", port);
+
+    // Short timeout for quick check - sidecar should respond immediately if healthy
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(HTTP_HEALTH_CHECK_TIMEOUT_MS))
+        .no_proxy()
+        .build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match client.get(&health_url).send() {
+        Ok(response) => response.status().is_success(),
+        Err(e) => {
+            log::warn!("[sidecar] HTTP health check failed on port {}: {}", port, e);
+            false
+        }
+    }
 }
 
 // ============= Tab-based Multi-instance Commands =============
@@ -1443,27 +1472,94 @@ pub fn ensure_session_sidecar<R: Runtime>(
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
     // Check if Session already has a healthy Sidecar
-    if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-        if sidecar.is_running() {
-            // Sidecar exists and is healthy - just add owner
-            log::info!(
-                "[sidecar] Session {} already has Sidecar on port {}, adding owner {:?}",
-                session_id, sidecar.port, owner
-            );
-            sidecar.add_owner(owner);
-            return Ok(EnsureSidecarResult {
-                port: sidecar.port,
-                is_new: false,
-            });
+    // We use a two-phase approach to avoid holding the lock during HTTP check:
+    // Phase 1: Check if sidecar exists and get its port (with lock)
+    // Phase 2: Do HTTP health check (without lock)
+    // Phase 3: Re-acquire lock and finalize decision
+
+    let existing_sidecar_info: Option<u16> = {
+        if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+            if sidecar.is_running() {
+                Some(sidecar.port)
+            } else {
+                // Sidecar exists but process not running - remove it
+                log::info!(
+                    "[sidecar] Session {} has dead Sidecar process, removing",
+                    session_id
+                );
+                manager_guard.sidecars.remove(session_id);
+                None
+            }
         } else {
-            // Sidecar exists but is unhealthy - remove it
+            None
+        }
+    };
+
+    // If we found a running sidecar, verify HTTP health (with lock released)
+    if let Some(port) = existing_sidecar_info {
+        // Drop the lock before doing HTTP check to avoid blocking other operations
+        drop(manager_guard);
+
+        // Verify HTTP server is actually responsive (not just process alive)
+        let http_healthy = check_sidecar_http_health(port);
+
+        // Re-acquire lock after HTTP check
+        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+
+        if http_healthy {
+            // HTTP health check passed - try to reuse the sidecar if it still exists
+            if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                // Double-check port hasn't changed (another thread might have replaced it)
+                if sidecar.port == port && sidecar.is_running() {
+                    log::info!(
+                        "[sidecar] Session {} Sidecar HTTP healthy on port {}, adding owner {:?}",
+                        session_id, port, owner
+                    );
+                    sidecar.add_owner(owner);
+                    return Ok(EnsureSidecarResult {
+                        port,
+                        is_new: false,
+                    });
+                }
+            }
+            // Sidecar was removed or replaced during HTTP check - fall through to create new one
             log::info!(
-                "[sidecar] Session {} has unhealthy Sidecar, removing",
+                "[sidecar] Session {} Sidecar changed during HTTP check, will create new",
                 session_id
+            );
+        } else {
+            // HTTP health check failed - sidecar is unresponsive, remove it if still present
+            log::warn!(
+                "[sidecar] Session {} Sidecar process alive but HTTP unresponsive on port {}, removing",
+                session_id, port
             );
             manager_guard.sidecars.remove(session_id);
         }
+
+        // Fall through to create new sidecar with the re-acquired lock
+        // We need to call the creation code below, so we store the guard
+        // and use a labeled block to handle the return
+        return create_new_session_sidecar(
+            app_handle, manager, session_id, workspace_path, owner, manager_guard
+        );
     }
+
+    // No existing sidecar found, create a new one with the original guard
+    create_new_session_sidecar(
+        app_handle, manager, session_id, workspace_path, owner, manager_guard
+    )
+}
+
+/// Helper function to create a new session sidecar
+/// Extracted to avoid code duplication and handle the mutex guard properly
+fn create_new_session_sidecar<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    workspace_path: &std::path::Path,
+    owner: SidecarOwner,
+    mut manager_guard: std::sync::MutexGuard<'_, SidecarManager>,
+) -> Result<EnsureSidecarResult, String> {
 
     // Need to start a new Sidecar
     // First, find executables

@@ -18,11 +18,27 @@ let permissionRequested = false;
 let lastNotifyTime = 0;
 const NOTIFY_THROTTLE_MS = 3000; // 3 seconds between notifications
 
+// Track window visibility state (updated by useTrayEvents hook)
+let isWindowVisible = true;
+
+/**
+ * Update window visibility state
+ * Called by useTrayEvents when window is hidden/shown
+ */
+export function setWindowVisible(visible: boolean): void {
+    isWindowVisible = visible;
+    console.log('[Notification] Window visibility updated:', visible);
+}
+
 /**
  * Check if user focus is away from the current window/tab
  * Returns true if notification should be sent
  */
 function shouldNotify(): boolean {
+    // Check if window is hidden to tray (most reliable for minimize-to-tray)
+    if (!isWindowVisible) {
+        return true;
+    }
     // Check if document is hidden (user switched to another tab/window)
     if (document.hidden) {
         return true;

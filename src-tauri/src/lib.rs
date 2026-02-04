@@ -23,7 +23,7 @@ use sidecar::{
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tauri::{Emitter, Listener};
+use tauri::{Emitter, Listener, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -224,16 +224,30 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    // Run with event handler to catch Cmd+Q and Dock quit
-    app.run(move |_app_handle, event| {
-        // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
-        if let tauri::RunEvent::ExitRequested { .. } = event {
-            // Only cleanup once (Relaxed is sufficient for simple flag)
-            use std::sync::atomic::Ordering::Relaxed;
-            if !cleanup_done_for_exit.swap(true, Relaxed) {
-                log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
-                let _ = stop_all_sidecars(&sidecar_state_for_exit);
+    // Run with event handler to catch Cmd+Q, Dock quit, and Dock click
+    app.run(move |app_handle, event| {
+        match event {
+            // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
+            tauri::RunEvent::ExitRequested { .. } => {
+                // Only cleanup once (Relaxed is sufficient for simple flag)
+                use std::sync::atomic::Ordering::Relaxed;
+                if !cleanup_done_for_exit.swap(true, Relaxed) {
+                    log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    let _ = stop_all_sidecars(&sidecar_state_for_exit);
+                }
             }
+            // Handle Dock icon click on macOS (Reopen event)
+            // This is triggered when user clicks the Dock icon while app is running but window is hidden
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                log::info!("[App] Dock icon clicked (Reopen), showing main window");
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            _ => {}
         }
     });
 }
