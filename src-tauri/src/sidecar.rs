@@ -779,12 +779,21 @@ pub struct LegacySidecarConfig {
 
 // ============= Core Functions =============
 
-/// Kill a child process gracefully, then forcefully
+/// Kill a child process gracefully (non-blocking)
+///
+/// This function sends SIGTERM to the process and spawns a background thread
+/// to wait for graceful shutdown. If the process doesn't exit within the timeout,
+/// the background thread will force kill it.
+///
+/// The function returns immediately after sending SIGTERM, making it suitable
+/// for use in Drop implementations without blocking the UI.
 fn kill_process(child: &mut Child) -> std::io::Result<()> {
+    let pid = child.id();
+
     #[cfg(unix)]
     {
         unsafe {
-            libc::kill(child.id() as i32, libc::SIGTERM);
+            libc::kill(pid as i32, libc::SIGTERM);
         }
     }
     #[cfg(windows)]
@@ -792,28 +801,54 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
         let _ = child.kill();
     }
 
-    // Wait for graceful shutdown
-    let timeout = Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
-    let start = std::time::Instant::now();
+    // Spawn a background thread to wait for graceful shutdown
+    // This ensures we don't block the caller (important for UI responsiveness)
+    // The thread will force kill if the process doesn't exit within timeout
+    std::thread::spawn(move || {
+        let timeout = Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+        let start = std::time::Instant::now();
 
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    log::warn!("[sidecar] Force killing process");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(());
+        loop {
+            // Check if process has exited
+            #[cfg(unix)]
+            {
+                // Use waitpid with WNOHANG to check without blocking
+                let mut status: i32 = 0;
+                let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+
+                if result > 0 {
+                    // Process has exited
+                    log::debug!("[sidecar] Process {} exited gracefully", pid);
+                    return;
+                } else if result < 0 {
+                    // Error (process might already be gone)
+                    log::debug!("[sidecar] Process {} already gone or error", pid);
+                    return;
                 }
-                thread::sleep(Duration::from_millis(100));
+                // result == 0 means process still running
             }
-            Err(e) => {
-                let _ = child.kill();
-                return Err(e);
+            #[cfg(windows)]
+            {
+                // On Windows, we can't easily check if process exited without the Child handle
+                // Just wait for the timeout and then assume it's dead
             }
+
+            if start.elapsed() > timeout {
+                log::warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing", pid);
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                return;
+            }
+
+            thread::sleep(Duration::from_millis(50));
         }
-    }
+    });
+
+    Ok(())
 }
 
 /// Check if a port is available
