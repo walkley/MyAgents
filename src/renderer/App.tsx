@@ -168,6 +168,11 @@ export default function App() {
                 if (failedTasks.length > 0) {
                   console.warn('[App] Failed tasks:', failedTasks);
                 }
+                // Track cron_recover event
+                track('cron_recover', {
+                  recovered_count: recoveredCount,
+                  failed_count: failedCount,
+                });
               }
             }
           }

@@ -829,6 +829,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             permissionMode: permissionMode,
             providerEnv: providerEnv,
           });
+          // Track cron_enable event
+          track('cron_enable', {
+            interval_minutes: config.intervalMinutes,
+            run_mode: config.runMode,
+            has_time_limit: !!config.endConditions.deadline,
+            has_count_limit: !!(config.endConditions.maxExecutions && config.endConditions.maxExecutions > 0),
+            notify_enabled: config.notifyEnabled,
+          });
           setShowCronSettings(false);
         }}
       />

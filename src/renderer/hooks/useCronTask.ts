@@ -12,6 +12,7 @@ import {
   markTaskComplete,
   updateCronTaskSession,
 } from '@/api/cronTaskClient';
+import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 export interface CronTaskState {
@@ -178,6 +179,24 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
   }, [workspacePath, sessionId, tabId]);
 
+  // Helper to calculate task duration in minutes
+  const getTaskDurationMinutes = (task: CronTask): number => {
+    if (!task.createdAt) return 0;
+    const createdAt = new Date(task.createdAt).getTime();
+    const now = Date.now();
+    return Math.round((now - createdAt) / (1000 * 60));
+  };
+
+  // Helper to map exit reason to tracking reason
+  const mapExitReason = (exitReason?: string): string => {
+    if (!exitReason) return 'manual';
+    if (exitReason.includes('time') || exitReason.includes('duration')) return 'time_limit';
+    if (exitReason.includes('count') || exitReason.includes('execution')) return 'count_limit';
+    if (exitReason.includes('AI') || exitReason.includes('exit_cron_task')) return 'ai_exit';
+    if (exitReason.includes('error')) return 'error';
+    return 'manual';
+  };
+
   // Stop the task
   // Returns the original prompt so it can be restored to the input field
   const stop = useCallback(async (): Promise<string | null> => {
@@ -190,6 +209,12 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     try {
       const stoppedTask = await stopCronTask(currentTask.id);
+      // Track cron_stop event (manual stop)
+      track('cron_stop', {
+        reason: 'manual',
+        execution_count: stoppedTask.executionCount ?? currentTask.executionCount ?? 0,
+        duration_minutes: getTaskDurationMinutes(currentTask),
+      });
       // Rust scheduler will detect status change and stop
       // Reset to initial state
       setState(initialState);
@@ -231,6 +256,12 @@ export function useCronTask(options: UseCronTaskOptions) {
     console.log('[useCronTask] AI requested task exit:', taskId, reason);
     try {
       const stoppedTask = await stopCronTask(taskId, reason);
+      // Track cron_stop event (AI exit)
+      track('cron_stop', {
+        reason: 'ai_exit',
+        execution_count: stoppedTask.executionCount ?? currentTask.executionCount ?? 0,
+        duration_minutes: getTaskDurationMinutes(currentTask),
+      });
       setState(prev => ({ ...prev, task: stoppedTask }));
 
       if (optionsRef.current.onComplete) {
@@ -261,6 +292,16 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     console.log('[useCronTask] Scheduler triggered execution for task:', payload.taskId);
 
+    // Track cron_start on first execution
+    if (payload.isFirstExecution) {
+      const config = stateRef.current.config;
+      track('cron_start', {
+        interval_minutes: currentTask.intervalMinutes,
+        model: config?.model ?? 'default',
+        provider_type: config?.providerEnv ? 'third_party' : 'subscription',
+      });
+    }
+
     isExecutingRef.current = true;
     await markTaskExecuting(payload.taskId);
 
@@ -280,6 +321,12 @@ export function useCronTask(options: UseCronTaskOptions) {
 
       // Check if task stopped (end conditions met)
       if (updatedTask.status === 'stopped') {
+        // Track cron_stop event (end conditions met)
+        track('cron_stop', {
+          reason: mapExitReason(updatedTask.exitReason),
+          execution_count: updatedTask.executionCount ?? 0,
+          duration_minutes: getTaskDurationMinutes(currentTask),
+        });
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(updatedTask, updatedTask.exitReason ?? undefined);
         }
@@ -306,6 +353,12 @@ export function useCronTask(options: UseCronTaskOptions) {
 
       // Check if task stopped (end conditions met or AI exit)
       if (task.status === 'stopped') {
+        // Track cron_stop event (end conditions met via Rust execution)
+        track('cron_stop', {
+          reason: mapExitReason(task.exitReason),
+          execution_count: task.executionCount ?? 0,
+          duration_minutes: getTaskDurationMinutes(task),
+        });
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(task, task.exitReason ?? undefined);
         }
