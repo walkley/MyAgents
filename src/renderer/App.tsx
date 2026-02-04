@@ -473,14 +473,15 @@ export default function App() {
         await activateSession(sessionId, targetTabId, null, result.port, project.path, false);
       }
 
-      // Update tab state (no cronTaskId/sidecarPort - managed by Owner model)
+      // Update tab state with effectiveSessionId (matches the Sidecar's session)
+      // For new sessions, this is "pending-{tabId}" until backend creates the real session
       setTabs((prev) =>
         prev.map((t) =>
           t.id === targetTabId
             ? {
               ...t,
               agentDir: project.path,
-              sessionId: sessionId ?? null,
+              sessionId: effectiveSessionId,
               view: 'chat',
               title: getFolderName(project.path),
             }
