@@ -13,11 +13,9 @@ import {
     getModelsDisplay,
     PRESET_PROVIDERS,
     type Provider,
-    type ProviderVerifyStatus,
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
-    PRESET_MCP_SERVERS,
     MCP_DISCOVERY_LINKS,
     isVerifyExpired,
     SUBSCRIPTION_PROVIDER_ID,
@@ -33,7 +31,7 @@ import {
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { useAutostart } from '@/hooks/useAutostart';
-import { isDebugMode, getBuildVersions } from '@/utils/debug';
+import { getBuildVersions } from '@/utils/debug';
 import {
     isDeveloperSectionUnlocked,
     unlockDeveloperSection,
@@ -50,7 +48,7 @@ type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'about';
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
 // Verification status for each provider
-type VerifyStatus = 'idle' | 'loading' | 'valid' | 'invalid';
+type _VerifyStatus = 'idle' | 'loading' | 'valid' | 'invalid';
 
 // Use shared type with verification state
 type SubscriptionStatus = SubscriptionStatusWithVerify;
@@ -176,7 +174,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     const {
         apiKeys,
         saveApiKey,
-        deleteApiKey: deleteApiKeyService,
+        deleteApiKey: _deleteApiKeyService,
         providerVerifyStatus,
         saveProviderVerifyStatus,
         config,
@@ -188,7 +186,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
         updateCustomProvider,
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
-        removePresetCustomModel,
+        removePresetCustomModel: _removePresetCustomModel,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -348,6 +346,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             setUpdateError(String(err));
             toastRef.current.error(`检查更新失败: ${err}`);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef is stable
     }, [appVersion]);
 
     // Restart to apply update
@@ -593,7 +592,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             track('mcp_add', { type: mcpForm.type });
 
             toast.success('MCP 服务器已添加');
-        } catch (err) {
+        } catch {
             toast.error('添加失败');
         }
     };
@@ -609,7 +608,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             track('mcp_remove');
 
             toast.success('已删除');
-        } catch (err) {
+        } catch {
             toast.error('删除失败');
         }
     };
@@ -797,8 +796,9 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Cleanup timeouts on unmount
     useEffect(() => {
+        const timeouts = verifyTimeoutRef.current;
         return () => {
-            Object.values(verifyTimeoutRef.current).forEach(clearTimeout);
+            Object.values(timeouts).forEach(clearTimeout);
         };
     }, []);
 

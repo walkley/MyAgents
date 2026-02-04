@@ -45,7 +45,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     isLoading,
     sessionState,
     unifiedLogs,
-    systemInitInfo,
+    systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
     isActive,
@@ -82,7 +82,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   const [showHistory, setShowHistory] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
-  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
+  const [workspaceRefreshKey, _setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentProvider?.primaryModel
@@ -122,7 +122,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     state: cronState,
     enableCronMode,
     disableCronMode,
-    updateConfig: updateCronConfig,
+    updateConfig: _updateCronConfig,
     startTask: startCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
@@ -341,6 +341,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
       }
     };
     loadMcpConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reload when project MCP config changes
   }, [currentProject?.mcpEnabledServers]);
 
   // Sync workspace MCP to project config when it changes
@@ -374,6 +375,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     } catch (err) {
       console.error('[Chat] Failed to sync MCP servers:', err);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
   }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
 
   // Sync selectedModel when provider changes
@@ -435,6 +437,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     };
 
     void syncConfigOnTabActivate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- providers.length is only used for debug logging
   }, [isActive, refreshProviderData, currentProject?.mcpEnabledServers, apiPost]);
 
   // Connect SSE when component mounts

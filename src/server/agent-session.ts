@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
-import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
+import { getCrossPlatformEnv } from './utils/platform';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 
 import type { ToolInput } from '../renderer/types/chat';
@@ -13,7 +13,7 @@ import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
 import { broadcast } from './sse';
-import { initLogger, appendLog, getLogLines as getLogLinesFromLogger, cleanupOldLogs } from './AgentLogger';
+import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -138,7 +138,7 @@ type MessageQueueItem = {
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
-const pendingAttachments: MessageAttachment[] = [];
+const _pendingAttachments: MessageAttachment[] = [];
 // Current permission mode for the session (updates on each user message)
 let currentPermissionMode: PermissionMode = 'auto';
 // Current model for the session (updates on each user message if changed)
@@ -228,8 +228,8 @@ function buildSystemPromptOption(): string | { type: 'preset'; preset: 'claude_c
   }
 }
 // SDK ready signal - prevents messageGenerator from yielding before SDK's ProcessTransport is ready
-let sdkReadyResolve: (() => void) | null = null;
-let sdkReadyPromise: Promise<void> | null = null;
+let _sdkReadyResolve: (() => void) | null = null;
+let _sdkReadyPromise: Promise<void> | null = null;
 
 // ===== Turn-level Usage Tracking =====
 // Token usage for the current turn, extracted from SDK result message
@@ -311,6 +311,7 @@ function loadMcpServersFromConfig(): McpServerDefinition[] {
       return [];
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic fs import for config loading
     const content = require('fs').readFileSync(configPath, 'utf-8');
     const config = JSON.parse(content);
 
@@ -514,6 +515,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       // For npx commands, try to use bundled bun (bun x is npx-compatible)
       // This ensures the app works without requiring Node.js/npm
       if (command === 'npx') {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
         const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
         const runtime = getBundledRuntimePath();
 
@@ -679,7 +681,14 @@ async function handleAskUserQuestion(
 
   // Wait for user response or abort
   return new Promise((resolve) => {
-    let timer: ReturnType<typeof setTimeout>;
+    // Timeout after 10 minutes (user needs time to think)
+    const timer = setTimeout(() => {
+      if (pendingAskUserQuestions.has(requestId)) {
+        cleanup();
+        console.warn('[AskUserQuestion] Timed out after 10 minutes');
+        resolve(null);
+      }
+    }, 10 * 60 * 1000);
 
     const cleanup = () => {
       clearTimeout(timer);
@@ -695,15 +704,6 @@ async function handleAskUserQuestion(
 
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
-
-    // Timeout after 10 minutes (user needs time to think)
-    timer = setTimeout(() => {
-      if (pendingAskUserQuestions.has(requestId)) {
-        cleanup();
-        console.warn('[AskUserQuestion] Timed out after 10 minutes');
-        resolve(null);
-      }
-    }, 10 * 60 * 1000);
 
     pendingAskUserQuestions.set(requestId, { resolve, input: questionInput, timer });
   });
@@ -1867,8 +1867,8 @@ export async function resetSession(): Promise<void> {
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 5. Clear SDK ready signal state (same as switchToSession)
-  sdkReadyResolve = null;
-  sdkReadyPromise = null;
+  _sdkReadyResolve = null;
+  _sdkReadyPromise = null;
 
   // 7. Reset processing state
   shouldAbortSession = false;
@@ -1949,8 +1949,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   systemInitInfo = null;
 
   // Clear SDK ready signal state
-  sdkReadyResolve = null;
-  sdkReadyPromise = null;
+  _sdkReadyResolve = null;
+  _sdkReadyPromise = null;
 
   // Preserve target sessionId so new messages are saved to the same session
   sessionId = targetSessionId as `${string}-${string}-${string}-${string}-${string}`;
@@ -2151,7 +2151,6 @@ export async function enqueueUserMessage(
   }
 
   // Persist session to SessionStore on first message
-  const isFirstMessage = !hasInitialPrompt;
   if (!hasInitialPrompt) {
     hasInitialPrompt = true;
     // Create and save session metadata

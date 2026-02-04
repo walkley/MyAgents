@@ -78,6 +78,7 @@ export default function ProcessRow({
     }, [isTaskRunning, block.tool?.taskStartTime]);
 
     // Parse Task result once (memoized to avoid repeated JSON parsing)
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- Intentional: only re-parse when result changes
     const taskParsedResult = useMemo(() => {
         if (!isTaskTool || !block.tool?.result) return null;
         try {

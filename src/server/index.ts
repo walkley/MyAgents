@@ -1,6 +1,6 @@
 import { appendFileSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
-import { basename, dirname, join, relative, resolve, extname, normalize, isAbsolute } from 'path';
+import { basename, dirname, join, relative, resolve, extname } from 'path';
 import { tmpdir } from 'os';
 import AdmZip from 'adm-zip';
 import {
@@ -99,12 +99,11 @@ import {
   getSessionMetadata,
   getSessionsByAgentDir,
   updateSessionMetadata,
-  updateSessionTitleFromMessage,
   getAttachmentDataUrl,
 } from './SessionStore';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
-import { cleanupOldUnifiedLogs, appendUnifiedLog, appendUnifiedLogBatch } from './UnifiedLogger';
+import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyApiKey, verifySubscription } from './provider-verify';
 
@@ -2567,6 +2566,7 @@ async function main() {
           return false;
         }
         // Reject control characters (0x00-0x1F, 0x7F)
+        // eslint-disable-next-line no-control-regex -- Intentional control character detection for filename validation
         if (/[\x00-\x1f\x7f]/.test(name)) {
           return false;
         }

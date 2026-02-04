@@ -37,7 +37,7 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [retryCount, setRetryCount] = useState(0);
+    const [_retryCount, setRetryCount] = useState(0);
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     // Map sessionId to active cron task (running only)

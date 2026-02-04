@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench, HeartPulse } from 'lucide-react';
+import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -112,7 +112,7 @@ interface FileSearchResult {
 
 const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
   value: externalValue,
-  onChange: externalOnChange,
+  onChange: _externalOnChange,
   onSend,
   onStop,
   isLoading,
@@ -258,6 +258,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
   useEffect(() => {
     textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, []);
 
   // Auto-resize textarea based on content
@@ -273,6 +274,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
       const scrollHeight = textarea.scrollHeight;
       textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
 
   // Fetch slash commands function (extracted for reuse)
@@ -476,7 +478,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
         // Add .gitignore rule for myagents_files folder
         try {
           await apiPost('/api/files/add-gitignore', { pattern: 'myagents_files/' });
-        } catch (err) {
+        } catch {
           // Non-fatal, continue silently
         }
 
@@ -690,6 +692,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     setInputValue(value);
     // Also focus the textarea
     textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, []);
 
   // Expose methods to parent via ref
@@ -903,7 +906,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
             toastRef.current.warning(`Skill "${skillName}" 复制失败，请重试`);
             return;
           }
-        } catch (err) {
+        } catch {
           toastRef.current.warning(`Skill "${skillName}" 复制超时，请重试`);
           return;
         }
@@ -1052,6 +1055,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
         handleSend();
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, isLoading, images.length, handleSend, handleSkillSelect]);
 
   const toggleExpand = () => setIsExpanded((prev) => !prev);

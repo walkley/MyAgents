@@ -1167,6 +1167,7 @@ export default function TabProvider({
             pendingAttachmentsRef.current = null; // Clear on error
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
     }, [tabId]);
 
     // Stop response with timeout fallback
@@ -1203,6 +1204,7 @@ export default function TabProvider({
             setSystemStatus(null);
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
     }, [tabId]);
 
     // Load session from history
@@ -1299,6 +1301,7 @@ export default function TabProvider({
             }
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson and postJson are stable
     }, [tabId]);
 
     // Track whether initial session has been loaded

@@ -61,7 +61,7 @@ export interface UseCronTaskOptions {
 }
 
 export function useCronTask(options: UseCronTaskOptions) {
-  const { workspacePath, sessionId, tabId, onExecute, onComplete, onCronTaskExitRequestedRef } = options;
+  const { workspacePath, sessionId, tabId, onCronTaskExitRequestedRef } = options;
 
   const [state, setState] = useState<CronTaskState>(initialState);
   const isExecutingRef = useRef(false);
@@ -489,7 +489,6 @@ export function useCronTask(options: UseCronTaskOptions) {
       if (unlistenComplete) unlistenComplete();
       if (unlistenError) unlistenError();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- Handlers are accessed via refs to avoid listener churn
   }, []);
 
   // Register handler for SSE events (cron:task-exit-requested from AI tool)

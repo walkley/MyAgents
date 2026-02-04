@@ -139,7 +139,7 @@ const ClaudeMdEditor = forwardRef<ClaudeMdEditorRef, ClaudeMdEditorProps>(
                     ? { path: 'CLAUDE.md' }
                     : { path: 'CLAUDE.md', agentDir };
                 await api.post('/agent/open-in-finder', payload);
-            } catch (err) {
+            } catch {
                 toastRef.current.error('无法打开目录');
             }
         }, [agentDir, api, isInTabContext]);

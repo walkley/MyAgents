@@ -61,7 +61,7 @@ const MarkdownLink: Components['a'] = ({ href, children, ...props }) => {
 };
 
 // Custom code component - handles both inline and block code
-const CodeComponent: Components['code'] = ({ className, children, node, ...props }) => {
+const CodeComponent: Components['code'] = ({ className, children, node: _node, ...props }) => {
   const match = /language-(\w+)/.exec(className || '');
   const language = match ? match[1] : '';
 
@@ -295,6 +295,7 @@ function preprocessContent(content: string): string {
   processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
 
   // Step 3: Restore protected code blocks and inline code
+  // eslint-disable-next-line no-control-regex -- Intentional use of NUL as placeholder
   processed = processed.replace(/\x00CODE(\d+)\x00/g, (_, index) => {
     return protected_[parseInt(index, 10)];
   });
