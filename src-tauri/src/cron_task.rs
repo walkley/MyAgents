@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::sidecar::{
     execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
+    SidecarOwner, ensure_session_sidecar, release_session_sidecar, EnsureSidecarResult,
 };
 
 /// Normalize a path for comparison (removes trailing slashes)
@@ -789,20 +790,20 @@ impl CronTaskManager {
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let session_id = task.session_id.clone();
-        let workspace_path = task.workspace_path.clone();
         task.status = TaskStatus::Stopped;
         task.exit_reason = exit_reason;
         let task_clone = task.clone();
         drop(tasks);
 
-        // Stop the cron task Sidecar
-        self.stop_cron_task_sidecar_internal(&workspace_path, task_id).await;
+        // Release CronTask's ownership of the Session Sidecar
+        // If Tab still owns it, Sidecar continues running
+        self.stop_cron_task_sidecar_internal(&session_id, task_id).await;
 
         // Deactivate session via app handle
         self.deactivate_session_internal(&session_id).await;
 
         self.save_to_disk().await?;
-        log::info!("[CronTask] Stopped task: {} (session {} deactivated, Sidecar stopped)", task_id, session_id);
+        log::info!("[CronTask] Stopped task: {} (CronTask released from session {})", task_id, session_id);
 
         Ok(task_clone)
     }
@@ -829,70 +830,62 @@ impl CronTaskManager {
         }
     }
 
-    /// Internal helper to stop the cron task Sidecar
-    /// This handles both dedicated cron sidecars and Tab sidecars that were being reused
-    async fn stop_cron_task_sidecar_internal(&self, _workspace_path: &str, task_id: &str) {
+    /// Internal helper to release CronTask's ownership of the Session Sidecar
+    /// With Session-centric Sidecar (Owner model), this only releases the CronTask owner.
+    /// If Tab still owns the Sidecar, it continues running.
+    async fn stop_cron_task_sidecar_internal(&self, session_id: &str, task_id: &str) {
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
             if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
-                match sidecar_state.lock() {
-                    Ok(mut manager) => {
-                        // First try: Remove dedicated cron task Sidecar instance
-                        if let Some(_instance) = manager.remove_cron_task_instance(task_id) {
+                let owner = SidecarOwner::CronTask(task_id.to_string());
+                match release_session_sidecar(&sidecar_state, session_id, &owner) {
+                    Ok(stopped) => {
+                        if stopped {
                             log::info!(
-                                "[CronTask] Stopped dedicated cron task Sidecar for task {}",
-                                task_id
-                            );
-                            return;
-                        }
-
-                        // Second try: Stop orphaned Tab sidecar that was being reused by this cron task
-                        // This handles the case where Tab was closed while cron task was running
-                        if manager.stop_orphaned_tab_sidecar_for_cron(task_id) {
-                            log::info!(
-                                "[CronTask] Stopped orphaned Tab sidecar for cron task {}",
-                                task_id
+                                "[CronTask] Released CronTask {} from session {}, Sidecar stopped (was last owner)",
+                                task_id, session_id
                             );
                         } else {
-                            // The sidecar is either still used by a Tab, or already stopped
-                            log::debug!(
-                                "[CronTask] No Sidecar to stop for task {} (may be used by Tab or already stopped)",
-                                task_id
+                            log::info!(
+                                "[CronTask] Released CronTask {} from session {}, Sidecar continues (Tab still owns it)",
+                                task_id, session_id
                             );
                         }
                     }
                     Err(e) => {
-                        log::error!("[CronTask] Cannot stop cron task Sidecar {}: lock poisoned: {}", task_id, e);
+                        log::error!(
+                            "[CronTask] Failed to release CronTask {} from session {}: {}",
+                            task_id, session_id, e
+                        );
                     }
                 }
             } else {
-                log::warn!("[CronTask] Cannot stop cron task Sidecar {}: SidecarManager state not found", task_id);
+                log::warn!("[CronTask] Cannot release CronTask {}: SidecarManager state not found", task_id);
             }
         } else {
-            log::warn!("[CronTask] Cannot stop cron task Sidecar {}: app handle not available", task_id);
+            log::warn!("[CronTask] Cannot release CronTask {}: app handle not available", task_id);
         }
     }
 
     /// Delete a task
-    /// Also deactivates the associated session and stops the Sidecar if task was running
+    /// Also releases CronTask's Sidecar ownership and deactivates session if task was running
     pub async fn delete_task(&self, task_id: &str) -> Result<(), String> {
         let mut tasks = self.tasks.write().await;
         let task = tasks.remove(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let session_id = task.session_id.clone();
-        let workspace_path = task.workspace_path.clone();
         let was_running = task.status == TaskStatus::Running;
         drop(tasks);
 
-        // Stop cron task Sidecar and deactivate session if task was running
+        // Release CronTask's Sidecar ownership and deactivate session if task was running
         if was_running {
-            self.stop_cron_task_sidecar_internal(&workspace_path, task_id).await;
+            self.stop_cron_task_sidecar_internal(&session_id, task_id).await;
             self.deactivate_session_internal(&session_id).await;
         }
 
         self.save_to_disk().await?;
-        log::info!("[CronTask] Deleted task: {} (was_running: {}, sidecar_stopped: {})", task_id, was_running, was_running);
+        log::info!("[CronTask] Deleted task: {} (was_running: {}, CronTask released)", task_id, was_running);
 
         Ok(())
     }
@@ -1120,35 +1113,51 @@ async fn execute_task_directly(
 
 /// Stop a task, unregister CronTask user, and deactivate its session (internal helper)
 /// Used by scheduler when end conditions are met or AI requests exit
+/// With Session-centric Sidecar (Owner model), this releases CronTask's ownership.
 async fn stop_task_internal(
     handle: &AppHandle,
     tasks: &Arc<RwLock<HashMap<String, CronTask>>>,
     task_id: &str,
     exit_reason: Option<String>,
 ) {
-    // Get session ID and workspace path before updating status
-    let task_info = {
+    // Get session ID before updating status
+    let session_id = {
         let tasks_guard = tasks.read().await;
-        tasks_guard.get(task_id).map(|t| (t.session_id.clone(), t.workspace_path.clone()))
+        tasks_guard.get(task_id).map(|t| t.session_id.clone())
     };
 
-    let Some((session_id, _workspace_path)) = task_info else {
+    let Some(session_id) = session_id else {
         log::warn!("[CronTask] Task {} not found in stop_task_internal", task_id);
         return;
     };
 
-    // Stop cron task Sidecar and deactivate session
+    // Release CronTask's ownership of the Session Sidecar
     if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
-        if let Ok(mut manager) = sidecar_state.lock() {
-            // Stop the cron task Sidecar
-            if let Some(_instance) = manager.remove_cron_task_instance(task_id) {
-                log::info!(
-                    "[CronTask] Stopped cron task Sidecar for task {}",
-                    task_id
+        let owner = SidecarOwner::CronTask(task_id.to_string());
+        match release_session_sidecar(&sidecar_state, &session_id, &owner) {
+            Ok(stopped) => {
+                if stopped {
+                    log::info!(
+                        "[CronTask] Released CronTask {} from session {}, Sidecar stopped",
+                        task_id, session_id
+                    );
+                } else {
+                    log::info!(
+                        "[CronTask] Released CronTask {} from session {}, Sidecar continues",
+                        task_id, session_id
+                    );
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "[CronTask] Failed to release CronTask {} from session {}: {}",
+                    task_id, session_id, e
                 );
             }
+        }
 
-            // Deactivate session
+        // Deactivate session (for legacy session tracking)
+        if let Ok(mut manager) = sidecar_state.lock() {
             manager.deactivate_session(&session_id);
             log::info!("[CronTask] Deactivated session {} for stopped task {}", session_id, task_id);
         }
@@ -1329,7 +1338,7 @@ pub async fn cmd_get_tasks_to_recover() -> Result<Vec<CronTask>, String> {
 
 /// Start the scheduler for a task
 /// This function is called both for initial task start and for recovery after app restart.
-/// It ensures CronTask user is registered (idempotent) and starts the scheduler loop.
+/// With Session-centric Sidecar (Owner model), this ensures CronTask is added as owner.
 #[tauri::command]
 pub async fn cmd_start_cron_scheduler(
     app_handle: tauri::AppHandle,
@@ -1341,49 +1350,36 @@ pub async fn cmd_start_cron_scheduler(
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-    // Activate session - try Tab Sidecar first, then Cron Task Sidecar
-    // This handles both normal start (Tab exists) and app restart recovery (only Cron Sidecar exists)
+    // Ensure Session has a Sidecar with CronTask as owner
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
-        if let Ok(mut sidecar_manager) = sidecar_state.lock() {
-            let mut activated = false;
+        let workspace_path = std::path::Path::new(&task.workspace_path);
+        let owner = SidecarOwner::CronTask(task_id.clone());
 
-            // Priority 1: Try Tab's Sidecar first (normal start case)
-            if let Some(tab_id) = &task.tab_id {
-                if let Some(instance) = sidecar_manager.get_instance(tab_id) {
-                    let port = instance.port;
-                    log::info!(
-                        "[CronTask] Activating session {} as cron task on Tab Sidecar port {}",
-                        task.session_id, port
-                    );
+        match ensure_session_sidecar(&app_handle, &sidecar_state, &task.session_id, workspace_path, owner) {
+            Ok(result) => {
+                log::info!(
+                    "[CronTask] Ensured Sidecar for session {} (port={}, is_new={})",
+                    task.session_id, result.port, result.is_new
+                );
+
+                // Activate session (for legacy session tracking)
+                if let Ok(mut sidecar_manager) = sidecar_state.lock() {
                     sidecar_manager.activate_session(
                         task.session_id.clone(),
                         task.tab_id.clone(),
                         Some(task_id.clone()),
-                        port,
+                        result.port,
                         task.workspace_path.clone(),
                         true, // is_cron_task = true
                     );
-                    activated = true;
                 }
             }
-
-            // Priority 2: Try Cron Task Sidecar (app restart recovery case)
-            // When app restarts, Tab hasn't opened yet but Cron Sidecar was started by recoverCronTasks
-            if !activated {
-                if let Some(info) = sidecar_manager.get_cron_task_sidecar_info(&task_id) {
-                    log::info!(
-                        "[CronTask] Activating session {} as cron task on Cron Sidecar port {}",
-                        task.session_id, info.port
-                    );
-                    sidecar_manager.activate_session(
-                        task.session_id.clone(),
-                        task.tab_id.clone(),
-                        Some(task_id.clone()),
-                        info.port,
-                        task.workspace_path.clone(),
-                        true, // is_cron_task = true
-                    );
-                }
+            Err(e) => {
+                log::error!(
+                    "[CronTask] Failed to ensure Sidecar for task {}: {}",
+                    task_id, e
+                );
+                return Err(e);
             }
         }
     }
@@ -1514,20 +1510,27 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
         task.id, task.workspace_path
     );
 
-    // Step 1: Start Sidecar for this task
+    // Step 1: Ensure Session has a Sidecar with CronTask as owner
     let sidecar_state = handle.try_state::<ManagedSidecarManager>()
         .ok_or_else(|| "SidecarManager state not available".to_string())?;
 
-    let port = crate::sidecar::start_cron_sidecar(
+    let workspace_path = std::path::Path::new(&task.workspace_path);
+    let owner = SidecarOwner::CronTask(task.id.clone());
+
+    let result = ensure_session_sidecar(
         handle,
         &sidecar_state,
-        &task.workspace_path,
-        &task.id,
+        &task.session_id,
+        workspace_path,
+        owner,
     )?;
 
-    log::info!("[CronTask] Sidecar started for task {} on port {}", task.id, port);
+    log::info!(
+        "[CronTask] Session {} Sidecar ensured: port={}, is_new={}",
+        task.session_id, result.port, result.is_new
+    );
 
-    // Step 2: Activate session
+    // Step 2: Activate session (for legacy session tracking)
     {
         let mut manager = sidecar_state.lock()
             .map_err(|e| format!("Failed to lock SidecarManager: {}", e))?;
@@ -1536,7 +1539,7 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
             task.session_id.clone(),
             task.tab_id.clone(),
             Some(task.id.clone()),
-            port,
+            result.port,
             task.workspace_path.clone(),
             true, // is_cron_task = true
         );
@@ -1548,5 +1551,5 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
     cron_manager.start_task_scheduler(&task.id).await?;
     log::info!("[CronTask] Scheduler started for task {}", task.id);
 
-    Ok(port)
+    Ok(result.port)
 }

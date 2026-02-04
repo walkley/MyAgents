@@ -2,7 +2,7 @@
 // Handles spawning, monitoring, and shutting down multiple Bun backend server instances
 // Supports per-Tab isolation with independent Sidecar processes
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::proxy_config;
@@ -232,7 +233,89 @@ fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) -> usi
 
 
 
-/// Single Sidecar instance
+// ============= Session-Centric Sidecar Architecture =============
+// Sidecar is a service process for Sessions, not for Tabs or CronTasks.
+// Multiple owners (Tabs, CronTasks) can share a Session's Sidecar.
+
+/// Owner of a Sidecar - can be a Tab or a CronTask
+/// When all owners release, the Sidecar is stopped.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SidecarOwner {
+    /// Tab ID that owns part of this Sidecar
+    Tab(String),
+    /// Cron Task ID that owns part of this Sidecar
+    CronTask(String),
+}
+
+/// Session-centric Sidecar instance
+/// Each Session has at most one Sidecar, shared by multiple owners.
+pub struct SessionSidecar {
+    /// The child process handle
+    pub process: Child,
+    /// Port this instance is running on
+    pub port: u16,
+    /// Session ID this Sidecar serves
+    pub session_id: String,
+    /// Workspace path for this session
+    pub workspace_path: PathBuf,
+    /// Whether the sidecar passed initial health check
+    pub healthy: bool,
+    /// Set of owners (Tabs and CronTasks) that are using this Sidecar
+    pub owners: HashSet<SidecarOwner>,
+    /// Creation timestamp
+    pub created_at: std::time::Instant,
+}
+
+impl SessionSidecar {
+    /// Check if the sidecar process is still running
+    pub fn is_running(&mut self) -> bool {
+        if !self.healthy {
+            return false;
+        }
+
+        match self.process.try_wait() {
+            Ok(Some(_)) => {
+                self.healthy = false;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => {
+                self.healthy = false;
+                false
+            }
+        }
+    }
+
+    /// Check if this Sidecar has any owners
+    pub fn has_owners(&self) -> bool {
+        !self.owners.is_empty()
+    }
+
+    /// Add an owner to this Sidecar
+    pub fn add_owner(&mut self, owner: SidecarOwner) {
+        self.owners.insert(owner);
+    }
+
+    /// Remove an owner from this Sidecar
+    /// Returns true if this was the last owner (Sidecar should be stopped)
+    pub fn remove_owner(&mut self, owner: &SidecarOwner) -> bool {
+        self.owners.remove(owner);
+        self.owners.is_empty()
+    }
+}
+
+/// Ensure Sidecar process is killed when SessionSidecar is dropped
+impl Drop for SessionSidecar {
+    fn drop(&mut self) {
+        log::info!(
+            "[sidecar] Drop: killing SessionSidecar for session {} on port {}",
+            self.session_id, self.port
+        );
+        let _ = kill_process(&mut self.process);
+    }
+}
+
+/// Single Sidecar instance (legacy - kept for backward compatibility)
 pub struct SidecarInstance {
     /// The child process handle
     pub process: Child,
@@ -315,12 +398,21 @@ pub struct SidecarInfo {
 /// Multi-instance Sidecar Manager
 /// Manages multiple Sidecar processes with Session singleton support
 ///
-/// Simplified Architecture (v0.1.10):
-/// - Each Tab has its own Sidecar process (1:1 relationship)
-/// - Cron tasks have dedicated Sidecar instances that can run in background
-/// - No workspace-level Sidecar sharing
+/// Architecture (v0.1.11 - Session-Centric):
+/// - Sessions own Sidecars (1:1 relationship between Session and Sidecar)
+/// - Multiple owners (Tabs, CronTasks) can share a Session's Sidecar
+/// - Sidecar only stops when all owners release
+///
+/// Legacy support (v0.1.10):
+/// - instances: per-Tab Sidecar instances (for backward compatibility)
+/// - cron_task_instances: dedicated cron task Sidecars (for backward compatibility)
 pub struct SidecarManager {
-    /// Tab ID -> Sidecar Instance
+    // ===== New Session-Centric Storage (v0.1.11) =====
+    /// Session ID -> SessionSidecar (primary storage for Session-centric model)
+    sidecars: HashMap<String, SessionSidecar>,
+
+    // ===== Legacy Storage (kept for backward compatibility) =====
+    /// Tab ID -> Sidecar Instance (legacy, will be deprecated)
     instances: HashMap<String, SidecarInstance>,
     /// Session ID -> Session Activation (tracks which session is active)
     session_activations: HashMap<String, SessionActivation>,
@@ -333,6 +425,7 @@ pub struct SidecarManager {
 impl SidecarManager {
     pub fn new() -> Self {
         Self {
+            sidecars: HashMap::new(),
             instances: HashMap::new(),
             session_activations: HashMap::new(),
             cron_task_instances: HashMap::new(),
@@ -397,13 +490,15 @@ impl SidecarManager {
         self.instances.iter()
     }
 
-    /// Stop all instances (including cron task instances)
+    /// Stop all instances (including cron task instances and session sidecars)
     pub fn stop_all(&mut self) {
         log::info!(
-            "[sidecar] Stopping all instances (tabs: {}, cron_tasks: {})",
+            "[sidecar] Stopping all instances (sessions: {}, tabs: {}, cron_tasks: {})",
+            self.sidecars.len(),
             self.instances.len(),
             self.cron_task_instances.len()
         );
+        self.sidecars.clear(); // New Session-centric storage
         self.instances.clear(); // Drop will kill each process
         self.cron_task_instances.clear();
         self.session_activations.clear();
@@ -561,6 +656,88 @@ impl SidecarManager {
     #[allow(dead_code)]
     pub fn has_cron_task_instance(&self, task_id: &str) -> bool {
         self.cron_task_instances.contains_key(task_id)
+    }
+
+    // ============= Session-Centric Sidecar API (v0.1.11) =============
+
+    /// Get the port for a Session's Sidecar
+    pub fn get_session_port(&self, session_id: &str) -> Option<u16> {
+        self.sidecars.get(session_id).map(|s| s.port)
+    }
+
+    /// Check if a Session has a healthy Sidecar
+    pub fn has_session_sidecar(&mut self, session_id: &str) -> bool {
+        if let Some(sidecar) = self.sidecars.get_mut(session_id) {
+            sidecar.is_running()
+        } else {
+            false
+        }
+    }
+
+    /// Get SessionSidecar reference by session ID
+    pub fn get_session_sidecar(&self, session_id: &str) -> Option<&SessionSidecar> {
+        self.sidecars.get(session_id)
+    }
+
+    /// Get mutable SessionSidecar reference by session ID
+    pub fn get_session_sidecar_mut(&mut self, session_id: &str) -> Option<&mut SessionSidecar> {
+        self.sidecars.get_mut(session_id)
+    }
+
+    /// Insert a new SessionSidecar
+    pub fn insert_session_sidecar(&mut self, session_id: String, sidecar: SessionSidecar) {
+        log::info!(
+            "[sidecar] Inserting SessionSidecar for session {} on port {}, owners: {:?}",
+            session_id, sidecar.port, sidecar.owners
+        );
+        self.sidecars.insert(session_id, sidecar);
+    }
+
+    /// Remove and return a SessionSidecar (will be dropped, killing the process)
+    pub fn remove_session_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
+        log::info!("[sidecar] Removing SessionSidecar for session {}", session_id);
+        self.sidecars.remove(session_id)
+    }
+
+    /// Add an owner to a Session's Sidecar
+    /// Returns true if owner was added, false if session doesn't exist
+    pub fn add_session_owner(&mut self, session_id: &str, owner: SidecarOwner) -> bool {
+        if let Some(sidecar) = self.sidecars.get_mut(session_id) {
+            log::info!(
+                "[sidecar] Adding owner {:?} to session {} (port {})",
+                owner, session_id, sidecar.port
+            );
+            sidecar.add_owner(owner);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove an owner from a Session's Sidecar
+    /// If this was the last owner, the Sidecar is removed (and killed via Drop)
+    /// Returns (was_removed, sidecar_was_stopped)
+    pub fn remove_session_owner(&mut self, session_id: &str, owner: &SidecarOwner) -> (bool, bool) {
+        let should_stop = if let Some(sidecar) = self.sidecars.get_mut(session_id) {
+            log::info!(
+                "[sidecar] Removing owner {:?} from session {} (port {})",
+                owner, session_id, sidecar.port
+            );
+            sidecar.remove_owner(owner) // Returns true if this was the last owner
+        } else {
+            return (false, false);
+        };
+
+        if should_stop {
+            log::info!(
+                "[sidecar] Last owner removed from session {}, stopping Sidecar",
+                session_id
+            );
+            self.sidecars.remove(session_id);
+            (true, true)
+        } else {
+            (true, false)
+        }
     }
 
     /// Get cron task Sidecar info
@@ -1390,6 +1567,290 @@ pub fn start_global_sidecar<R: Runtime>(
     manager: &ManagedSidecarManager,
 ) -> Result<u16, String> {
     start_tab_sidecar(app_handle, manager, GLOBAL_SIDECAR_ID, None)
+}
+
+// ============= Session-Centric Sidecar API (v0.1.11) =============
+
+/// Result returned from ensure_session_sidecar
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureSidecarResult {
+    pub port: u16,
+    pub is_new: bool,
+}
+
+/// Ensure a Session has a Sidecar running, adding the specified owner.
+/// If the Session already has a healthy Sidecar, just adds the owner.
+/// If no Sidecar exists, creates a new one with the owner.
+///
+/// Returns (port, is_new) where is_new is true if a new Sidecar was started.
+pub fn ensure_session_sidecar<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    workspace_path: &std::path::Path,
+    owner: SidecarOwner,
+) -> Result<EnsureSidecarResult, String> {
+    // Ensure file descriptor limit is high enough for Bun
+    ensure_high_file_descriptor_limit();
+
+    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+
+    // Check if Session already has a healthy Sidecar
+    if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+        if sidecar.is_running() {
+            // Sidecar exists and is healthy - just add owner
+            log::info!(
+                "[sidecar] Session {} already has Sidecar on port {}, adding owner {:?}",
+                session_id, sidecar.port, owner
+            );
+            sidecar.add_owner(owner);
+            return Ok(EnsureSidecarResult {
+                port: sidecar.port,
+                is_new: false,
+            });
+        } else {
+            // Sidecar exists but is unhealthy - remove it
+            log::info!(
+                "[sidecar] Session {} has unhealthy Sidecar, removing",
+                session_id
+            );
+            manager_guard.sidecars.remove(session_id);
+        }
+    }
+
+    // Need to start a new Sidecar
+    // First, find executables
+    let bun_path = find_bun_executable(app_handle)
+        .ok_or_else(|| "Bun executable not found".to_string())?;
+    let script_path = find_server_script(app_handle)
+        .ok_or_else(|| "Server script not found".to_string())?;
+
+    // Allocate port
+    let port = manager_guard.allocate_port()?;
+
+    log::info!(
+        "[sidecar] Starting SessionSidecar for session {} on port {}, owner: {:?}",
+        session_id, port, owner
+    );
+
+    // Build command
+    let mut cmd = Command::new(&bun_path);
+    cmd.arg(&script_path)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg(SIDECAR_MARKER)
+        .arg("--agent-dir")
+        .arg(workspace_path);
+
+    // Set working directory to script's parent directory
+    if let Some(script_dir) = script_path.parent() {
+        cmd.current_dir(script_dir);
+    }
+
+    // Inject proxy environment variables if configured
+    if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
+        match proxy_config::get_proxy_url(&proxy_settings) {
+            Ok(proxy_url) => {
+                log::info!("[sidecar] Injecting proxy for Claude Agent SDK: {}", proxy_url);
+                cmd.env("HTTP_PROXY", &proxy_url);
+                cmd.env("HTTPS_PROXY", &proxy_url);
+                cmd.env("http_proxy", &proxy_url);
+                cmd.env("https_proxy", &proxy_url);
+                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+            }
+            Err(e) => {
+                log::error!("[sidecar] Invalid proxy configuration: {}", e);
+            }
+        }
+    }
+
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    // Spawn
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("[sidecar] Failed to spawn SessionSidecar: {}", e);
+        format!("Failed to spawn sidecar: {}", e)
+    })?;
+
+    // Capture stdout/stderr for logging
+    let session_id_clone = session_id.to_string();
+    if let Some(stdout) = child.stdout.take() {
+        let session_id_for_log = session_id_clone.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                log::info!("[bun-out][session:{}] {}", session_id_for_log, line);
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let session_id_for_log = session_id_clone.clone();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                log::error!("[bun-err][session:{}] {}", session_id_for_log, line);
+            }
+        });
+    }
+
+    // Brief wait to check if process exits immediately
+    thread::sleep(Duration::from_millis(50));
+    if let Ok(Some(status)) = child.try_wait() {
+        thread::sleep(Duration::from_millis(100));
+        log::error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
+        return Err(format!("Sidecar process exited immediately with status: {:?}", status));
+    }
+
+    // Create SessionSidecar with owner
+    let mut owners = HashSet::new();
+    owners.insert(owner.clone());
+    let sidecar = SessionSidecar {
+        process: child,
+        port,
+        session_id: session_id.to_string(),
+        workspace_path: workspace_path.to_path_buf(),
+        healthy: false,
+        owners,
+        created_at: std::time::Instant::now(),
+    };
+
+    manager_guard.sidecars.insert(session_id.to_string(), sidecar);
+
+    // Drop lock before waiting for health
+    drop(manager_guard);
+
+    // Wait for health
+    match wait_for_health(port) {
+        Ok(()) => {
+            // Mark as healthy
+            let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+            if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                sidecar.healthy = true;
+            }
+            log::info!(
+                "[sidecar] SessionSidecar for session {} is healthy on port {}",
+                session_id, port
+            );
+            Ok(EnsureSidecarResult {
+                port,
+                is_new: true,
+            })
+        }
+        Err(e) => {
+            log::error!("[sidecar] SessionSidecar health check failed: {}", e);
+            // Remove the failed sidecar
+            let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
+            manager_guard.sidecars.remove(session_id);
+            Err(e)
+        }
+    }
+}
+
+/// Release an owner from a Session's Sidecar.
+/// If this was the last owner, the Sidecar is stopped.
+///
+/// Returns true if the Sidecar was stopped (no more owners).
+pub fn release_session_sidecar(
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    owner: &SidecarOwner,
+) -> Result<bool, String> {
+    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+
+    let (removed, stopped) = manager_guard.remove_session_owner(session_id, owner);
+
+    if removed {
+        if stopped {
+            log::info!(
+                "[sidecar] Released owner {:?} from session {}, Sidecar stopped (last owner)",
+                owner, session_id
+            );
+        } else {
+            log::info!(
+                "[sidecar] Released owner {:?} from session {}, Sidecar continues running",
+                owner, session_id
+            );
+        }
+        Ok(stopped)
+    } else {
+        log::debug!(
+            "[sidecar] Session {} has no Sidecar to release owner {:?} from",
+            session_id, owner
+        );
+        Ok(false)
+    }
+}
+
+/// Get the port for a Session's Sidecar
+pub fn get_session_sidecar_port(
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+) -> Result<Option<u16>, String> {
+    let manager_guard = manager.lock().map_err(|e| e.to_string())?;
+    Ok(manager_guard.get_session_port(session_id))
+}
+
+// ============= Session-Centric Tauri Commands =============
+
+/// Ensure a Session has a Sidecar running, adding the specified owner
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_ensure_session_sidecar(
+    app_handle: AppHandle,
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+    workspacePath: String,
+    ownerType: String,
+    ownerId: String,
+) -> Result<EnsureSidecarResult, String> {
+    let owner = match ownerType.as_str() {
+        "tab" => SidecarOwner::Tab(ownerId),
+        "cron_task" => SidecarOwner::CronTask(ownerId),
+        _ => return Err(format!("Invalid owner type: {}", ownerType)),
+    };
+
+    let workspace_path = PathBuf::from(&workspacePath);
+    ensure_session_sidecar(&app_handle, &state, &sessionId, &workspace_path, owner)
+}
+
+/// Release an owner from a Session's Sidecar
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_release_session_sidecar(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+    ownerType: String,
+    ownerId: String,
+) -> Result<bool, String> {
+    let owner = match ownerType.as_str() {
+        "tab" => SidecarOwner::Tab(ownerId),
+        "cron_task" => SidecarOwner::CronTask(ownerId),
+        _ => return Err(format!("Invalid owner type: {}", ownerType)),
+    };
+
+    release_session_sidecar(&state, &sessionId, &owner)
+}
+
+/// Get the port for a Session's Sidecar
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_get_session_port(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> Result<Option<u16>, String> {
+    get_session_sidecar_port(&state, &sessionId)
 }
 
 /// Stop all sidecar instances and clean up child processes

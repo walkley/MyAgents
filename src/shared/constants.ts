@@ -52,6 +52,7 @@ export const CUSTOM_EVENTS = {
     OPEN_SETTINGS: 'open-settings',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
-    /** Fired when a cron task is stopped and Tab needs to switch back to normal Sidecar */
-    CRON_TASK_STOPPED: 'cron-task-stopped',
+    // Note: CRON_TASK_STOPPED event removed
+    // With Session-centric Sidecar (Owner model), stopping a cron task only releases
+    // the CronTask owner. If Tab still owns the Sidecar, it continues running.
 } as const;

@@ -26,7 +26,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, stopTabSidecar, isTauri, getSessionActivation } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
 import {
     notifyMessageComplete,
@@ -91,8 +91,8 @@ interface TabProviderProps {
     isActive?: boolean;
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
-    /** If provided, use this port instead of looking up from Rust (for cron task Sidecar) */
-    sidecarPort?: number;
+    // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
+    // Port is dynamically retrieved via getSessionPort(sessionId)
 }
 
 /**
@@ -108,22 +108,30 @@ async function handleApiResponse<T>(response: Response): Promise<T> {
 
 /**
  * Get the base URL for a Tab's Sidecar
+ * With Session-centric Sidecar (Owner model), we first try to get the port from sessionId,
+ * then fall back to tabId lookup for legacy compatibility.
  * @param tabId - Tab identifier
- * @param fixedPort - If provided, use this port instead of looking up from Rust
+ * @param sessionId - Session identifier (optional, for Session-centric lookup)
  */
-async function getBaseUrl(tabId: string, fixedPort?: number): Promise<string> {
-    if (fixedPort !== undefined) {
-        return `http://127.0.0.1:${fixedPort}`;
+async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<string> {
+    // Session-centric: try to get port from sessionId first
+    if (sessionId) {
+        const port = await getSessionPort(sessionId);
+        if (port !== null) {
+            return `http://127.0.0.1:${port}`;
+        }
     }
+    // Fallback to Tab-based lookup (legacy compatibility)
     return getTabServerUrl(tabId);
 }
 
 /**
  * Create a Tab-scoped POST function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createPostJson(tabId: string, fixedPort?: number) {
+function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, fixedPort);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
@@ -136,10 +144,11 @@ function createPostJson(tabId: string, fixedPort?: number) {
 
 /**
  * Create a Tab-scoped GET function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiGetJson(tabId: string, fixedPort?: number) {
+function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, fixedPort);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url);
         return handleApiResponse<T>(response);
@@ -148,10 +157,11 @@ function createApiGetJson(tabId: string, fixedPort?: number) {
 
 /**
  * Create a Tab-scoped PUT function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiPutJson(tabId: string, fixedPort?: number) {
+function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, fixedPort);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
@@ -164,10 +174,11 @@ function createApiPutJson(tabId: string, fixedPort?: number) {
 
 /**
  * Create a Tab-scoped DELETE function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiDelete(tabId: string, fixedPort?: number) {
+function createApiDelete(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, fixedPort);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, { method: 'DELETE' });
         return handleApiResponse<T>(response);
@@ -181,21 +192,21 @@ export default function TabProvider({
     sessionId = null,
     isActive,
     onGeneratingChange,
-    sidecarPort,
 }: TabProviderProps) {
-    // Create Tab-scoped API functions
-    // If sidecarPort is provided (e.g., connected to cron task Sidecar), use it directly
-    const postJson = useMemo(() => createPostJson(tabId, sidecarPort), [tabId, sidecarPort]);
-    const apiGetJson = useMemo(() => createApiGetJson(tabId, sidecarPort), [tabId, sidecarPort]);
-    const apiPutJson = useMemo(() => createApiPutJson(tabId, sidecarPort), [tabId, sidecarPort]);
-    const apiDeleteJson = useMemo(() => createApiDelete(tabId, sidecarPort), [tabId, sidecarPort]);
-
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
     const [currentSessionId, setCurrentSessionId] = useState<string | null>(sessionId);
-    // Ref to track currentSessionId in SSE event handlers (avoid stale closure)
+    // Ref to track currentSessionId in SSE event handlers and API functions (avoid stale closure)
     const currentSessionIdRef = useRef<string | null>(currentSessionId);
     currentSessionIdRef.current = currentSessionId;
+
+    // Create Tab-scoped API functions
+    // Uses Session-centric port lookup via currentSessionIdRef
+    const postJson = useMemo(() => createPostJson(tabId, currentSessionIdRef), [tabId]);
+    const apiGetJson = useMemo(() => createApiGetJson(tabId, currentSessionIdRef), [tabId]);
+    const apiPutJson = useMemo(() => createApiPutJson(tabId, currentSessionIdRef), [tabId]);
+    const apiDeleteJson = useMemo(() => createApiDelete(tabId, currentSessionIdRef), [tabId]);
+
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
@@ -1021,11 +1032,11 @@ export default function TabProvider({
     }, [appendLog, appendUnifiedLog, tabId, markIncompleteBlocksAsFinished]);
 
     // Connect SSE
-    // If sidecarPort is provided (e.g., connected to cron task Sidecar), use it directly
+    // Uses Session-centric port lookup via currentSessionIdRef
     const connectSse = useCallback(async () => {
         if (sseRef.current?.isConnected()) return;
 
-        const sse = createSseConnection(tabId, sidecarPort);
+        const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
         sseRef.current = sse;
 
@@ -1038,7 +1049,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] SSE connect failed:`, error);
             throw error;
         }
-    }, [tabId, sidecarPort, handleSseEvent]);
+    }, [tabId, handleSseEvent]);
 
     // Disconnect SSE
     const disconnectSse = useCallback(() => {
@@ -1067,30 +1078,10 @@ export default function TabProvider({
         };
     }, [tabId]);
 
-    // Track previous sidecarPort to detect changes
-    const prevSidecarPortRef = useRef<number | undefined>(sidecarPort);
-
-    // Reconnect SSE when sidecarPort changes (e.g., switching from Cron Sidecar to Tab Sidecar)
-    useEffect(() => {
-        const prevPort = prevSidecarPortRef.current;
-        prevSidecarPortRef.current = sidecarPort;
-
-        // Skip on initial mount or if port didn't actually change
-        if (prevPort === undefined && sidecarPort === undefined) return;
-        if (prevPort === sidecarPort) return;
-
-        console.log(`[TabProvider ${tabId}] sidecarPort changed: ${prevPort} -> ${sidecarPort}, reconnecting SSE`);
-
-        // Disconnect existing SSE connection
-        if (sseRef.current) {
-            void sseRef.current.disconnect();
-            sseRef.current = null;
-            setIsConnected(false);
-        }
-
-        // Reconnect with new port (connectSse will use the new sidecarPort via closure)
-        void connectSse();
-    }, [sidecarPort, tabId, connectSse]);
+    // Note: sidecarPort change effect removed
+    // With Session-centric Sidecar (Owner model), the port is dynamically looked up via
+    // getSessionPort(sessionId) on each API call. SSE reconnection is no longer needed
+    // when stopping cron tasks because the Sidecar continues running if Tab still owns it.
 
     // Send message with optional images, permission mode, and model
     const sendMessage = useCallback(async (

@@ -13,10 +13,11 @@
  * - Uses native EventSource with full multiple connection support
  */
 
+import type React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import { getTabServerUrl } from './tauriClient';
+import { getTabServerUrl, getSessionPort } from './tauriClient';
 import { isTauriEnvironment } from '../utils/browserMock';
 
 // Event types that should be parsed as JSON
@@ -89,7 +90,7 @@ export class SseConnection {
     private eventHandler: SseEventHandler | null = null;
     private statusHandler: SseConnectionStatusHandler | null = null;
     private connectionId: string;
-    private fixedPort?: number; // If provided, use this port instead of looking up from Rust
+    private sessionIdRef?: React.MutableRefObject<string | null>; // For Session-centric port lookup
 
     // Reconnection state
     private reconnectAttempts = 0;
@@ -97,9 +98,9 @@ export class SseConnection {
     private isReconnecting = false;
     private shouldReconnect = true; // Set to false when intentionally disconnecting
 
-    constructor(connectionId: string, fixedPort?: number) {
+    constructor(connectionId: string, sessionIdRef?: React.MutableRefObject<string | null>) {
         this.connectionId = connectionId;
-        this.fixedPort = fixedPort;
+        this.sessionIdRef = sessionIdRef;
     }
 
     /**
@@ -452,12 +453,18 @@ export class SseConnection {
 
     /**
      * Get the server URL for this connection
-     * If fixedPort is set, use it directly; otherwise lookup from Rust
+     * Session-centric: first try to get port from sessionId, then fallback to tabId lookup
      */
     private async getServerUrl(): Promise<string> {
-        if (this.fixedPort !== undefined) {
-            return `http://127.0.0.1:${this.fixedPort}`;
+        // Session-centric: try to get port from sessionId first
+        const sessionId = this.sessionIdRef?.current;
+        if (sessionId) {
+            const port = await getSessionPort(sessionId);
+            if (port !== null) {
+                return `http://127.0.0.1:${port}`;
+            }
         }
+        // Fallback to Tab-based lookup (legacy compatibility)
         return getTabServerUrl(this.connectionId);
     }
 }
@@ -465,8 +472,8 @@ export class SseConnection {
 /**
  * Create a new SSE connection instance
  * @param connectionId - Tab ID for this connection
- * @param fixedPort - If provided, use this port instead of looking up from Rust (for cron task Sidecar)
+ * @param sessionIdRef - Ref to current sessionId for Session-centric port lookup
  */
-export function createSseConnection(connectionId: string, fixedPort?: number): SseConnection {
-    return new SseConnection(connectionId, fixedPort);
+export function createSseConnection(connectionId: string, sessionIdRef?: React.MutableRefObject<string | null>): SseConnection {
+    return new SseConnection(connectionId, sessionIdRef);
 }

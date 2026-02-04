@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { startTabSidecar, stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, connectTabToCronSidecar, deactivateSession } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -234,44 +234,28 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
-    // Deactivate session when Tab closes (unless cron task keeps it active)
-    // This ensures Session singleton constraint is maintained
+    // Release Tab's ownership of the Session Sidecar
+    // If CronTask also owns it, Sidecar continues running
+    // If Tab was the only owner, Sidecar stops automatically
     if (tab.sessionId) {
       try {
-        const cronTask = await getTabCronTask(tabId);
-        if (cronTask && cronTask.status === 'running') {
-          // Cron task is active - update session activation to remove tab_id but keep task_id
-          console.log(`[App] Tab ${tabId} closing with active cron task ${cronTask.id}, updating session activation`);
-          await updateSessionTab(tab.sessionId, undefined);
-        } else {
-          // No active cron task - fully deactivate session
-          console.log(`[App] Tab ${tabId} closing, deactivating session ${tab.sessionId}`);
-          await deactivateSession(tab.sessionId);
-        }
-      } catch (error) {
-        console.error(`[App] Error deactivating session for tab ${tabId}:`, error);
-      }
-    }
+        // Release Tab's ownership of the Sidecar
+        const stopped = await releaseSessionSidecar(tab.sessionId, 'tab', tabId);
+        console.log(`[App] Tab ${tabId} released session ${tab.sessionId}, sidecar stopped: ${stopped}`);
 
-    // Check if this Tab has an active cron task
-    // If so, don't stop the Sidecar - let it run in background for scheduled executions
-    if (tab.agentDir) {
-      try {
+        // Update cron task tab association if exists
         const cronTask = await getTabCronTask(tabId);
         if (cronTask && cronTask.status === 'running') {
-          // Cron task is active - keep Sidecar running but clear tab association
-          console.log(`[App] Tab ${tabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
-          await updateCronTaskTab(cronTask.id, undefined); // Clear tabId association
-          // Don't stop Sidecar
-        } else {
-          // No active cron task - stop Sidecar as usual
-          void stopTabSidecar(tabId);
+          await updateCronTaskTab(cronTask.id, undefined);
         }
       } catch (error) {
-        console.error(`[App] Error checking cron task for tab ${tabId}:`, error);
-        // On error, stop Sidecar to be safe
+        console.error(`[App] Error releasing session sidecar for tab ${tabId}:`, error);
+        // Fallback to legacy stopTabSidecar
         void stopTabSidecar(tabId);
       }
+    } else if (tab.agentDir) {
+      // No sessionId but has agentDir - legacy case, use stopTabSidecar
+      void stopTabSidecar(tabId);
     }
 
     // Special case: If this is the last tab, replace with launcher (don't close the app)
@@ -394,12 +378,13 @@ export default function App() {
 
       // ========================================
       // Scenario 2: Session has running cron task (no Tab)
+      // Using Session-centric API: add Tab as owner to existing Sidecar
       // ========================================
       if (sessionId) {
         const activation = await getSessionActivation(sessionId);
         console.log(`[App] Scenario 2 check: sessionId=${sessionId}, activation=`, activation);
         if (activation && activation.task_id) {
-          // Session is activated by a cron task - connect Tab to its Sidecar
+          // Session is activated by a cron task - add Tab as owner to its Sidecar
           console.log(`[App] Scenario 2: Session ${sessionId} has cron task ${activation.task_id} on port ${activation.port}`);
 
           // Determine target Tab (may need new Tab if current has cron task)
@@ -418,14 +403,15 @@ export default function App() {
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
           }
 
-          // Connect Tab to cron task Sidecar
-          const port = await connectTabToCronSidecar(targetTabId, activation.task_id);
-          console.log(`[App] Tab ${targetTabId} connected to cron Sidecar on port ${port}`);
+          // Add Tab as owner to the Session's Sidecar (cron task already owns it)
+          // This uses ensureSessionSidecar which will add Tab as owner without creating new Sidecar
+          const result = await ensureSessionSidecar(sessionId, project.path, 'tab', targetTabId);
+          console.log(`[App] Tab ${targetTabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
 
           // Update session activation to include this Tab
           await updateSessionTab(sessionId, targetTabId);
 
-          // Update tab state
+          // Update tab state (no cronTaskId/sidecarPort - managed by Owner model)
           setTabs((prev) =>
             prev.map((t) =>
               t.id === targetTabId
@@ -435,8 +421,6 @@ export default function App() {
                   sessionId: sessionId,
                   view: 'chat',
                   title: getFolderName(project.path),
-                  cronTaskId: activation.task_id ?? undefined, // Mark Tab as connected to cron task
-                  sidecarPort: port, // Store the port for SSE connection
                 }
                 : t
             )
@@ -472,14 +456,24 @@ export default function App() {
 
       // ========================================
       // Scenario 4: Normal switch (or Scenario 3 continuation)
+      // Using Session-centric API: Tab becomes owner of Session's Sidecar
       // ========================================
       console.log(`[App] Scenario 4: Normal launch - tab ${targetTabId}, project: ${project.path}, sessionId: ${sessionId}`);
 
-      // Start a Tab-specific Sidecar instance
-      const status = await startTabSidecar(targetTabId, project.path);
-      console.log('[App] Tab sidecar started:', status);
+      // For new sessions (no sessionId), generate a temporary session ID
+      // The actual session ID will be created by the backend when the session starts
+      const effectiveSessionId = sessionId ?? `pending-${targetTabId}`;
 
-      // Update tab state
+      // Ensure Sidecar is running for this Session, Tab as owner
+      const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
+      console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
+
+      // Activate session with Tab (for Session singleton tracking)
+      if (sessionId) {
+        await activateSession(sessionId, targetTabId, null, result.port, project.path, false);
+      }
+
+      // Update tab state (no cronTaskId/sidecarPort - managed by Owner model)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === targetTabId
@@ -489,8 +483,6 @@ export default function App() {
               sessionId: sessionId ?? null,
               view: 'chat',
               title: getFolderName(project.path),
-              cronTaskId: undefined, // Clear any previous cron task association
-              sidecarPort: undefined, // Clear any previous port
             }
             : t
         )
@@ -538,7 +530,7 @@ export default function App() {
       return;
     }
 
-    // Scenario 2: Session has running cron task (no Tab) → Connect to Cron Sidecar
+    // Scenario 2: Session has running cron task (no Tab) → Add Tab as owner to existing Sidecar
     const activation = await getSessionActivation(sessionId);
     if (activation && activation.task_id) {
       console.log(`[App] handleSwitchSession Scenario 2: Session ${sessionId} has cron task ${activation.task_id}`);
@@ -550,9 +542,10 @@ export default function App() {
         return;
       }
 
-      // Connect Tab to cron task Sidecar
+      // Add Tab as owner to the Session's Sidecar (cron task already owns it)
       try {
-        const port = await connectTabToCronSidecar(tabId, activation.task_id);
+        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+        console.log(`[App] Tab ${tabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
         await updateSessionTab(sessionId, tabId);
 
         setTabs((prev) =>
@@ -561,14 +554,12 @@ export default function App() {
               ? {
                 ...t,
                 sessionId,
-                cronTaskId: activation.task_id ?? undefined,
-                sidecarPort: port,
               }
               : t
           )
         );
       } catch (error) {
-        console.error('[App] Failed to connect to cron Sidecar:', error);
+        console.error('[App] Failed to add Tab as owner to Sidecar:', error);
       }
       return;
     }
@@ -597,8 +588,9 @@ export default function App() {
       setLoadingTabs((prev) => ({ ...prev, [newTab.id]: true }));
 
       try {
-        // Start new Sidecar for new tab
-        await startTabSidecar(newTab.id, currentTab.agentDir);
+        // Ensure Sidecar for new Tab as owner of this Session
+        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', newTab.id);
+        console.log(`[App] New tab ${newTab.id} Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
         // Update new tab state
         setTabs((prev) =>
@@ -619,7 +611,7 @@ export default function App() {
         setActiveTabId(newTab.id);
         console.log(`[App] handleSwitchSession Scenario 3: Created new tab ${newTab.id} for session ${sessionId}`);
       } catch (error) {
-        console.error('[App] Failed to start Sidecar for new tab:', error);
+        console.error('[App] Failed to ensure Sidecar for new tab:', error);
         // Remove the failed tab
         setTabs((prev) => prev.filter(t => t.id !== newTab.id));
       } finally {
@@ -645,32 +637,26 @@ export default function App() {
     // Get current tab to access sessionId
     const currentTab = tabs.find(t => t.id === activeTabId);
 
-    // Check if this Tab has an active cron task before stopping Sidecar
-    try {
-      const cronTask = await getTabCronTask(activeTabId);
-      if (cronTask && cronTask.status === 'running') {
-        // Cron task is active - keep Sidecar running but clear tab association
-        console.log(`[App] Tab ${activeTabId} has active cron task ${cronTask.id}, keeping Sidecar alive`);
-        await updateCronTaskTab(cronTask.id, undefined);
-        // Update session activation to remove tab_id but keep task_id
-        if (currentTab?.sessionId) {
+    // Release Tab's ownership of the Session Sidecar
+    // If CronTask also owns it, Sidecar continues running (Owner model handles this)
+    if (currentTab?.sessionId) {
+      try {
+        // Check if this Tab has an active cron task to update associations
+        const cronTask = await getTabCronTask(activeTabId);
+        if (cronTask && cronTask.status === 'running') {
+          // Clear tab association in cron task
+          await updateCronTaskTab(cronTask.id, undefined);
+          // Update session activation to remove tab_id but keep task_id
           await updateSessionTab(currentTab.sessionId, undefined);
         }
-        // Don't stop Sidecar
-      } else {
-        // No active cron task - stop Sidecar and deactivate session
+
+        // Release Tab's ownership - Sidecar stops only if no other owners
+        const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', activeTabId);
+        console.log(`[App] Tab ${activeTabId} released session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
+      } catch (error) {
+        console.error(`[App] Error releasing session sidecar for tab ${activeTabId}:`, error);
+        // Fallback to legacy stopTabSidecar
         void stopTabSidecar(activeTabId);
-        if (currentTab?.sessionId) {
-          await deactivateSession(currentTab.sessionId);
-        }
-      }
-    } catch (error) {
-      console.error(`[App] Error checking cron task for tab ${activeTabId}:`, error);
-      // On error, stop Sidecar to be safe
-      void stopTabSidecar(activeTabId);
-      // Still try to deactivate session
-      if (currentTab?.sessionId) {
-        await deactivateSession(currentTab.sessionId).catch(() => {});
       }
     }
 
@@ -787,36 +773,10 @@ export default function App() {
     };
   }, [tabs]);
 
-  // Listen for CRON_TASK_STOPPED event (switch Tab back to normal Sidecar)
-  useEffect(() => {
-    const handleCronTaskStopped = (event: CustomEvent<{ tabId: string; agentDir: string }>) => {
-      const { tabId, agentDir } = event.detail;
-      console.log(`[App] Cron task stopped for tab ${tabId}, switching to normal Sidecar`);
-
-      // Use void to handle async operation without making handler async
-      void (async () => {
-        try {
-          // 1. Start a new Tab Sidecar (this will replace any existing one)
-          await startTabSidecar(tabId, agentDir);
-          console.log(`[App] Started normal Tab Sidecar for tab ${tabId}`);
-
-          // 2. Clear Tab's cron state (sidecarPort and cronTaskId)
-          // This triggers TabProvider recreation with new sidecarPort=undefined
-          setTabs(prev => prev.map(t =>
-            t.id === tabId
-              ? { ...t, sidecarPort: undefined, cronTaskId: undefined }
-              : t
-          ));
-        } catch (error) {
-          console.error(`[App] Failed to switch tab ${tabId} to normal Sidecar:`, error);
-        }
-      })();
-    };
-    window.addEventListener(CUSTOM_EVENTS.CRON_TASK_STOPPED, handleCronTaskStopped as EventListener);
-    return () => {
-      window.removeEventListener(CUSTOM_EVENTS.CRON_TASK_STOPPED, handleCronTaskStopped as EventListener);
-    };
-  }, []);
+  // Note: CRON_TASK_STOPPED event listener removed
+  // With Session-centric Sidecar (Owner model), stopping a cron task only releases
+  // the CronTask owner. If Tab still owns the Sidecar, it continues running.
+  // No SSE reconnection or Sidecar restart is needed.
 
   // System tray event handling (minimize to tray, exit confirmation)
   useTrayEvents({
@@ -898,7 +858,6 @@ export default function App() {
                   sessionId={tab.sessionId}
                   isActive={isActive}
                   onGeneratingChange={(isGenerating) => updateTabGenerating(tab.id, isGenerating)}
-                  sidecarPort={tab.sidecarPort}
                 >
                   <Chat
                     onBack={handleBackToLauncher}

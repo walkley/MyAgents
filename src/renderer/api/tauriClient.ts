@@ -837,6 +837,105 @@ export async function connectTabToCronSidecar(tabId: string, taskId: string): Pr
     }
 }
 
+// ============= Session-Centric Sidecar API (v0.1.11) =============
+// These functions support the new Owner model where Sidecar lifecycle
+// is tied to Sessions, not Tabs or CronTasks.
+
+/** Result from ensureSessionSidecar */
+export interface EnsureSidecarResult {
+    port: number;
+    isNew: boolean;
+}
+
+/**
+ * Ensure a Session has a Sidecar running, adding the specified owner.
+ * If the Session already has a healthy Sidecar, just adds the owner.
+ * If no Sidecar exists, creates a new one with the owner.
+ *
+ * @param sessionId - Session identifier
+ * @param workspacePath - Workspace directory path
+ * @param ownerType - Type of owner ('tab' | 'cron_task')
+ * @param ownerId - ID of the owner (Tab ID or CronTask ID)
+ * @returns {port, isNew} where isNew is true if a new Sidecar was started
+ */
+export async function ensureSessionSidecar(
+    sessionId: string,
+    workspacePath: string,
+    ownerType: 'tab' | 'cron_task',
+    ownerId: string
+): Promise<EnsureSidecarResult> {
+    if (!isTauri()) {
+        return { port: 3000, isNew: false };
+    }
+
+    try {
+        const result = await invoke<EnsureSidecarResult>('cmd_ensure_session_sidecar', {
+            sessionId,
+            workspacePath,
+            ownerType,
+            ownerId,
+        });
+        console.debug(`[tauriClient] ensureSessionSidecar: session=${sessionId}, owner=${ownerType}:${ownerId}, port=${result.port}, isNew=${result.isNew}`);
+        return result;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to ensure session sidecar for ${sessionId}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Release an owner from a Session's Sidecar.
+ * If this was the last owner, the Sidecar is stopped.
+ *
+ * @param sessionId - Session identifier
+ * @param ownerType - Type of owner ('tab' | 'cron_task')
+ * @param ownerId - ID of the owner (Tab ID or CronTask ID)
+ * @returns true if the Sidecar was stopped (no more owners)
+ */
+export async function releaseSessionSidecar(
+    sessionId: string,
+    ownerType: 'tab' | 'cron_task',
+    ownerId: string
+): Promise<boolean> {
+    if (!isTauri()) {
+        return false;
+    }
+
+    try {
+        const stopped = await invoke<boolean>('cmd_release_session_sidecar', {
+            sessionId,
+            ownerType,
+            ownerId,
+        });
+        console.debug(`[tauriClient] releaseSessionSidecar: session=${sessionId}, owner=${ownerType}:${ownerId}, stopped=${stopped}`);
+        return stopped;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to release session sidecar for ${sessionId}:`, error);
+        // Don't throw - release should be best-effort
+        return false;
+    }
+}
+
+/**
+ * Get the port for a Session's Sidecar
+ *
+ * @param sessionId - Session identifier
+ * @returns Port number if Session has a Sidecar, null otherwise
+ */
+export async function getSessionPort(sessionId: string): Promise<number | null> {
+    if (!isTauri()) {
+        return 3000;
+    }
+
+    try {
+        const port = await invoke<number | null>('cmd_get_session_port', { sessionId });
+        return port;
+    } catch (error) {
+        console.warn(`[tauriClient] Failed to get session port for ${sessionId}:`, error);
+        return null;
+    }
+}
+
 /**
  * Execute a cron task synchronously via Sidecar
  * This is the full execution that waits for completion and returns results

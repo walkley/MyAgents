@@ -755,11 +755,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               if (originalPrompt) {
                 chatInputRef.current?.setValue(originalPrompt);
               }
-              // Notify App.tsx to switch Tab back to normal Sidecar
-              // This clears sidecarPort and cronTaskId, triggering TabProvider recreation
-              window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.CRON_TASK_STOPPED, {
-                detail: { tabId, agentDir }
-              }));
+              // Note: CRON_TASK_STOPPED event no longer needed
+              // With Session-centric Sidecar (Owner model), stopping a cron task only releases
+              // the CronTask owner. If Tab still owns the Sidecar, it continues running.
+              // No SSE reconnection or Sidecar restart is needed.
             }}
             onInputChange={(text) => setCronPrompt(text)}
           />
