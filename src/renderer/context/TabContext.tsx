@@ -88,7 +88,7 @@ export interface TabContextValue extends TabState {
     disconnectSse: () => void;
 
     // Chat actions
-    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }) => Promise<boolean>;
+    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }, isCron?: boolean) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
     loadSession: (sessionId: string) => Promise<boolean>;
     resetSession: () => Promise<boolean>;

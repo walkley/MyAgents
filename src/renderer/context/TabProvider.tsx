@@ -1105,7 +1105,8 @@ export default function TabProvider({
         images?: ImageAttachment[],
         permissionMode?: PermissionMode,
         model?: string,
-        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }
+        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' },
+        isCron?: boolean
     ): Promise<boolean> => {
         const trimmed = text.trim();
         if (!trimmed && (!images || images.length === 0)) return false;
@@ -1156,6 +1157,7 @@ export default function TabProvider({
                     skill,
                     has_image: hasImages,
                     has_file: false,
+                    is_cron: isCron ?? false,
                 });
             }
 

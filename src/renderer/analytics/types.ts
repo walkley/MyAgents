@@ -62,6 +62,7 @@ export interface MessageSendParams {
   skill?: string | null;  // 技能/指令名称
   has_image: boolean;     // 是否含图片
   has_file: boolean;      // 是否含文件
+  is_cron: boolean;       // 是否为心跳循环任务发送
 }
 
 /**

@@ -140,7 +140,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
         apiKey: apiKeys[currentProvider.id],
         authType: currentProvider.authType,
       } : undefined;
-      await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv);
+      await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
     },
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
