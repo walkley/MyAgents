@@ -862,6 +862,13 @@ export default function TabProvider({
                 const payload = data as { info: SystemInitInfo; sessionId?: string } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
+
+                    // CRITICAL: Mark session as active immediately when system-init arrives
+                    // This happens BEFORE message-chunk, so we must set isStreamingRef here
+                    // to prevent loadSession from aborting an active cron task during sessionId upgrade
+                    isStreamingRef.current = true;
+                    setIsLoading(true);
+
                     // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
                     // This ensures currentSessionId stays in sync with the actual session
                     // Use our sessionId (for SessionStore matching) not SDK's session_id
