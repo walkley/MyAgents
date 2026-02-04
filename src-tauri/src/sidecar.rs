@@ -412,12 +412,10 @@ pub struct SidecarManager {
     sidecars: HashMap<String, SessionSidecar>,
 
     // ===== Legacy Storage (kept for backward compatibility) =====
-    /// Tab ID -> Sidecar Instance (legacy, will be deprecated)
+    /// Tab ID -> Sidecar Instance (legacy, used for Global Sidecar)
     instances: HashMap<String, SidecarInstance>,
-    /// Session ID -> Session Activation (tracks which session is active)
+    /// Session ID -> Session Activation (tracks which session is active for Session singleton)
     session_activations: HashMap<String, SessionActivation>,
-    /// Cron Task ID -> Sidecar Instance (for background cron task execution)
-    cron_task_instances: HashMap<String, SidecarInstance>,
     /// Port counter for allocation (starts from BASE_PORT)
     port_counter: AtomicU16,
 }
@@ -428,7 +426,6 @@ impl SidecarManager {
             sidecars: HashMap::new(),
             instances: HashMap::new(),
             session_activations: HashMap::new(),
-            cron_task_instances: HashMap::new(),
             port_counter: AtomicU16::new(BASE_PORT),
         }
     }
@@ -490,17 +487,15 @@ impl SidecarManager {
         self.instances.iter()
     }
 
-    /// Stop all instances (including cron task instances and session sidecars)
+    /// Stop all instances (session sidecars and global sidecar)
     pub fn stop_all(&mut self) {
         log::info!(
-            "[sidecar] Stopping all instances (sessions: {}, tabs: {}, cron_tasks: {})",
+            "[sidecar] Stopping all instances (sessions: {}, global: {})",
             self.sidecars.len(),
-            self.instances.len(),
-            self.cron_task_instances.len()
+            self.instances.len()
         );
-        self.sidecars.clear(); // New Session-centric storage
-        self.instances.clear(); // Drop will kill each process
-        self.cron_task_instances.clear();
+        self.sidecars.clear(); // Session-centric Sidecars (Drop kills processes)
+        self.instances.clear(); // Global Sidecar (Drop kills process)
         self.session_activations.clear();
     }
 
@@ -567,95 +562,6 @@ impl SidecarManager {
             .values()
             .filter(|a| a.workspace_path == workspace_path)
             .collect()
-    }
-
-    // ============= Cron Task Sidecar Management =============
-
-    /// Insert a cron task Sidecar instance
-    pub fn insert_cron_task_instance(&mut self, task_id: String, instance: SidecarInstance) {
-        log::info!(
-            "[sidecar] Inserting cron task {} instance on port {}",
-            task_id, instance.port
-        );
-        self.cron_task_instances.insert(task_id, instance);
-    }
-
-    /// Get a cron task Sidecar instance
-    #[allow(dead_code)]
-    pub fn get_cron_task_instance(&self, task_id: &str) -> Option<&SidecarInstance> {
-        self.cron_task_instances.get(task_id)
-    }
-
-    /// Get a mutable cron task Sidecar instance
-    #[allow(dead_code)]
-    pub fn get_cron_task_instance_mut(&mut self, task_id: &str) -> Option<&mut SidecarInstance> {
-        self.cron_task_instances.get_mut(task_id)
-    }
-
-    /// Remove a cron task Sidecar instance (will be dropped, killing the process)
-    pub fn remove_cron_task_instance(&mut self, task_id: &str) -> Option<SidecarInstance> {
-        log::info!("[sidecar] Removing cron task {} instance", task_id);
-        self.cron_task_instances.remove(task_id)
-    }
-
-    /// Stop an orphaned Tab sidecar that was being used by a cron task
-    /// This is called when a cron task stops and was using a Tab sidecar (not a dedicated cron sidecar)
-    /// The sidecar is only stopped if no Tab or other cron task is still using it
-    pub fn stop_orphaned_tab_sidecar_for_cron(&mut self, task_id: &str) -> bool {
-        // Find the session activation for this task to get the port
-        let port_and_tab = {
-            let activation = self.session_activations.values()
-                .find(|a| a.task_id.as_deref() == Some(task_id));
-
-            match activation {
-                Some(a) => (a.port, a.tab_id.clone()),
-                None => {
-                    log::debug!(
-                        "[sidecar] No session activation found for task {} (may use dedicated cron sidecar)",
-                        task_id
-                    );
-                    return false;
-                }
-            }
-        };
-
-        let (port, tab_id) = port_and_tab;
-
-        // If the session activation has a tab_id, the Tab is still using the sidecar - don't stop it
-        if tab_id.is_some() {
-            log::debug!(
-                "[sidecar] Sidecar on port {} is still used by Tab {:?}, not stopping",
-                port, tab_id
-            );
-            return false;
-        }
-
-        // Find and remove the Tab sidecar instance with this port
-        let tab_to_remove: Option<String> = self.instances.iter()
-            .find(|(_, instance)| instance.port == port)
-            .map(|(id, _)| id.clone());
-
-        if let Some(tab_id) = tab_to_remove {
-            if let Some(_instance) = self.instances.remove(&tab_id) {
-                log::info!(
-                    "[sidecar] Stopped orphaned Tab sidecar (tab={}) for cron task {} on port {}",
-                    tab_id, task_id, port
-                );
-                return true;
-            }
-        }
-
-        log::debug!(
-            "[sidecar] No orphaned sidecar found on port {} for cron task {}",
-            port, task_id
-        );
-        false
-    }
-
-    /// Check if a cron task has a running Sidecar
-    #[allow(dead_code)]
-    pub fn has_cron_task_instance(&self, task_id: &str) -> bool {
-        self.cron_task_instances.contains_key(task_id)
     }
 
     // ============= Session-Centric Sidecar API (v0.1.11) =============
@@ -740,47 +646,6 @@ impl SidecarManager {
         }
     }
 
-    /// Get cron task Sidecar info
-    /// This checks both dedicated cron sidecars AND Tab sidecars that are being reused for cron tasks
-    pub fn get_cron_task_sidecar_info(&mut self, task_id: &str) -> Option<SidecarInfo> {
-        // Priority 1: Check dedicated cron task sidecars
-        if let Some(instance) = self.cron_task_instances.get_mut(task_id) {
-            return Some(SidecarInfo {
-                port: instance.port,
-                workspace_path: instance.agent_dir.as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                is_healthy: instance.is_running(),
-            });
-        }
-
-        // Priority 2: Check if there's a session activation with this task_id
-        // This handles the case where a Tab sidecar is being reused for cron task
-        let activation = self.session_activations.values()
-            .find(|a| a.task_id.as_deref() == Some(task_id))?;
-
-        let port = activation.port;
-        let workspace_path = activation.workspace_path.clone();
-
-        // Find the Tab sidecar instance to check health
-        // The sidecar could be in instances (Tab sidecar) with any tab_id
-        for instance in self.instances.values_mut() {
-            if instance.port == port {
-                return Some(SidecarInfo {
-                    port,
-                    workspace_path,
-                    is_healthy: instance.is_running(),
-                });
-            }
-        }
-
-        // Sidecar was in session_activations but not in instances - might have been stopped
-        log::warn!(
-            "[sidecar] Session activation found for task {} on port {} but no running instance",
-            task_id, port
-        );
-        None
-    }
 }
 
 impl Default for SidecarManager {
@@ -1356,35 +1221,36 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
 
 /// Get the server URL for a specific Tab
 /// This function checks multiple sources:
-/// 1. Direct Tab sidecar instances (normal case)
-/// 2. Session activations where this Tab is connected to a cron task's sidecar
+/// 1. Direct Tab sidecar instances (Global Sidecar)
+/// 2. Session-centric sidecars via session_activations
+/// 3. Legacy instances for backward compatibility
 pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Result<String, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
-    // Priority 1: Check direct Tab sidecar instances
+    // Priority 1: Check direct Tab sidecar instances (Global Sidecar)
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         if instance.is_running() {
             return Ok(format!("http://127.0.0.1:{}", instance.port));
         }
     }
 
-    // Priority 2: Check if this Tab is connected to a cron task's sidecar via session_activations
-    // This handles the case where Tab opened a cron task session (connectTabToCronSidecar)
-    let activation_port = manager_guard.session_activations.values()
+    // Priority 2: Check session_activations to find the Session-centric sidecar
+    let activation_session = manager_guard.session_activations.values()
         .find(|a| a.tab_id.as_deref() == Some(tab_id))
-        .map(|a| a.port);
+        .map(|a| (a.session_id.clone(), a.port));
 
-    if let Some(port) = activation_port {
-        // Verify the sidecar is still healthy by checking cron_task_instances or instances
-        let is_healthy = manager_guard.cron_task_instances.values_mut()
-            .any(|i| i.port == port && i.is_running())
+    if let Some((session_id, port)) = activation_session {
+        // Verify the sidecar is still healthy in Session-centric storage
+        let is_healthy = manager_guard.sidecars.get_mut(&session_id)
+            .map(|s| s.is_running())
+            .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
 
         if is_healthy {
             log::info!(
-                "[sidecar] Tab {} using cron sidecar on port {} (via session_activation)",
-                tab_id, port
+                "[sidecar] Tab {} using session {} sidecar on port {} (via session_activation)",
+                tab_id, session_id, port
             );
             return Ok(format!("http://127.0.0.1:{}", port));
         }
@@ -1398,7 +1264,7 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
 pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> Result<SidecarStatus, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
-    // Priority 1: Check direct Tab sidecar instances
+    // Priority 1: Check direct Tab sidecar instances (Global Sidecar)
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         return Ok(SidecarStatus {
             running: instance.is_running(),
@@ -1409,15 +1275,16 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
         });
     }
 
-    // Priority 2: Check if this Tab is connected to a cron task's sidecar via session_activations
+    // Priority 2: Check session_activations for Session-centric sidecar
     let activation_info = manager_guard.session_activations.values()
         .find(|a| a.tab_id.as_deref() == Some(tab_id))
-        .map(|a| (a.port, a.workspace_path.clone()));
+        .map(|a| (a.session_id.clone(), a.port, a.workspace_path.clone()));
 
-    if let Some((port, workspace_path)) = activation_info {
-        // Check if the sidecar is healthy
-        let is_running = manager_guard.cron_task_instances.values_mut()
-            .any(|i| i.port == port && i.is_running())
+    if let Some((session_id, port, workspace_path)) = activation_info {
+        // Check if the sidecar is healthy in Session-centric storage
+        let is_running = manager_guard.sidecars.get_mut(&session_id)
+            .map(|s| s.is_running())
+            .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
 
@@ -1434,131 +1301,6 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
         port: 0,
         agent_dir: String::new(),
     })
-}
-
-/// Start a headless Sidecar for cron task execution
-/// Returns the port of the Sidecar (either existing or newly started)
-///
-/// Priority order:
-/// 1. Use existing cron task sidecar (if healthy)
-/// 2. Use existing Tab sidecar for the same workspace (if exists and healthy)
-/// 3. Create a new cron-specific sidecar
-pub fn start_cron_sidecar<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    manager: &ManagedSidecarManager,
-    workspace_path: &str,
-    task_id: &str,
-) -> Result<u16, String> {
-    log::info!(
-        "[sidecar] Starting cron sidecar for task {} in workspace {}",
-        task_id, workspace_path
-    );
-
-    // Emit debug event
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": task_id,
-        "message": "start_cron_sidecar: checking for existing sidecars"
-    }));
-
-    {
-        let mut manager_guard = manager.lock().map_err(|e| {
-            let _ = app_handle.emit("cron:debug", serde_json::json!({
-                "taskId": task_id,
-                "message": format!("start_cron_sidecar: mutex lock FAILED: {}", e),
-                "error": true
-            }));
-            e.to_string()
-        })?;
-
-        // Priority 1: Check if this cron task already has a Sidecar
-        if let Some(info) = manager_guard.get_cron_task_sidecar_info(task_id) {
-            if info.is_healthy {
-                log::info!(
-                    "[sidecar] Reusing existing cron Sidecar for task {} (port {})",
-                    task_id, info.port
-                );
-                let _ = app_handle.emit("cron:debug", serde_json::json!({
-                    "taskId": task_id,
-                    "message": format!("start_cron_sidecar: reusing existing cron sidecar on port {}", info.port)
-                }));
-                return Ok(info.port);
-            } else {
-                log::info!(
-                    "[sidecar] Removing unhealthy cron Sidecar for task {}",
-                    task_id
-                );
-                manager_guard.remove_cron_task_instance(task_id);
-            }
-        }
-
-        // Priority 2: Check if there's an existing Tab sidecar for the same workspace
-        // This is more efficient and the Tab sidecar is already fully initialized
-        let normalized_workspace = workspace_path.trim_end_matches(['/', '\\']);
-        for (tab_id, instance) in manager_guard.iter_instances() {
-            // Skip cron-specific sidecars (they start with __cron_)
-            if tab_id.starts_with("__cron_") {
-                continue;
-            }
-
-            // Check if this instance is for the same workspace
-            if let Some(ref agent_dir) = instance.agent_dir {
-                let instance_workspace = agent_dir.to_string_lossy();
-                let normalized_instance = instance_workspace.trim_end_matches(['/', '\\']);
-
-                if normalized_instance == normalized_workspace {
-                    // Found a Tab sidecar for the same workspace - use it
-                    let port = instance.port;
-                    log::info!(
-                        "[sidecar] Reusing Tab Sidecar {} for cron task {} (port {})",
-                        tab_id, task_id, port
-                    );
-                    let _ = app_handle.emit("cron:debug", serde_json::json!({
-                        "taskId": task_id,
-                        "message": format!("start_cron_sidecar: reusing Tab sidecar (tab={}) on port {}", tab_id, port)
-                    }));
-                    return Ok(port);
-                }
-            }
-        }
-    }
-
-    // Priority 3: No existing sidecar found, create a new one
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": task_id,
-        "message": "start_cron_sidecar: no existing sidecar found, starting new one"
-    }));
-
-    // Use a special tab ID format for cron tasks
-    let cron_tab_id = format!("__cron_{}__", task_id);
-    let agent_dir = PathBuf::from(workspace_path);
-    let port = start_tab_sidecar(app_handle, manager, &cron_tab_id, Some(agent_dir))
-        .map_err(|e| {
-            let _ = app_handle.emit("cron:debug", serde_json::json!({
-                "taskId": task_id,
-                "message": format!("start_cron_sidecar: start_tab_sidecar FAILED: {}", e),
-                "error": true
-            }));
-            e
-        })?;
-
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": task_id,
-        "message": format!("start_cron_sidecar: new sidecar started on port {}", port)
-    }));
-
-    // Move the instance from regular instances to cron_task_instances
-    {
-        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
-        if let Some(instance) = manager_guard.remove_instance(&cron_tab_id) {
-            manager_guard.insert_cron_task_instance(task_id.to_string(), instance);
-            log::info!(
-                "[sidecar] Moved cron task Sidecar for task {} to cron_task_instances (port {})",
-                task_id, port
-            );
-        }
-    }
-
-    Ok(port)
 }
 
 /// Start the global sidecar (for Settings page)
@@ -2132,47 +1874,6 @@ pub fn cmd_update_session_tab(
     Ok(())
 }
 
-/// Start a headless Sidecar for cron task execution
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_start_cron_sidecar(
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, ManagedSidecarManager>,
-    workspacePath: String,
-    taskId: String,
-) -> Result<u16, String> {
-    start_cron_sidecar(&app_handle, &state, &workspacePath, &taskId)
-}
-
-/// Connect a Tab to an existing cron task Sidecar
-/// Returns the port number of the Sidecar for the Tab to establish SSE connection
-/// The Tab will share the Sidecar with the cron task (no new Sidecar created)
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn cmd_connect_tab_to_cron_sidecar(
-    state: tauri::State<'_, ManagedSidecarManager>,
-    tabId: String,
-    taskId: String,
-) -> Result<u16, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-
-    // Get the cron task's Sidecar info
-    let info = manager.get_cron_task_sidecar_info(&taskId)
-        .ok_or_else(|| format!("No Sidecar found for cron task {}", taskId))?;
-
-    if !info.is_healthy {
-        return Err(format!("Sidecar for cron task {} is not healthy", taskId));
-    }
-
-    let port = info.port;
-    log::info!(
-        "[sidecar] Tab {} connecting to cron task {} Sidecar on port {}",
-        tabId, taskId, port
-    );
-
-    Ok(port)
-}
-
 /// Cron task execution payload - sent to Sidecar's /cron/execute-sync endpoint
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2220,7 +1921,7 @@ pub struct CronExecuteResponse {
 }
 
 /// Execute a cron task synchronously via Sidecar HTTP API
-/// This function starts/reuses a Sidecar for the workspace and calls its /cron/execute-sync endpoint
+/// This function ensures a Sidecar is running for the session and calls its /cron/execute-sync endpoint
 pub async fn execute_cron_task<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
@@ -2232,46 +1933,51 @@ pub async fn execute_cron_task<R: Runtime>(
         payload.task_id, workspace_path
     );
 
+    // Require session_id for Session-centric Sidecar
+    let session_id = payload.session_id.clone().ok_or_else(|| {
+        let err = format!("[sidecar] execute_cron_task requires session_id for task {}", payload.task_id);
+        log::error!("{}", err);
+        err
+    })?;
+
     // Emit debug event
     let _ = app_handle.emit("cron:debug", serde_json::json!({
         "taskId": payload.task_id,
-        "message": "execute_cron_task: about to call start_cron_sidecar"
+        "message": "execute_cron_task: about to call ensure_session_sidecar"
     }));
 
-    // Start or reuse Sidecar for this workspace
-    let port = start_cron_sidecar(app_handle, manager, workspace_path, &payload.task_id)
+    // Ensure Sidecar is running for this session with CronTask as owner
+    let workspace = PathBuf::from(workspace_path);
+    let owner = SidecarOwner::CronTask(payload.task_id.clone());
+    let result = ensure_session_sidecar(app_handle, manager, &session_id, &workspace, owner)
         .map_err(|e| {
-            log::error!("[sidecar] start_cron_sidecar failed for task {}: {}", payload.task_id, e);
+            log::error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
             let _ = app_handle.emit("cron:debug", serde_json::json!({
                 "taskId": payload.task_id,
-                "message": format!("execute_cron_task: start_cron_sidecar FAILED: {}", e),
+                "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
                 "error": true
             }));
             e
         })?;
 
+    let port = result.port;
+
     // Emit debug event
     let _ = app_handle.emit("cron:debug", serde_json::json!({
         "taskId": payload.task_id,
-        "message": format!("execute_cron_task: sidecar ready on port {}", port)
+        "message": format!("execute_cron_task: sidecar ready on port {}, isNew={}", port, result.is_new)
     }));
 
     log::info!(
-        "[sidecar] Cron sidecar ready for task {} on port {}",
-        payload.task_id, port
+        "[sidecar] Cron sidecar ready for task {} on port {} (isNew={})",
+        payload.task_id, port, result.is_new
     );
 
-    // Debug: confirm we reached this point
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": payload.task_id,
-        "message": format!("execute_cron_task: CHECKPOINT after sidecar ready, session_id={:?}", payload.session_id.is_some())
-    }));
-
-    // Activate session as cron task (prevents Sidecar from being killed if Tab closes)
-    if let Some(ref session_id) = payload.session_id {
+    // Also record in session_activations for Session singleton tracking
+    {
         let _ = app_handle.emit("cron:debug", serde_json::json!({
             "taskId": payload.task_id,
-            "message": "execute_cron_task: about to lock mutex for session activation"
+            "message": "execute_cron_task: recording session activation"
         }));
 
         let mut manager_guard = manager.lock().map_err(|e| {
@@ -2282,11 +1988,6 @@ pub async fn execute_cron_task<R: Runtime>(
             }));
             e.to_string()
         })?;
-
-        let _ = app_handle.emit("cron:debug", serde_json::json!({
-            "taskId": payload.task_id,
-            "message": "execute_cron_task: got mutex lock, activating session"
-        }));
 
         manager_guard.activate_session(
             session_id.clone(),
@@ -2299,7 +2000,7 @@ pub async fn execute_cron_task<R: Runtime>(
 
         let _ = app_handle.emit("cron:debug", serde_json::json!({
             "taskId": payload.task_id,
-            "message": "execute_cron_task: session activated"
+            "message": "execute_cron_task: session activation recorded"
         }));
 
         log::info!(

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::sidecar::{
     execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
-    SidecarOwner, ensure_session_sidecar, release_session_sidecar, EnsureSidecarResult,
+    SidecarOwner, ensure_session_sidecar, release_session_sidecar,
 };
 
 /// Normalize a path for comparison (removes trailing slashes)

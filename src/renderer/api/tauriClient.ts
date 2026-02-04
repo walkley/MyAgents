@@ -788,55 +788,6 @@ export async function updateSessionTab(sessionId: string, newTabId: string | nul
 }
 
 
-/**
- * Start a headless Sidecar for cron task execution
- * @param workspacePath - Workspace directory path
- * @param taskId - Cron task identifier
- * @returns Port number of the Sidecar
- */
-export async function startCronSidecar(workspacePath: string, taskId: string): Promise<number> {
-    if (!isTauri()) {
-        return 3000;
-    }
-
-    try {
-        const port = await invoke<number>('cmd_start_cron_sidecar', {
-            workspacePath,
-            taskId,
-        });
-        console.debug(`[tauriClient] Cron sidecar started for task ${taskId} on port ${port}`);
-        return port;
-    } catch (error) {
-        console.error(`[tauriClient] Failed to start cron sidecar for task ${taskId}:`, error);
-        throw error;
-    }
-}
-
-/**
- * Connect a Tab to an existing cron task Sidecar
- * Used when opening a session that has a running cron task
- * @param tabId - Tab identifier
- * @param taskId - Cron task identifier
- * @returns Port number of the Sidecar
- */
-export async function connectTabToCronSidecar(tabId: string, taskId: string): Promise<number> {
-    if (!isTauri()) {
-        return 3000;
-    }
-
-    try {
-        const port = await invoke<number>('cmd_connect_tab_to_cron_sidecar', {
-            tabId,
-            taskId,
-        });
-        console.debug(`[tauriClient] Tab ${tabId} connected to cron task ${taskId} Sidecar on port ${port}`);
-        return port;
-    } catch (error) {
-        console.error(`[tauriClient] Failed to connect tab ${tabId} to cron sidecar ${taskId}:`, error);
-        throw error;
-    }
-}
-
 // ============= Session-Centric Sidecar API (v0.1.11) =============
 // These functions support the new Owner model where Sidecar lifecycle
 // is tied to Sessions, not Tabs or CronTasks.

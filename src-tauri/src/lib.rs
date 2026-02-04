@@ -12,9 +12,9 @@ mod updater;
 
 use sidecar::{
     cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
-    // Session activation commands (legacy)
+    // Session activation commands (for Session singleton tracking)
     cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
-    cmd_update_session_tab, cmd_start_cron_sidecar, cmd_connect_tab_to_cron_sidecar,
+    cmd_update_session_tab,
     // Cron task execution command
     cmd_execute_cron_task,
     // Session-centric Sidecar API (v0.1.11)
@@ -115,8 +115,6 @@ pub fn run() {
             cmd_activate_session,
             cmd_deactivate_session,
             cmd_update_session_tab,
-            cmd_start_cron_sidecar,
-            cmd_connect_tab_to_cron_sidecar,
             // Cron task execution (Rust -> Sidecar direct call)
             cmd_execute_cron_task,
             // Session-centric Sidecar API (v0.1.11)
