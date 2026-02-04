@@ -81,10 +81,10 @@ function formatDateForInput(date: Date): string {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-/** Helper to get default deadline (current time + 1 hour) */
+/** Helper to get default deadline (current time + 24 hours) */
 function getDefaultDeadline(): string {
   const date = new Date();
-  date.setHours(date.getHours() + 1);
+  date.setHours(date.getHours() + 24);
   return formatDateForInput(date);
 }
 
@@ -347,7 +347,7 @@ function CronTaskSettingsForm({
                     : 'border-[var(--line)] bg-[var(--paper-contrast)] text-[var(--ink)] hover:border-[var(--line-strong)]'
                 }`}
               >
-                条件结束
+                条件循环
               </button>
               <button
                 type="button"
@@ -433,6 +433,8 @@ function CronTaskSettingsForm({
                       允许 AI 自主结束任务
                     </span>
                   </div>
+                  {/* Placeholder to maintain consistent row height */}
+                  <div className="w-16 h-[26px]" />
                 </div>
               </div>
             )}
@@ -449,7 +451,7 @@ function CronTaskSettingsForm({
             <div className="flex items-center gap-2">
               <Bell className="h-4 w-4 text-[var(--ink-secondary)]" />
               <label className="text-sm text-[var(--ink)]">
-                执行完成时发送通知
+                每次执行完即发送通知
               </label>
             </div>
             <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />

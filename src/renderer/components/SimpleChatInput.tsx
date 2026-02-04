@@ -1243,7 +1243,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowPlusMenu(!showPlusMenu);
                   }}
                   className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="添加"
+                  title="添加上下文"
                 >
                   <Plus className="h-4 w-4" />
                 </button>
@@ -1311,25 +1311,6 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                 )}
               </div>
 
-              {/* Cron Task Button */}
-              {onCronButtonClick && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onCronButtonClick();
-                  }}
-                  className={`rounded-lg p-2 transition-colors ${
-                    cronModeEnabled
-                      ? 'bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50'
-                      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
-                  }`}
-                  title={cronModeEnabled ? '心跳循环已启用' : '设置心跳循环'}
-                >
-                  <HeartPulse className="h-4 w-4" />
-                </button>
-              )}
-
               {/* Hidden file input */}
               <input
                 ref={fileInputRef}
@@ -1352,7 +1333,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowToolMenu(false);
                   }}
                   className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="切换模式"
+                  title="切换执行模式"
                 >
                   <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.icon}</span>
                   <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.label}</span>
@@ -1417,7 +1398,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowPlusMenu(false);
                   }}
                   className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="工具"
+                  title="使用工具"
                 >
                   <Wrench className="h-3.5 w-3.5" />
                   <span>工具</span>
@@ -1490,6 +1471,26 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   </div>
                 )}
               </div>
+
+              {/* Heartbeat Loop Button */}
+              {onCronButtonClick && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCronButtonClick();
+                  }}
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                    cronModeEnabled
+                      ? 'bg-[var(--accent)]/15 text-[var(--accent)] hover:bg-[var(--accent)]/25'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                  }`}
+                  title={cronModeEnabled ? '心跳循环已启用' : '开启心跳循环'}
+                >
+                  <HeartPulse className="h-3.5 w-3.5" />
+                  <span>心跳</span>
+                </button>
+              )}
             </div>
 
             {/* Right side - model selector + send/stop button */}
