@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -259,7 +259,11 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
-    // Release Tab's ownership of the Session Sidecar
+    // Step 1: Stop SSE proxy FIRST to avoid EOF errors when Sidecar stops
+    // This gracefully disconnects the SSE stream before killing the Sidecar process
+    await stopSseProxy(tabId);
+
+    // Step 2: Release Tab's ownership of the Session Sidecar
     // If CronTask also owns it, Sidecar continues running
     // If Tab was the only owner, Sidecar stops automatically
     if (tab.sessionId) {
@@ -728,7 +732,10 @@ export default function App() {
     // Get current tab to access sessionId
     const currentTab = tabs.find(t => t.id === activeTabId);
 
-    // Release Tab's ownership of the Session Sidecar
+    // Step 1: Stop SSE proxy FIRST to avoid EOF errors when Sidecar stops
+    await stopSseProxy(activeTabId);
+
+    // Step 2: Release Tab's ownership of the Session Sidecar
     // If CronTask also owns it, Sidecar continues running (Owner model handles this)
     if (currentTab?.sessionId) {
       try {

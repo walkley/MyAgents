@@ -463,6 +463,25 @@ export async function stopTabSidecar(tabId: string): Promise<void> {
 }
 
 /**
+ * Stop SSE proxy for a specific Tab
+ * Should be called BEFORE stopping the Sidecar to avoid EOF errors
+ * @param tabId - Tab identifier
+ */
+export async function stopSseProxy(tabId: string): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('stop_sse_proxy', { tabId });
+        console.debug(`[tauriClient] Tab ${tabId} SSE proxy stopped`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to stop SSE proxy for tab ${tabId}:`, error);
+        // Don't throw - cleanup should be best-effort
+    }
+}
+
+/**
  * Get server URL for a specific Tab
  * @param tabId - Tab identifier
  */
