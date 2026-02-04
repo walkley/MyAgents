@@ -1,87 +1,22 @@
-# Session 单例与 Sidecar 复用机制 - 技术架构设计
+# Session 单例与 Sidecar 复用机制 - 技术架构文档
 
 > **版本**: 0.1.10
-> **状态**: 设计中
+> **状态**: ✅ 已实现
 > **作者**: Claude (Code Review)
-> **日期**: 2026-02-03
+> **更新日期**: 2026-02-04
 
-## 一、问题分析
+## 一、核心概念
 
-### 1.1 当前架构
+### 1.1 产品定义
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Tauri Desktop App                         │
-├──────────────────────────────────────────────────────────────┤
-│                        React Frontend                        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │   Tab 1     │  │   Tab 2     │  │   Tab 3     │          │
-│  │ session_123 │  │ session_456 │  │ session_123 │ ← 重复！  │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
-│         │                │                │                  │
-├─────────┼────────────────┼────────────────┼──────────────────┤
-│         ▼                ▼                ▼     Rust Layer   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │ Sidecar A   │  │ Sidecar B   │  │ Sidecar C   │ ← 3个实例 │
-│  │ :31415      │  │ :31416      │  │ :31417      │          │
-│  └─────────────┘  └─────────────┘  └─────────────┘          │
-└─────────────────────────────────────────────────────────────┘
-```
+| 概念 | 定义 | 说明 |
+|------|------|------|
+| **Sidecar = Agent 实例** | 一个 Sidecar 进程 = 一个 Claude Agent SDK 实例 | Sidecar 是运行 AI 对话的后端进程 |
+| **Session:Sidecar = 1:1** | 每个 Session 最多有一个 Sidecar | 严格对应，即使同工作区不同 Session 也需独立 Sidecar |
+| **后端优先，前端辅助** | Sidecar 可独立运行 | 定时任务场景下无需前端 Tab |
+| **Owner 模型** | Tab 和 CronTask 是 Sidecar 的"使用者" | 不是"拥有者"，Sidecar 服务于 Session |
 
-**问题**: Tab 1 和 Tab 3 都加载了 session_123，创建了两个独立的 Sidecar，导致：
-- 状态不一致（两个 Sidecar 各自持有不同的消息历史）
-- 资源浪费（重复进程）
-- 定时任务执行混乱
-
-### 1.2 当前代码结构
-
-#### sidecar.rs
-```rust
-pub struct SidecarManager {
-    /// Tab ID -> Sidecar Instance
-    instances: HashMap<String, SidecarInstance>,  // 问题：按 Tab ID 管理
-    port_counter: AtomicU16,
-}
-```
-
-#### App.tsx - handleLaunchProject
-```typescript
-const handleLaunchProject = useCallback(async (project, _provider, sessionId) => {
-    // 问题：直接启动新 Sidecar，没有检查 Session 是否已激活
-    const status = await startTabSidecar(activeTabId, project.path);
-    // ...
-});
-```
-
-#### cron_task.rs - Scheduler
-```rust
-// 问题：通过 Tauri 事件触发，依赖前端接收
-if let Err(e) = handle.emit("cron:trigger-execution", payload) {
-    log::error!("[CronTask] Failed to emit trigger event");
-}
-```
-
-### 1.3 需要解决的场景
-
-| 场景 | 当前行为 | 期望行为 |
-|------|---------|---------|
-| 打开已在其他 Tab 打开的 Session | 创建新 Sidecar | 跳转到已有 Tab |
-| 打开定时任务正在使用的 Session | 创建新 Sidecar | 连接到已有 Sidecar，新建 Tab |
-| 定时任务恢复（应用重启） | 依赖前端事件 | Rust 直接调用 Sidecar |
-| Tab 关闭 | 停止 Sidecar | 保留定时任务 Sidecar |
-
----
-
-## 二、目标架构
-
-### 2.1 核心原则
-
-1. **Sidecar 是工作区级别的** - 一个工作区最多一个 Sidecar（保持不变）
-2. **Session 激活状态是单例的** - 同一 Session 只能被一个 Sidecar 激活
-3. **Tab 是 Sidecar 的视图** - Tab 可以连接/断开 Sidecar，但不拥有 Sidecar 生命周期
-4. **Sidecar 可独立运行** - 定时任务场景下无需前端 Tab
-
-### 2.2 新架构图
+### 1.2 架构图
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -89,7 +24,7 @@ if let Err(e) = handle.emit("cron:trigger-execution", payload) {
 ├──────────────────────────────────────────────────────────────┤
 │                        React Frontend                        │
 │  ┌─────────────┐  ┌─────────────┐                           │
-│  │   Tab 1     │  │   Tab 2     │     ← 视图层              │
+│  │   Tab 1     │  │   Tab 2     │     ← 视图层 (可选)       │
 │  │ session_123 │  │ session_456 │                           │
 │  └──────┬──────┘  └──────┬──────┘                           │
 │         │                │                                   │
@@ -97,522 +32,359 @@ if let Err(e) = handle.emit("cron:trigger-execution", payload) {
 │         │                │              Rust Layer           │
 │         │                │                                   │
 │   ┌─────┴────────────────┴─────┐   ┌─────────────────────┐  │
-│   │     SidecarManager         │   │  SessionActivations │  │
-│   │  (按工作区管理 Sidecar)     │   │  (Session 单例追踪)  │  │
-│   └─────┬────────────────┬─────┘   └─────────────────────┘  │
+│   │     SidecarManager         │   │  session_activations │  │
+│   │  sidecars HashMap          │   │  (Session 激活追踪)  │  │
+│   │  Key = Session ID          │   └─────────────────────┘  │
+│   └─────┬────────────────┬─────┘                            │
 │         │                │                                   │
 │         ▼                ▼                                   │
-│  ┌─────────────┐  ┌─────────────┐                           │
-│  │ Sidecar A   │  │ Sidecar B   │     ← Sidecar 层          │
-│  │ Workspace1  │  │ Workspace2  │     (无 Tab 也可运行)     │
-│  │ :31415      │  │ :31416      │                           │
-│  └─────────────┘  └─────────────┘                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │ Sidecar A   │  │ Sidecar B   │  │ Sidecar C   │         │
+│  │ session_123 │  │ session_456 │  │ session_789 │         │
+│  │ Owner: Tab1 │  │ Owner: Tab2 │  │ Owner: Cron │ ← 无 Tab │
+│  │ :31415      │  │ :31416      │  │ :31417      │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 2.3 新增数据结构
+---
+
+## 二、数据结构
+
+### 2.1 Rust 层 (`src-tauri/src/sidecar.rs`)
 
 ```rust
-// sidecar.rs
+/// Sidecar 使用者类型
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SidecarOwner {
+    /// Tab ID
+    Tab(String),
+    /// Cron Task ID
+    CronTask(String),
+}
+
+/// Session 级别的 Sidecar 实例
+pub struct SessionSidecar {
+    /// Bun 子进程句柄
+    pub process: Child,
+    /// 运行端口
+    pub port: u16,
+    /// 服务的 Session ID
+    pub session_id: String,
+    /// 工作区路径
+    pub workspace_path: PathBuf,
+    /// 健康状态
+    pub healthy: bool,
+    /// 所有使用者（Tab + CronTask）
+    pub owners: HashSet<SidecarOwner>,
+    /// 创建时间
+    pub created_at: std::time::Instant,
+}
 
 /// Session 激活记录
-/// 追踪哪个 Session 被哪个 Sidecar 激活
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionActivation {
-    /// Session ID
     pub session_id: String,
-    /// 关联的 Tab ID (None 表示无头运行，如定时任务)
     pub tab_id: Option<String>,
-    /// Sidecar 端口
+    pub task_id: Option<String>,
     pub port: u16,
-    /// 工作区路径
     pub workspace_path: String,
-    /// 是否是定时任务
     pub is_cron_task: bool,
 }
 
-/// Sidecar 运行模式
-#[derive(Debug, Clone)]
-pub enum SidecarMode {
-    /// 前端 Tab 驱动
-    Tab { tab_id: String },
-    /// 无头运行（定时任务）
-    Headless { task_id: String },
-}
-
+/// 多实例 Sidecar 管理器
 pub struct SidecarManager {
-    /// 工作区路径 -> Sidecar Instance (改为按工作区管理)
-    instances: HashMap<String, SidecarInstance>,
+    /// Session ID -> SessionSidecar (主存储)
+    sidecars: HashMap<String, SessionSidecar>,
 
-    /// Session ID -> Session Activation (新增)
+    /// Session ID -> SessionActivation (激活状态追踪)
     session_activations: HashMap<String, SessionActivation>,
 
-    /// Tab ID -> 工作区路径 (映射 Tab 到工作区)
-    tab_workspace_map: HashMap<String, String>,
+    /// Tab ID -> SidecarInstance (遗留，仅 Global Sidecar 使用)
+    instances: HashMap<String, SidecarInstance>,
 
+    /// 端口计数器
     port_counter: AtomicU16,
 }
 ```
 
+### 2.2 核心 IPC 命令
+
+| 命令 | 签名 | 说明 |
+|------|------|------|
+| `cmd_ensure_session_sidecar` | `(session_id, workspace, owner_type, owner_id) -> Result<SidecarResult>` | 确保 Session 有 Sidecar |
+| `cmd_release_session_sidecar` | `(session_id, owner_type, owner_id) -> Result<bool>` | 释放 Owner 使用权 |
+| `cmd_get_session_port` | `(session_id) -> Option<u16>` | 获取 Sidecar 端口 |
+| `cmd_get_session_activation` | `(session_id) -> Option<SessionActivation>` | 查询激活状态 |
+| `cmd_activate_session` | `(session_id, tab_id, task_id, port, workspace, is_cron)` | 激活 Session |
+| `cmd_deactivate_session` | `(session_id)` | 取消激活 |
+| `cmd_upgrade_session_id` | `(old_session_id, new_session_id) -> bool` | 升级 Session ID |
+
 ---
 
-## 三、详细设计
+## 三、Session 切换场景
 
-### 3.1 Rust 层 API 变更
+### 3.1 场景矩阵
 
-#### 3.1.1 新增命令
+| 场景 | 条件 | 行为 | 结果 |
+|------|------|------|------|
+| **场景 1** | 新 Tab + 新 Session | 创建新 Sidecar | 新 Tab 独占新 Sidecar |
+| **场景 2** | 新 Tab + 其他 Tab 的 Session | 跳转到已有 Tab | 不创建新 Sidecar |
+| **场景 3** | 同 Tab 切换到定时任务 Session | 连接已有 CronTask Sidecar | Tab 成为共享 Owner |
+| **场景 4** | 同 Tab 切换到无人使用的 Session | Handover（资源复用）| HashMap key 更新 |
 
-```rust
-/// 查询 Session 激活状态
-#[tauri::command]
-pub fn cmd_get_session_activation(session_id: String) -> Option<SessionActivation>;
+### 3.2 场景 4 详解：Handover 机制
 
-/// 激活 Session（关联到 Sidecar）
-#[tauri::command]
-pub fn cmd_activate_session(
-    session_id: String,
-    tab_id: Option<String>,
-    port: u16,
-    workspace_path: String,
-    is_cron_task: bool,
-) -> Result<(), String>;
+当用户在同一 Tab 内切换到一个**无人使用的历史 Session** 时，采用 Handover 机制复用 Sidecar：
 
-/// 取消激活 Session
-#[tauri::command]
-pub fn cmd_deactivate_session(session_id: String) -> Result<(), String>;
-
-/// 查询工作区是否有运行中的 Sidecar
-#[tauri::command]
-pub fn cmd_get_workspace_sidecar(workspace_path: String) -> Option<SidecarInfo>;
-
-/// 为定时任务启动无头 Sidecar
-#[tauri::command]
-pub async fn cmd_start_cron_sidecar(
-    workspace_path: String,
-    session_id: String,
-    task_id: String,
-) -> Result<u16, String>;
-
-/// 直接在 Sidecar 上执行定时任务（Rust HTTP 调用）
-#[tauri::command]
-pub async fn cmd_execute_cron_task_on_sidecar(task_id: String) -> Result<(), String>;
+```
+┌───────────────────────────────────────────────────────┐
+│ 场景 4: 同 Tab 切换 Session (Handover)                │
+├───────────────────────────────────────────────────────┤
+│                                                       │
+│  Before:                                              │
+│  ┌─────────────┐                                      │
+│  │   Tab 1     │                                      │
+│  │ session_A   │──────► sidecars["session_A"]         │
+│  └─────────────┘        └── Owner: Tab(tab1)          │
+│                                                       │
+│  Action: 用户选择历史 session_B                        │
+│                                                       │
+│  After:                                               │
+│  ┌─────────────┐                                      │
+│  │   Tab 1     │                                      │
+│  │ session_B   │──────► sidecars["session_B"]         │
+│  └─────────────┘        └── Owner: Tab(tab1)          │
+│                                                       │
+│  操作步骤:                                             │
+│  1. upgradeSessionId("session_A", "session_B")        │
+│     - HashMap key 从 session_A 改为 session_B         │
+│     - Sidecar 进程不重启                              │
+│  2. deactivateSession("session_A")                    │
+│  3. activateSession("session_B", tab1, port, ...)     │
+│  4. POST /chat/switch-session 通知后端切换            │
+│                                                       │
+│  资源复用: Sidecar 进程复用，无需重启                  │
+└───────────────────────────────────────────────────────┘
 ```
 
-#### 3.1.2 修改现有命令
+**关键代码** (`App.tsx`):
 
-```rust
-/// 修改：启动 Tab Sidecar 时检查工作区是否已有 Sidecar
-pub fn start_tab_sidecar<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    manager: &ManagedSidecarManager,
-    tab_id: &str,
-    agent_dir: Option<PathBuf>,
-) -> Result<u16, String> {
-    // 新增：检查工作区是否已有 Sidecar
-    if let Some(ref dir) = agent_dir {
-        let workspace_key = dir.to_string_lossy().to_string();
-        if let Some(existing) = manager.get_workspace_sidecar(&workspace_key) {
-            // 复用已有 Sidecar
-            manager.map_tab_to_workspace(tab_id, &workspace_key);
-            return Ok(existing.port);
+```typescript
+// Scenario 4: Normal switch → Hand over Sidecar to new Session
+if (oldSessionId) {
+    // 1. Move sidecars HashMap entry: sidecars[oldSessionId] → sidecars[newSessionId]
+    const upgraded = await upgradeSessionId(oldSessionId, sessionId);
+
+    if (upgraded) {
+        // 2. Update session_activations
+        await deactivateSession(oldSessionId);
+        const port = await getSessionPort(sessionId);
+        if (port !== null) {
+            await activateSession(sessionId, tabId, null, port, currentTab.agentDir, false);
         }
+    } else {
+        // Upgrade failed - create new Sidecar
+        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+        await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
     }
-
-    // 原有逻辑：启动新 Sidecar
-    // ...
-}
-
-/// 修改：停止 Tab Sidecar 时检查是否还有其他使用者
-pub fn stop_tab_sidecar(
-    manager: &ManagedSidecarManager,
-    tab_id: &str,
-) -> Result<(), String> {
-    let workspace = manager.get_tab_workspace(tab_id)?;
-    manager.unmap_tab(tab_id);
-
-    // 新增：检查工作区是否还有其他 Tab 或定时任务在使用
-    if !manager.has_other_users(&workspace, tab_id) {
-        // 没有其他使用者，停止 Sidecar
-        manager.stop_workspace_sidecar(&workspace);
-    }
-
-    Ok(())
 }
 ```
 
-### 3.2 前端 API 变更
+---
 
-#### 3.2.1 新增 Tauri Client 函数
+## 四、Owner 生命周期管理
 
-```typescript
-// src/renderer/api/tauriClient.ts
+### 4.1 Owner 添加
 
-/** 查询 Session 激活状态 */
-export async function getSessionActivation(sessionId: string): Promise<SessionActivation | null>;
-
-/** 激活 Session */
-export async function activateSession(params: {
-    sessionId: string;
-    tabId: string | null;
-    port: number;
-    workspacePath: string;
-    isCronTask: boolean;
-}): Promise<void>;
-
-/** 取消激活 Session */
-export async function deactivateSession(sessionId: string): Promise<void>;
-
-/** 查询工作区 Sidecar */
-export async function getWorkspaceSidecar(workspacePath: string): Promise<SidecarInfo | null>;
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Owner 添加流程                                                    │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ensureSessionSidecar(sessionId, workspace, ownerType, ownerId)  │
+│                    │                                             │
+│                    ▼                                             │
+│       ┌─────────────────────────────────┐                        │
+│       │ sidecars.get(sessionId) 存在?   │                        │
+│       └──────────────┬──────────────────┘                        │
+│                      │                                           │
+│           ┌──────────┴──────────┐                                │
+│           │ Yes                 │ No                             │
+│           ▼                     ▼                                │
+│    ┌─────────────┐     ┌─────────────────────┐                   │
+│    │ 添加 Owner  │     │ 创建新 Sidecar       │                   │
+│    │ 返回端口    │     │ 添加 Owner           │                   │
+│    └─────────────┘     │ 等待健康检查         │                   │
+│                        │ 返回端口             │                   │
+│                        └─────────────────────┘                   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-#### 3.2.2 修改 App.tsx - handleLaunchProject
+### 4.2 Owner 释放
 
-```typescript
-const handleLaunchProject = useCallback(async (
-    project: Project,
-    _provider: Provider,
-    sessionId?: string
-) => {
-    if (!activeTabId) return;
-
-    // 新增：如果指定了 sessionId，检查是否已激活
-    if (sessionId) {
-        const activation = await getSessionActivation(sessionId);
-
-        if (activation) {
-            if (activation.tabId) {
-                // Session 已在另一个 Tab 打开 -> 跳转
-                setActiveTabId(activation.tabId);
-                return;
-            } else {
-                // Session 被无头 Sidecar 使用（定时任务）-> 连接到已有 Sidecar
-                await connectTabToSidecar(activeTabId, activation.port);
-                await activateSession({
-                    sessionId,
-                    tabId: activeTabId,
-                    port: activation.port,
-                    workspacePath: activation.workspacePath,
-                    isCronTask: false, // Tab 接管后不再是 cron 独占
-                });
-
-                setTabs(prev => prev.map(t =>
-                    t.id === activeTabId
-                        ? { ...t, agentDir: activation.workspacePath, sessionId, view: 'chat', title: getFolderName(activation.workspacePath) }
-                        : t
-                ));
-                return;
-            }
-        }
-    }
-
-    // 原有逻辑：启动新 Sidecar
-    setLoadingTabs(prev => ({ ...prev, [activeTabId]: true }));
-    try {
-        const port = await startTabSidecar(activeTabId, project.path);
-
-        // 新增：激活 Session
-        if (sessionId) {
-            await activateSession({
-                sessionId,
-                tabId: activeTabId,
-                port,
-                workspacePath: project.path,
-                isCronTask: false,
-            });
-        }
-
-        // 更新 Tab 状态
-        setTabs(prev => prev.map(t =>
-            t.id === activeTabId
-                ? { ...t, agentDir: project.path, sessionId: sessionId ?? null, view: 'chat', title: getFolderName(project.path) }
-                : t
-        ));
-    } finally {
-        setLoadingTabs(prev => ({ ...prev, [activeTabId]: false }));
-    }
-}, [activeTabId]);
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Owner 释放流程                                                    │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  releaseSessionSidecar(sessionId, ownerType, ownerId)            │
+│                    │                                             │
+│                    ▼                                             │
+│       ┌─────────────────────────────────┐                        │
+│       │ 从 owners HashSet 移除 Owner    │                        │
+│       └──────────────┬──────────────────┘                        │
+│                      │                                           │
+│           ┌──────────┴──────────┐                                │
+│           │ owners.is_empty()?  │                                │
+│           │                     │                                │
+│           │ Yes                 │ No                             │
+│           ▼                     ▼                                │
+│    ┌─────────────────┐   ┌─────────────┐                         │
+│    │ 停止 Sidecar    │   │ 保持运行    │                         │
+│    │ (Drop kills)    │   │ 其他 Owner  │                         │
+│    │ 返回 true       │   │ 返回 false  │                         │
+│    └─────────────────┘   └─────────────┘                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-#### 3.2.3 修改 SessionHistoryDropdown
+---
+
+## 五、定时任务执行
+
+### 5.1 执行流程
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 定时任务执行 (后端优先模式)                                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Rust Scheduler                                                  │
+│       │                                                          │
+│       ├── 1. 检查 Session 是否已有 Sidecar                        │
+│       │       └── Yes → 复用已有 Sidecar                          │
+│       │       └── No  → 启动无头 Sidecar                          │
+│       │                                                          │
+│       ├── 2. ensureSessionSidecar(sessionId, 'cron', taskId)     │
+│       │                                                          │
+│       ├── 3. HTTP POST /cron/execute (reqwest)                   │
+│       │       └── 直接调用 Sidecar，不依赖前端 Tab                 │
+│       │                                                          │
+│       ├── 4. 处理执行结果                                         │
+│       │       ├── 记录执行历史                                    │
+│       │       ├── 检查 AI 退出请求                                │
+│       │       └── 发送系统通知                                    │
+│       │                                                          │
+│       └── 5. 定时任务完成后释放 Owner                              │
+│               └── releaseSessionSidecar(sessionId, 'cron', taskId)│
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 无头 Sidecar 场景
+
+当用户关闭所有 Tab 但定时任务仍在运行时：
+
+```
+┌───────────────────────────────────────────────────────┐
+│ 无头 Sidecar 运行                                      │
+├───────────────────────────────────────────────────────┤
+│                                                       │
+│  sidecars["session_789"]                              │
+│       ├── port: 31417                                 │
+│       ├── owners: { CronTask("task_001") }            │
+│       └── 状态: 运行中                                 │
+│                                                       │
+│  前端: 无 Tab 连接                                     │
+│  后端: 正常接收定时任务执行请求                         │
+│                                                       │
+│  当用户打开 Tab 连接此 Session 时:                     │
+│  - 不创建新 Sidecar                                   │
+│  - Tab 成为额外 Owner                                 │
+│  - owners: { CronTask("task_001"), Tab("tab_1") }     │
+│                                                       │
+└───────────────────────────────────────────────────────┘
+```
+
+---
+
+## 六、历史 Session 访问
+
+### 6.1 SessionHistoryDropdown 检查流程
 
 ```typescript
-// src/renderer/components/SessionHistoryDropdown.tsx
-
 const handleSelectSession = async (sessionId: string) => {
-    // 新增：检查 Session 是否已激活
+    // 1. 检查 Session 激活状态
     const activation = await getSessionActivation(sessionId);
 
     if (activation?.tabId) {
-        // 已在另一个 Tab 打开 -> 跳转到该 Tab
-        // 通过自定义事件通知 App 切换 Tab
-        window.dispatchEvent(new CustomEvent('myagents:focus-tab', {
-            detail: { tabId: activation.tabId }
-        }));
-        onClose();
+        // 场景 2: 已在另一个 Tab 打开 → 跳转
+        dispatch('myagents:focus-tab', { tabId: activation.tabId });
         return;
     }
 
     if (activation && !activation.tabId) {
-        // 被无头 Sidecar 使用 -> 需要特殊处理
-        // 通知 App 创建 Tab 并连接到已有 Sidecar
-        window.dispatchEvent(new CustomEvent('myagents:connect-to-sidecar', {
-            detail: {
-                sessionId,
-                port: activation.port,
-                workspacePath: activation.workspacePath,
-            }
-        }));
-        onClose();
+        // 场景 3: 被无头 Sidecar 使用 (定时任务) → 连接
+        dispatch('myagents:connect-to-sidecar', {
+            sessionId,
+            port: activation.port,
+            workspacePath: activation.workspacePath,
+        });
         return;
     }
 
-    // 正常流程：加载 Session
+    // 场景 4: 无人使用 → 正常加载 (触发 Handover)
     onSelectSession(sessionId);
-    onClose();
 };
 ```
 
-### 3.3 定时任务执行流程
+---
 
-#### 3.3.1 当前流程（有问题）
+## 七、应用重启恢复
 
-```
-Rust Scheduler
-    │
-    ▼ emit("cron:trigger-execution")
-Frontend (需要 Tab 接收)
-    │
-    ▼ API call
-Sidecar /cron/execute
-```
-
-#### 3.3.2 新流程
+### 7.1 恢复流程
 
 ```
-Rust Scheduler
-    │
-    ├── 1. 检查 Sidecar 是否运行
-    │       └── 否 → 启动无头 Sidecar
-    │
-    ▼ 2. HTTP POST to Sidecar
-Sidecar /cron/execute
-    │
-    ▼ 3. 执行完成后
-Rust 记录执行结果
-    │
-    ▼ 4. 发送系统通知
-```
-
-#### 3.3.3 Rust 实现
-
-```rust
-// cron_task.rs
-
-impl CronTaskManager {
-    /// 直接执行定时任务（不依赖前端）
-    pub async fn execute_task_directly(&self, task_id: &str) -> Result<(), String> {
-        let task = self.get_task(task_id).await
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
-
-        // 1. 确保 Sidecar 运行
-        let port = self.ensure_sidecar_running(&task).await?;
-
-        // 2. 检查重叠执行
-        if self.is_task_executing(task_id).await {
-            log::warn!("[CronTask] Task {} is still executing, skipping", task_id);
-            return Ok(());
-        }
-
-        // 3. 标记开始执行
-        self.mark_task_executing(task_id).await;
-
-        // 4. 构建请求
-        let payload = CronExecuteRequest {
-            task_id: task_id.to_string(),
-            prompt: task.prompt.clone(),
-            is_first_execution: task.execution_count == 0,
-            ai_can_exit: task.end_conditions.ai_can_exit,
-            run_mode: task.run_mode.clone(),
-        };
-
-        // 5. HTTP 调用 Sidecar
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{}/cron/execute", port);
-
-        let response = client
-            .post(&url)
-            .json(&payload)
-            .timeout(Duration::from_secs(600)) // 10 分钟超时
-            .send()
-            .await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        // 6. 处理响应
-        if response.status().is_success() {
-            let result: CronExecuteResult = response.json().await
-                .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-            // 7. 记录执行
-            self.record_execution(task_id).await?;
-
-            // 8. 检查 AI 退出
-            if result.ai_requested_exit {
-                self.complete_task(task_id, result.exit_reason).await?;
-            }
-
-            // 9. 发送通知
-            if task.notify_enabled {
-                self.send_notification(&task, &result).await;
-            }
-        }
-
-        // 10. 标记完成
-        self.mark_task_complete(task_id).await;
-
-        Ok(())
-    }
-
-    /// 确保任务的 Sidecar 正在运行
-    async fn ensure_sidecar_running(&self, task: &CronTask) -> Result<u16, String> {
-        // 检查是否已有 Sidecar
-        let sidecar_manager = get_sidecar_manager();
-
-        if let Some(info) = sidecar_manager.get_workspace_sidecar(&task.workspace_path) {
-            return Ok(info.port);
-        }
-
-        // 启动无头 Sidecar
-        let port = sidecar_manager.start_cron_sidecar(
-            &task.workspace_path,
-            &task.session_id,
-            &task.id,
-        ).await?;
-
-        // 激活 Session
-        sidecar_manager.activate_session(
-            &task.session_id,
-            None, // 无 Tab
-            port,
-            &task.workspace_path,
-            true, // 是定时任务
-        )?;
-
-        Ok(port)
-    }
-}
-```
-
-### 3.4 Bun Sidecar 变更
-
-#### 3.4.1 新增端点
-
-```typescript
-// src/server/index.ts
-
-// 定时任务执行端点（供 Rust 直接调用）
-app.post('/cron/execute', async (c) => {
-    const { task_id, prompt, is_first_execution, ai_can_exit, run_mode } = await c.req.json();
-
-    // 执行任务
-    const result = await cronExecutor.execute({
-        taskId: task_id,
-        prompt,
-        isFirstExecution: is_first_execution,
-        aiCanExit: ai_can_exit,
-        runMode: run_mode,
-    });
-
-    return c.json(result);
-});
+┌──────────────────────────────────────────────────────────────────┐
+│ 应用重启后定时任务恢复                                             │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. App 启动                                                     │
+│       │                                                          │
+│       ├── cleanup_stale_sidecars()  // 清理残留进程               │
+│       │                                                          │
+│       ├── CronTaskManager.restore_running_tasks()                │
+│       │       │                                                  │
+│       │       └── 遍历 status=running 的任务                      │
+│       │               │                                          │
+│       │               ├── ensureSessionSidecar(sessionId, 'cron')│
+│       │               │       启动新 Sidecar                      │
+│       │               │                                          │
+│       │               └── reschedule_next_execution()            │
+│       │                       计算下次执行时间                    │
+│       │                                                          │
+│       └── 前端无需参与恢复                                        │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 四、实施计划
+## 八、验证清单
 
-### Phase 1: Rust 层基础设施
-
-1. **修改 SidecarManager 数据结构**
-   - 添加 `session_activations` HashMap
-   - 添加 `tab_workspace_map` HashMap
-   - 修改 `instances` 的 key 从 Tab ID 改为工作区路径
-
-2. **添加 Session 激活命令**
-   - `cmd_get_session_activation`
-   - `cmd_activate_session`
-   - `cmd_deactivate_session`
-
-3. **修改现有 Sidecar 命令**
-   - `start_tab_sidecar` 支持复用
-   - `stop_tab_sidecar` 检查其他使用者
-
-### Phase 2: 定时任务直接执行
-
-1. **修改 CronTaskManager**
-   - 实现 `execute_task_directly` 方法
-   - 实现 `ensure_sidecar_running` 方法
-   - 移除对 Tauri 事件的依赖
-
-2. **修改 Scheduler 循环**
-   - 调用 `execute_task_directly` 而非 `emit`
-
-3. **添加 Sidecar 端点**
-   - `/cron/execute` 端点
-   - 支持无 SSE 连接执行
-
-### Phase 3: 前端 Session 检查
-
-1. **添加 Tauri Client 函数**
-   - `getSessionActivation`
-   - `activateSession`
-   - `deactivateSession`
-
-2. **修改 App.tsx**
-   - `handleLaunchProject` 检查 Session 激活
-   - 添加 Tab 跳转逻辑
-   - 添加连接已有 Sidecar 逻辑
-
-3. **修改 SessionHistoryDropdown**
-   - 打开前检查 Session 激活状态
-   - 实现跳转和连接逻辑
-
-### Phase 4: 清理与测试
-
-1. **TabProvider unmount 处理**
-   - 取消 Session 激活
-   - 检查 Sidecar 是否应停止
-
-2. **边界情况处理**
-   - 应用重启时的 Session 激活恢复
-   - Sidecar 意外退出的清理
-   - 网络错误重试
-
-3. **全面测试**
-   - 单元测试
-   - 集成测试
-   - 手动场景测试
+- [x] 打开已在其他 Tab 打开的 Session → 跳转到已有 Tab
+- [x] 打开定时任务正在使用的 Session → 新建 Tab 连接到已有 Sidecar
+- [x] 关闭 Tab（有其他使用者）→ Sidecar 继续运行
+- [x] 关闭 Tab（无其他使用者）→ Sidecar 停止
+- [x] 定时任务执行（无 Tab）→ Rust 直接 HTTP 调用
+- [x] 应用重启 → 定时任务自动恢复，无需前端参与
+- [x] 同 Tab 切换 Session → Handover 机制复用 Sidecar
+- [x] Handover 后 HashMap key 正确更新
 
 ---
 
-## 五、风险与缓解
+## 九、相关文档
 
-| 风险 | 影响 | 缓解措施 |
-|------|------|---------|
-| Session 激活状态不一致 | 可能导致重复 Sidecar | 应用启动时清理过期激活记录 |
-| Sidecar 意外退出 | 激活记录残留 | 定期健康检查，清理无效记录 |
-| HTTP 调用超时 | 定时任务执行失败 | 10 分钟超时 + 重试机制 |
-| 并发修改激活状态 | 竞态条件 | Mutex 保护 + 原子操作 |
-
----
-
-## 六、验证清单
-
-- [ ] 打开已在其他 Tab 打开的 Session → 跳转到已有 Tab
-- [ ] 打开定时任务正在使用的 Session → 新建 Tab 连接到已有 Sidecar
-- [ ] 关闭 Tab（有其他使用者）→ Sidecar 继续运行
-- [ ] 关闭 Tab（无其他使用者）→ Sidecar 停止
-- [ ] 定时任务执行（无 Tab）→ Rust 直接 HTTP 调用
-- [ ] 应用重启 → 定时任务自动恢复，无需前端参与
-- [ ] 定时任务执行完成 → 系统通知正常发送
-- [ ] 点击通知 → 打开 App，新建 Tab 连接到 Sidecar
+- [architecture.md](./architecture.md) - 整体技术架构
+- [session_state_sync.md](./session_state_sync.md) - SSE 状态同步机制
+- [session_storage.md](./session_storage.md) - Session 存储格式
