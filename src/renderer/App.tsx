@@ -285,11 +285,15 @@ export default function App() {
     const tabAgentDir = tab.agentDir;
 
     // Resource cleanup runs asynchronously without blocking UI
-    // NOTE: SSE proxy is NOT stopped here - TabProvider handles its own SSE cleanup during unmount
-    // This avoids duplicate stop_sse_proxy calls and potential race conditions
+    // CRITICAL: SSE proxy must be stopped BEFORE Sidecar to avoid "unexpected EOF" errors
+    // When Sidecar dies, open HTTP connections break mid-stream causing errors
     const cleanupResources = async () => {
       try {
-        // Release Tab's ownership of the Session Sidecar
+        // Step 1: Stop SSE proxy FIRST to ensure clean disconnection
+        // This prevents "unexpected EOF" errors when Sidecar is stopped
+        await stopSseProxy(tabId);
+
+        // Step 2: Release Tab's ownership of the Session Sidecar
         if (tabSessionId) {
           try {
             const stopped = await releaseSessionSidecar(tabSessionId, 'tab', tabId);
