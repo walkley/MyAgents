@@ -19,6 +19,7 @@ use sidecar::{
     cmd_execute_cron_task,
     // Session-centric Sidecar API (v0.1.11)
     cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
+    cmd_upgrade_session_id,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -121,6 +122,7 @@ pub fn run() {
             cmd_ensure_session_sidecar,
             cmd_release_session_sidecar,
             cmd_get_session_port,
+            cmd_upgrade_session_id,
         ])
         .setup(|app| {
             // Initialize logging for all builds

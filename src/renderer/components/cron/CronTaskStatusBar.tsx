@@ -14,13 +14,13 @@ export default function CronTaskStatusBar({
   onCancel
 }: CronTaskStatusBarProps) {
   return (
-    <div className="flex items-center justify-between rounded-t-lg border border-b-0 border-blue-300 bg-blue-50 px-3 py-2 dark:border-blue-700 dark:bg-blue-900/30">
+    <div className="flex items-center justify-between rounded-t-lg border border-b-0 border-[var(--accent-warm)]/20 bg-[var(--accent-warm)]/5 px-3 py-2">
       <div className="flex items-center gap-2">
-        <Clock className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-        <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+        <Clock className="h-4 w-4 text-[var(--accent-warm)]" />
+        <span className="text-sm font-medium text-[var(--accent-warm)]">
           定时任务模式
         </span>
-        <span className="text-sm text-blue-600 dark:text-blue-400">
+        <span className="text-sm text-[var(--ink-muted)]">
           每 {formatCronInterval(intervalMinutes)} 执行一次
         </span>
       </div>
@@ -28,7 +28,7 @@ export default function CronTaskStatusBar({
         <button
           type="button"
           onClick={onSettings}
-          className="rounded-md p-1.5 text-blue-600 transition hover:bg-blue-100 dark:text-blue-400 dark:hover:bg-blue-800/50"
+          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--accent-warm)]/10 hover:text-[var(--accent-warm)]"
           title="修改设置"
         >
           <Settings2 className="h-4 w-4" />
@@ -36,7 +36,7 @@ export default function CronTaskStatusBar({
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-md p-1.5 text-blue-600 transition hover:bg-blue-100 dark:text-blue-400 dark:hover:bg-blue-800/50"
+          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--accent-warm)]/10 hover:text-[var(--accent-warm)]"
           title="取消定时任务"
         >
           <X className="h-4 w-4" />

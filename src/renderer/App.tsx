@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -22,7 +22,7 @@ import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTa
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
-import { CUSTOM_EVENTS } from '../shared/constants';
+import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 
 export default function App() {
   // Auto-update state (silent background updates)
@@ -221,12 +221,26 @@ export default function App() {
   // This ensures Session singleton constraint works correctly:
   // - Tab.sessionId syncs with the actual session ID
   // - History dropdown can detect if session is already open in a Tab
-  const updateTabSessionId = useCallback((tabId: string, newSessionId: string) => {
-    console.log(`[App] Tab ${tabId} sessionId updated to ${newSessionId}`);
+  // - Rust HashMap keys are upgraded from "pending-xxx" to real session ID
+  const updateTabSessionId = useCallback(async (tabId: string, newSessionId: string) => {
+    // Find the current tab to get the old sessionId
+    const currentTab = tabs.find(t => t.id === tabId);
+    const oldSessionId = currentTab?.sessionId;
+
+    console.log(`[App] Tab ${tabId} sessionId updating: ${oldSessionId} -> ${newSessionId}`);
+
+    // Upgrade the session ID in Rust HashMap (sidecars + session_activations)
+    // This is a no-op if oldSessionId is null or same as newSessionId
+    if (oldSessionId && oldSessionId !== newSessionId) {
+      const upgraded = await upgradeSessionId(oldSessionId, newSessionId);
+      console.log(`[App] Rust HashMap upgrade: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+    }
+
+    // Update UI state
     setTabs(prev => prev.map(t =>
       t.id === tabId ? { ...t, sessionId: newSessionId } : t
     ));
-  }, []);
+  }, [tabs]);
 
   // Perform the actual tab close operation (pure function, no confirmation)
   const performCloseTab = useCallback(async (tabId: string) => {
@@ -473,7 +487,7 @@ export default function App() {
 
       // For new sessions (no sessionId), generate a temporary session ID
       // The actual session ID will be created by the backend when the session starts
-      const effectiveSessionId = sessionId ?? `pending-${targetTabId}`;
+      const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
 
       // Ensure Sidecar is running for this Session, Tab as owner
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
@@ -553,18 +567,21 @@ export default function App() {
         return;
       }
 
-      try {
-        // Release Tab's ownership from old session (if any)
-        if (currentTab.sessionId) {
-          const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', tabId);
-          console.log(`[App] Released old session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
-        }
+      const oldSessionId = currentTab.sessionId;
 
-        // Add Tab as owner to the Session's Sidecar (cron task already owns it)
+      try {
+        // Step 1: Add Tab as owner to the cron task's Sidecar FIRST
         const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
         console.log(`[App] Tab ${tabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
         await updateSessionTab(sessionId, tabId);
 
+        // Step 2: Now safe to release old session
+        if (oldSessionId) {
+          const stopped = await releaseSessionSidecar(oldSessionId, 'tab', tabId);
+          console.log(`[App] Released old session ${oldSessionId}, sidecar stopped: ${stopped}`);
+        }
+
+        // Step 3: Update UI state
         setTabs((prev) =>
           prev.map((t) =>
             t.id === tabId
@@ -637,7 +654,15 @@ export default function App() {
       return;
     }
 
-    // Scenario 4: Normal switch → Release old session, ensure new session Sidecar
+    // Scenario 4: Normal switch → Hand over Sidecar to new Session
+    //
+    // Core concept: One Sidecar = One Agent instance = One Session + One Workspace
+    // When user switches Session within the same Tab:
+    // - Old Session is "closed" (no longer needs its Sidecar)
+    // - New Session "takes over" the running Sidecar (efficiency optimization)
+    // - This is resource reuse, not shared design - each Session still has 1:1 Sidecar relationship
+    //
+    // Key operation: upgradeSessionId() moves the sidecars HashMap entry from old key to new key
     console.log(`[App] handleSwitchSession Scenario 4: Switching tab ${tabId} to session ${sessionId}`);
 
     // Get current tab info
@@ -647,20 +672,43 @@ export default function App() {
       return;
     }
 
+    const oldSessionId = currentTab.sessionId;
+
     try {
-      // Release Tab's ownership from old session (if any)
-      if (currentTab.sessionId) {
-        const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', tabId);
-        console.log(`[App] Released old session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
+      // Case A: Have old Session → Hand over its Sidecar to new Session
+      if (oldSessionId) {
+        // 1. Move sidecars HashMap entry: sidecars[oldSessionId] → sidecars[newSessionId]
+        const upgraded = await upgradeSessionId(oldSessionId, sessionId);
+
+        if (upgraded) {
+          // 2. Update session_activations to reflect the new Session
+          await deactivateSession(oldSessionId);
+          const port = await getSessionPort(sessionId);  // Now accessible via new key
+          if (port !== null) {
+            await activateSession(sessionId, tabId, null, port, currentTab.agentDir, false);
+            console.log(`[App] Session ${sessionId} took over Sidecar from ${oldSessionId} on port ${port}`);
+          } else {
+            // Shouldn't happen after successful upgrade, but handle gracefully
+            console.warn(`[App] Port not found after upgrade, creating new Sidecar`);
+            const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+            await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+          }
+        } else {
+          // Upgrade failed (e.g., old Sidecar not found) - create new Sidecar
+          console.log(`[App] Sidecar upgrade failed, creating new Sidecar for session ${sessionId}`);
+          await deactivateSession(oldSessionId);
+          const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+          await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+        }
+      } else {
+        // Case B: No old Session → Create new Sidecar
+        console.log(`[App] No previous session, creating new Sidecar for session ${sessionId}`);
+        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+        await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
       }
 
-      // Ensure Sidecar for new session with Tab as owner
-      const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-      console.log(`[App] Session Sidecar ensured for ${sessionId}: port=${result.port}, isNew=${result.isNew}`);
-
-      // Update session_activations for fallback port lookup
-      await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
-
+      // Update UI state - TabProvider will detect sessionId change and call loadSession()
+      // SSE stays connected to the same port (via getTabServerUrl fallback using session_activations)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
@@ -668,6 +716,7 @@ export default function App() {
             : t
         )
       );
+      console.log(`[App] handleSwitchSession Scenario 4 complete: tab ${tabId} now on session ${sessionId}`);
     } catch (error) {
       console.error('[App] Failed to switch session:', error);
     }

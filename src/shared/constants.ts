@@ -2,6 +2,22 @@ export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024; // 32 MB
 export const ATTACHMENTS_DIR_NAME = 'attachments';
 
 /**
+ * Session ID management for Session-Centric Sidecar architecture
+ * New sessions start with a "pending-{tabId}" ID until the backend creates the real session
+ */
+export const PENDING_SESSION_PREFIX = 'pending-';
+
+/** Check if a sessionId is a pending (placeholder) session */
+export function isPendingSessionId(sessionId: string | null | undefined): boolean {
+    return sessionId?.startsWith(PENDING_SESSION_PREFIX) ?? false;
+}
+
+/** Create a pending session ID for a new tab */
+export function createPendingSessionId(tabId: string): string {
+    return `${PENDING_SESSION_PREFIX}${tabId}`;
+}
+
+/**
  * API endpoints for Skills & Commands management
  */
 export const API_ENDPOINTS = {

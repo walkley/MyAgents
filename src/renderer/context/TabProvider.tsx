@@ -18,7 +18,7 @@ import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
-import { CUSTOM_EVENTS } from '../../shared/constants';
+import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, type SessionState, type TabContextValue } from './TabContext';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -1310,8 +1310,8 @@ export default function TabProvider({
             return;
         }
 
-        const isPendingSession = sessionId.startsWith('pending-');
-        const wasPendingSession = prevSessionId?.startsWith('pending-');
+        const isPendingSession = isPendingSessionId(sessionId);
+        const wasPendingSession = isPendingSessionId(prevSessionId);
 
         // Case 1: Current sessionId is pending - skip (doesn't exist in backend yet)
         if (isPendingSession) {

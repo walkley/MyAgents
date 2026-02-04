@@ -888,6 +888,35 @@ export async function getSessionPort(sessionId: string): Promise<number | null> 
 }
 
 /**
+ * Upgrade a session ID (e.g., from "pending-xxx" to real session ID)
+ * This updates HashMap keys in Rust without stopping the Sidecar.
+ *
+ * @param oldSessionId - The old session ID (typically "pending-{tabId}")
+ * @param newSessionId - The new real session ID
+ * @returns true if the upgrade was successful
+ */
+export async function upgradeSessionId(
+    oldSessionId: string,
+    newSessionId: string
+): Promise<boolean> {
+    if (!isTauri()) {
+        return true;
+    }
+
+    try {
+        const upgraded = await invoke<boolean>('cmd_upgrade_session_id', {
+            oldSessionId,
+            newSessionId,
+        });
+        console.debug(`[tauriClient] upgradeSessionId: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+        return upgraded;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to upgrade session ID from ${oldSessionId} to ${newSessionId}:`, error);
+        return false;
+    }
+}
+
+/**
  * Execute a cron task synchronously via Sidecar
  * This is the full execution that waits for completion and returns results
  *

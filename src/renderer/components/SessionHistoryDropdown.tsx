@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import { BarChart2, Clock, Trash2 } from 'lucide-react';
 
 import { deleteSession, getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { deactivateSession } from '@/api/tauriClient';
 import { getWorkspaceCronTasks } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
@@ -12,6 +13,8 @@ interface SessionHistoryDropdownProps {
     agentDir: string;
     currentSessionId: string | null;
     onSelectSession: (sessionId: string) => void;
+    /** Called when the current session is deleted - should reset to "new conversation" state */
+    onDeleteCurrentSession: () => void;
     isOpen: boolean;
     onClose: () => void;
 }
@@ -24,12 +27,18 @@ export default function SessionHistoryDropdown({
     agentDir,
     currentSessionId,
     onSelectSession,
+    onDeleteCurrentSession,
     isOpen,
     onClose,
 }: SessionHistoryDropdownProps) {
     const [sessions, setSessions] = useState<FetchState>(null);
     const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
+    // Track pending delete to show confirmation UI
+    const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+    // Track delete error for user feedback
+    const [deleteError, setDeleteError] = useState<string | null>(null);
+
     const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
 
@@ -87,6 +96,7 @@ export default function SessionHistoryDropdown({
             setCronTasks(null);
             setStatsSession(null);
             setPendingDeleteId(null);
+            setDeleteError(null);
         };
     }, [isOpen, agentDir]);
 
@@ -104,23 +114,41 @@ export default function SessionHistoryDropdown({
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [isOpen]);
 
-    // Track pending delete to show confirmation UI
-    const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-
     const handleDeleteClick = (e: React.MouseEvent, sessionId: string) => {
         e.stopPropagation();
         e.preventDefault();
+        setDeleteError(null); // Clear any previous error
         setPendingDeleteId(sessionId);
     };
 
     const handleConfirmDelete = async () => {
         if (!pendingDeleteId) return;
         const sessionId = pendingDeleteId;
+        const isDeletingCurrentSession = sessionId === currentSessionId;
         setPendingDeleteId(null);
+        setDeleteError(null);
 
-        const success = await deleteSession(sessionId);
-        if (success) {
-            setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
+        try {
+            const success = await deleteSession(sessionId);
+            if (success) {
+                // Clean up Rust layer session activation state
+                // This prevents stale entries in session_activations HashMap
+                await deactivateSession(sessionId);
+
+                setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
+
+                // If we deleted the current session, trigger "new conversation" behavior
+                if (isDeletingCurrentSession) {
+                    onClose(); // Close the dropdown
+                    onDeleteCurrentSession(); // Reset to new conversation state
+                }
+            } else {
+                setDeleteError('删除失败，请重试');
+                console.error(`[SessionHistoryDropdown] Failed to delete session ${sessionId}`);
+            }
+        } catch (error) {
+            setDeleteError('删除失败，请重试');
+            console.error(`[SessionHistoryDropdown] Error deleting session ${sessionId}:`, error);
         }
     };
 
@@ -165,6 +193,13 @@ export default function SessionHistoryDropdown({
                 <div className="border-b border-[var(--line)] px-4 py-2">
                     <h3 className="text-sm font-semibold text-[var(--ink)]">历史记录</h3>
                 </div>
+
+                {/* Delete error toast */}
+                {deleteError && (
+                    <div className="border-b border-[var(--error)]/20 bg-[var(--error)]/10 px-4 py-2 text-xs text-[var(--error)]">
+                        {deleteError}
+                    </div>
+                )}
 
                 {/* Session list */}
                 <div className="max-h-80 overflow-y-auto">
@@ -254,7 +289,16 @@ export default function SessionHistoryDropdown({
                                                 >
                                                     <BarChart2 className="h-3.5 w-3.5" />
                                                 </button>
-                                                {!isCurrent && (
+                                                {/* Disable delete for sessions with running cron tasks */}
+                                                {sessionCronTaskMap.has(session.id) ? (
+                                                    <button
+                                                        className="flex h-6 w-6 cursor-not-allowed items-center justify-center rounded opacity-0 group-hover:opacity-50"
+                                                        disabled
+                                                        title="请先停止定时任务后再删除"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                                                    </button>
+                                                ) : (
                                                     <button
                                                         className="flex h-6 w-6 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--error-bg)] group-hover:opacity-100"
                                                         onClick={(e) => handleDeleteClick(e, session.id)}

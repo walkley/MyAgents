@@ -257,12 +257,16 @@ pub struct SessionSidecar {
     /// Session ID this Sidecar serves
     pub session_id: String,
     /// Workspace path for this session
+    /// Reserved for future use (e.g., workspace-aware operations)
+    #[allow(dead_code)]
     pub workspace_path: PathBuf,
     /// Whether the sidecar passed initial health check
     pub healthy: bool,
     /// Set of owners (Tabs and CronTasks) that are using this Sidecar
     pub owners: HashSet<SidecarOwner>,
     /// Creation timestamp
+    /// Reserved for future use (e.g., TTL-based cleanup)
+    #[allow(dead_code)]
     pub created_at: std::time::Instant,
 }
 
@@ -287,6 +291,8 @@ impl SessionSidecar {
     }
 
     /// Check if this Sidecar has any owners
+    /// Reserved for future use (e.g., lifecycle management)
+    #[allow(dead_code)]
     pub fn has_owners(&self) -> bool {
         !self.owners.is_empty()
     }
@@ -388,6 +394,8 @@ pub struct SessionActivation {
 }
 
 /// Sidecar info for external queries
+/// Reserved for future use (e.g., admin UI, debugging endpoints)
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SidecarInfo {
     pub port: u16,
@@ -483,6 +491,8 @@ impl SidecarManager {
     }
 
     /// Iterate over all instances (tab_id, instance)
+    /// Reserved for future use (e.g., debugging, admin UI)
+    #[allow(dead_code)]
     pub fn iter_instances(&self) -> impl Iterator<Item = (&String, &SidecarInstance)> {
         self.instances.iter()
     }
@@ -572,6 +582,8 @@ impl SidecarManager {
     }
 
     /// Check if a Session has a healthy Sidecar
+    /// Reserved for future use (e.g., debugging, health checks)
+    #[allow(dead_code)]
     pub fn has_session_sidecar(&mut self, session_id: &str) -> bool {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             sidecar.is_running()
@@ -581,16 +593,22 @@ impl SidecarManager {
     }
 
     /// Get SessionSidecar reference by session ID
+    /// Reserved for future use (e.g., debugging, introspection)
+    #[allow(dead_code)]
     pub fn get_session_sidecar(&self, session_id: &str) -> Option<&SessionSidecar> {
         self.sidecars.get(session_id)
     }
 
     /// Get mutable SessionSidecar reference by session ID
+    /// Reserved for future use (e.g., advanced owner management)
+    #[allow(dead_code)]
     pub fn get_session_sidecar_mut(&mut self, session_id: &str) -> Option<&mut SessionSidecar> {
         self.sidecars.get_mut(session_id)
     }
 
     /// Insert a new SessionSidecar
+    /// Reserved for future use (currently used internally via ensure_session_sidecar)
+    #[allow(dead_code)]
     pub fn insert_session_sidecar(&mut self, session_id: String, sidecar: SessionSidecar) {
         log::info!(
             "[sidecar] Inserting SessionSidecar for session {} on port {}, owners: {:?}",
@@ -600,6 +618,8 @@ impl SidecarManager {
     }
 
     /// Remove and return a SessionSidecar (will be dropped, killing the process)
+    /// Reserved for future use (e.g., explicit session cleanup)
+    #[allow(dead_code)]
     pub fn remove_session_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
         log::info!("[sidecar] Removing SessionSidecar for session {}", session_id);
         self.sidecars.remove(session_id)
@@ -607,6 +627,8 @@ impl SidecarManager {
 
     /// Add an owner to a Session's Sidecar
     /// Returns true if owner was added, false if session doesn't exist
+    /// Reserved for future use (e.g., explicit owner management)
+    #[allow(dead_code)]
     pub fn add_session_owner(&mut self, session_id: &str, owner: SidecarOwner) -> bool {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             log::info!(
@@ -644,6 +666,53 @@ impl SidecarManager {
         } else {
             (true, false)
         }
+    }
+
+    /// Upgrade a session ID (e.g., from "pending-xxx" to real session ID)
+    /// This updates the key in both sidecars and session_activations HashMaps
+    /// without stopping the Sidecar.
+    ///
+    /// Returns true if the upgrade was successful.
+    pub fn upgrade_session_id(&mut self, old_session_id: &str, new_session_id: &str) -> bool {
+        log::info!(
+            "[sidecar] Upgrading session ID: {} -> {}",
+            old_session_id, new_session_id
+        );
+
+        let mut upgraded = false;
+
+        // 1. Upgrade in sidecars HashMap
+        if let Some(mut sidecar) = self.sidecars.remove(old_session_id) {
+            // Update the session_id field in the sidecar itself
+            sidecar.session_id = new_session_id.to_string();
+            self.sidecars.insert(new_session_id.to_string(), sidecar);
+            log::info!(
+                "[sidecar] Upgraded sidecars HashMap: {} -> {}",
+                old_session_id, new_session_id
+            );
+            upgraded = true;
+        }
+
+        // 2. Upgrade in session_activations HashMap
+        if let Some(mut activation) = self.session_activations.remove(old_session_id) {
+            // Update the session_id field in the activation itself
+            activation.session_id = new_session_id.to_string();
+            self.session_activations.insert(new_session_id.to_string(), activation);
+            log::info!(
+                "[sidecar] Upgraded session_activations HashMap: {} -> {}",
+                old_session_id, new_session_id
+            );
+            upgraded = true;
+        }
+
+        if !upgraded {
+            log::debug!(
+                "[sidecar] No entries found for session {} to upgrade",
+                old_session_id
+            );
+        }
+
+        upgraded
     }
 
 }
@@ -1593,6 +1662,19 @@ pub fn cmd_get_session_port(
     sessionId: String,
 ) -> Result<Option<u16>, String> {
     get_session_sidecar_port(&state, &sessionId)
+}
+
+/// Upgrade a session ID (e.g., from "pending-xxx" to real session ID)
+/// This updates HashMap keys without stopping the Sidecar.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_upgrade_session_id(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    oldSessionId: String,
+    newSessionId: String,
+) -> Result<bool, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    Ok(manager.upgrade_session_id(&oldSessionId, &newSessionId))
 }
 
 /// Stop all sidecar instances and clean up child processes

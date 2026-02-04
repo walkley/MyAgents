@@ -625,6 +625,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
                     void loadSession(id);
                   }
                 }}
+                onDeleteCurrentSession={handleNewSession}
                 isOpen={showHistory}
                 onClose={() => setShowHistory(false)}
               />
