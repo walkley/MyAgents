@@ -579,13 +579,14 @@ export default function App() {
         console.log(`[App] Tab ${tabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
         await updateSessionTab(sessionId, tabId);
 
-        // Step 2: Now safe to release old session
+        // Step 2: Stop SSE proxy FIRST before releasing old session (avoids EOF errors)
         if (oldSessionId) {
+          await stopSseProxy(tabId);
           const stopped = await releaseSessionSidecar(oldSessionId, 'tab', tabId);
           console.log(`[App] Released old session ${oldSessionId}, sidecar stopped: ${stopped}`);
         }
 
-        // Step 3: Update UI state
+        // Step 3: Update UI state (TabProvider will reconnect SSE to new Sidecar)
         setTabs((prev) =>
           prev.map((t) =>
             t.id === tabId
