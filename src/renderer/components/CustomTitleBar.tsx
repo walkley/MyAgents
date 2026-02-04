@@ -170,10 +170,11 @@ export default function CustomTitleBar({
                 )}
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                     title="设置"
                 >
                     <Settings className="h-4 w-4" />
+                    <span className="text-[13px] font-medium">设置</span>
                 </button>
             </div>
 
