@@ -91,6 +91,8 @@ interface TabProviderProps {
     isActive?: boolean;
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
+    /** Callback when sessionId changes (e.g., backend creates real session from pending-xxx) */
+    onSessionIdChange?: (newSessionId: string) => void;
     // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
     // Port is dynamically retrieved via getSessionPort(sessionId)
 }
@@ -192,6 +194,7 @@ export default function TabProvider({
     sessionId = null,
     isActive,
     onGeneratingChange,
+    onSessionIdChange,
 }: TabProviderProps) {
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
@@ -225,9 +228,11 @@ export default function TabProvider({
         setCurrentSessionId(sessionId);
     }, [sessionId]);
 
-    // Store callback in ref to avoid triggering effect on every render
+    // Store callbacks in refs to avoid triggering effects on every render
     const onGeneratingChangeRef = useRef(onGeneratingChange);
     onGeneratingChangeRef.current = onGeneratingChange;
+    const onSessionIdChangeRef = useRef(onSessionIdChange);
+    onSessionIdChangeRef.current = onSessionIdChange;
 
     // Notify parent when generating state changes (for close confirmation)
     useEffect(() => {
@@ -864,6 +869,9 @@ export default function TabProvider({
                     if (newSessionId && currentSessionIdRef.current !== newSessionId) {
                         console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
                         setCurrentSessionId(newSessionId);
+                        // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
+                        // This ensures history dropdown can detect if this session is already open
+                        onSessionIdChangeRef.current?.(newSessionId);
                     }
                 }
                 break;

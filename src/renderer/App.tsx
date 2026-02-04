@@ -217,6 +217,17 @@ export default function App() {
     ));
   }, []);
 
+  // Update tab sessionId when backend creates real session (called from TabProvider)
+  // This ensures Session singleton constraint works correctly:
+  // - Tab.sessionId syncs with the actual session ID
+  // - History dropdown can detect if session is already open in a Tab
+  const updateTabSessionId = useCallback((tabId: string, newSessionId: string) => {
+    console.log(`[App] Tab ${tabId} sessionId updated to ${newSessionId}`);
+    setTabs(prev => prev.map(t =>
+      t.id === tabId ? { ...t, sessionId: newSessionId } : t
+    ));
+  }, []);
+
   // Perform the actual tab close operation (pure function, no confirmation)
   const performCloseTab = useCallback(async (tabId: string) => {
     const currentTabs = tabs;
@@ -468,10 +479,9 @@ export default function App() {
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
-      // Activate session with Tab (for Session singleton tracking)
-      if (sessionId) {
-        await activateSession(sessionId, targetTabId, null, result.port, project.path, false);
-      }
+      // Activate session with Tab (for Session singleton tracking and fallback port lookup)
+      // Always use effectiveSessionId to ensure session_activations has entry for this Tab
+      await activateSession(effectiveSessionId, targetTabId, null, result.port, project.path, false);
 
       // Update tab state with effectiveSessionId (matches the Sidecar's session)
       // For new sessions, this is "pending-{tabId}" until backend creates the real session
@@ -543,8 +553,14 @@ export default function App() {
         return;
       }
 
-      // Add Tab as owner to the Session's Sidecar (cron task already owns it)
       try {
+        // Release Tab's ownership from old session (if any)
+        if (currentTab.sessionId) {
+          const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', tabId);
+          console.log(`[App] Released old session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
+        }
+
+        // Add Tab as owner to the Session's Sidecar (cron task already owns it)
         const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
         console.log(`[App] Tab ${tabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
         await updateSessionTab(sessionId, tabId);
@@ -560,7 +576,7 @@ export default function App() {
           )
         );
       } catch (error) {
-        console.error('[App] Failed to add Tab as owner to Sidecar:', error);
+        console.error('[App] Failed to switch to cron task session:', error);
       }
       return;
     }
@@ -621,15 +637,40 @@ export default function App() {
       return;
     }
 
-    // Scenario 4: Normal switch → Update Tab's sessionId
+    // Scenario 4: Normal switch → Release old session, ensure new session Sidecar
     console.log(`[App] handleSwitchSession Scenario 4: Switching tab ${tabId} to session ${sessionId}`);
-    setTabs((prev) =>
-      prev.map((t) =>
-        t.id === tabId
-          ? { ...t, sessionId }
-          : t
-      )
-    );
+
+    // Get current tab info
+    const currentTab = tabs.find(t => t.id === tabId);
+    if (!currentTab?.agentDir) {
+      console.error('[App] Cannot switch: current tab has no agentDir');
+      return;
+    }
+
+    try {
+      // Release Tab's ownership from old session (if any)
+      if (currentTab.sessionId) {
+        const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', tabId);
+        console.log(`[App] Released old session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
+      }
+
+      // Ensure Sidecar for new session with Tab as owner
+      const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+      console.log(`[App] Session Sidecar ensured for ${sessionId}: port=${result.port}, isNew=${result.isNew}`);
+
+      // Update session_activations for fallback port lookup
+      await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? { ...t, sessionId }
+            : t
+        )
+      );
+    } catch (error) {
+      console.error('[App] Failed to switch session:', error);
+    }
   }, [tabs]);
 
   const handleBackToLauncher = useCallback(async () => {
@@ -859,6 +900,7 @@ export default function App() {
                   sessionId={tab.sessionId}
                   isActive={isActive}
                   onGeneratingChange={(isGenerating) => updateTabGenerating(tab.id, isGenerating)}
+                  onSessionIdChange={(newSessionId) => updateTabSessionId(tab.id, newSessionId)}
                 >
                   <Chat
                     onBack={handleBackToLauncher}
