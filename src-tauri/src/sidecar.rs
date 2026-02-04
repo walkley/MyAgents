@@ -1978,6 +1978,12 @@ pub struct CronExecutePayload {
     /// Run mode: "single_session" (keep context) or "new_session" (fresh each time)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_mode: Option<String>,
+    /// Task execution interval in minutes (for System Prompt context)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u32>,
+    /// Current execution number (1-based, for System Prompt context)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2138,12 +2144,17 @@ pub async fn execute_cron_task<R: Runtime>(
 
     log::info!(
         "[sidecar] Cron task {} response: status={}, body={}",
-        payload.task_id, status, body.chars().take(200).collect::<String>()
+        payload.task_id, status, body.chars().take(500).collect::<String>()
     );
 
     // Parse response
     let result: CronExecuteResponse = serde_json::from_str(&body)
         .map_err(|e| format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body))?;
+
+    log::info!(
+        "[sidecar] Cron task {} parsed response: success={}, error={:?}, ai_requested_exit={:?}",
+        payload.task_id, result.success, result.error, result.ai_requested_exit
+    );
 
     Ok(result)
 }
@@ -2165,6 +2176,8 @@ pub async fn cmd_execute_cron_task(
     model: Option<String>,
     providerEnv: Option<ProviderEnv>,
     runMode: Option<String>,
+    intervalMinutes: Option<u32>,
+    executionNumber: Option<u32>,
 ) -> Result<CronExecuteResponse, String> {
     let payload = CronExecutePayload {
         task_id: taskId.clone(),
@@ -2176,6 +2189,8 @@ pub async fn cmd_execute_cron_task(
         model,
         provider_env: providerEnv,
         run_mode: runMode,
+        interval_minutes: intervalMinutes,
+        execution_number: executionNumber,
     };
 
     execute_cron_task(&app_handle, &state, &workspacePath, payload).await

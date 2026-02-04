@@ -1056,6 +1056,8 @@ async fn execute_task_directly(
     };
 
     // Build execution payload
+    // execution_number is 1-based (first execution = 1)
+    let execution_number = task.execution_count + 1;
     let payload = CronExecutePayload {
         task_id: task.id.clone(),
         prompt: task.prompt.clone(),
@@ -1069,6 +1071,8 @@ async fn execute_task_directly(
             api_key: env.api_key.clone(),
         }),
         run_mode: Some(run_mode_str.to_string()),
+        interval_minutes: Some(task.interval_minutes),
+        execution_number: Some(execution_number),
     };
 
     let _ = handle.emit("cron:debug", serde_json::json!({

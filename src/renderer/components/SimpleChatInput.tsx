@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench, Clock } from 'lucide-react';
+import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench, HeartPulse } from 'lucide-react';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -1324,9 +1324,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                       ? 'bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
                   }`}
-                  title={cronModeEnabled ? '定时任务已启用' : '设置定时任务'}
+                  title={cronModeEnabled ? '心跳循环已启用' : '设置心跳循环'}
                 >
-                  <Clock className="h-4 w-4" />
+                  <HeartPulse className="h-4 w-4" />
                 </button>
               )}
 

@@ -243,7 +243,8 @@ export default function App() {
   }, [tabs]);
 
   // Perform the actual tab close operation (pure function, no confirmation)
-  const performCloseTab = useCallback(async (tabId: string) => {
+  // UI updates are immediate; resource cleanup runs in background (non-blocking)
+  const performCloseTab = useCallback((tabId: string) => {
     const currentTabs = tabs;
 
     // Double-check: tab might have been removed
@@ -259,51 +260,62 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
-    // Step 1: Stop SSE proxy FIRST to avoid EOF errors when Sidecar stops
-    // This gracefully disconnects the SSE stream before killing the Sidecar process
-    await stopSseProxy(tabId);
-
-    // Step 2: Release Tab's ownership of the Session Sidecar
-    // If CronTask also owns it, Sidecar continues running
-    // If Tab was the only owner, Sidecar stops automatically
-    if (tab.sessionId) {
-      try {
-        // Release Tab's ownership of the Sidecar
-        const stopped = await releaseSessionSidecar(tab.sessionId, 'tab', tabId);
-        console.log(`[App] Tab ${tabId} released session ${tab.sessionId}, sidecar stopped: ${stopped}`);
-
-        // Update cron task tab association if exists
-        const cronTask = await getTabCronTask(tabId);
-        if (cronTask && cronTask.status === 'running') {
-          await updateCronTaskTab(cronTask.id, undefined);
-        }
-      } catch (error) {
-        console.error(`[App] Error releasing session sidecar for tab ${tabId}:`, error);
-        // Fallback to legacy stopTabSidecar
-        void stopTabSidecar(tabId);
-      }
-    } else if (tab.agentDir) {
-      // No sessionId but has agentDir - legacy case, use stopTabSidecar
-      void stopTabSidecar(tabId);
-    }
-
-    // Special case: If this is the last tab, replace with launcher (don't close the app)
+    // ========== IMMEDIATE UI UPDATE (non-blocking) ==========
+    // Update UI state first for instant response
     if (isLastTab) {
+      // Special case: If this is the last tab, replace with launcher (don't close the app)
       const newTab = createNewTab();
       setTabs([newTab]);
       setActiveTabId(newTab.id);
-      return;
+    } else {
+      // Normal case: close the tab
+      const newTabs = currentTabs.filter((t) => t.id !== tabId);
+
+      // If closing the active tab, switch to the last remaining tab
+      if (tabId === activeTabId && newTabs.length > 0) {
+        setActiveTabId(newTabs[newTabs.length - 1].id);
+      }
+
+      setTabs(newTabs);
     }
 
-    // Normal case: close the tab
-    const newTabs = currentTabs.filter((t) => t.id !== tabId);
+    // ========== BACKGROUND CLEANUP (non-blocking) ==========
+    // Capture tab data before cleanup to avoid stale closure issues
+    const tabSessionId = tab.sessionId;
+    const tabAgentDir = tab.agentDir;
 
-    // If closing the active tab, switch to the last remaining tab
-    if (tabId === activeTabId && newTabs.length > 0) {
-      setActiveTabId(newTabs[newTabs.length - 1].id);
-    }
+    // Resource cleanup runs asynchronously without blocking UI
+    // NOTE: SSE proxy is NOT stopped here - TabProvider handles its own SSE cleanup during unmount
+    // This avoids duplicate stop_sse_proxy calls and potential race conditions
+    const cleanupResources = async () => {
+      try {
+        // Release Tab's ownership of the Session Sidecar
+        if (tabSessionId) {
+          try {
+            const stopped = await releaseSessionSidecar(tabSessionId, 'tab', tabId);
+            console.log(`[App] Tab ${tabId} released session ${tabSessionId}, sidecar stopped: ${stopped}`);
 
-    setTabs(newTabs);
+            // Update cron task tab association if exists
+            const cronTask = await getTabCronTask(tabId);
+            if (cronTask && cronTask.status === 'running') {
+              await updateCronTaskTab(cronTask.id, undefined);
+            }
+          } catch (error) {
+            console.error(`[App] Error releasing session sidecar for tab ${tabId}:`, error);
+            // Fallback to legacy stopTabSidecar
+            void stopTabSidecar(tabId);
+          }
+        } else if (tabAgentDir) {
+          // No sessionId but has agentDir - legacy case, use stopTabSidecar
+          void stopTabSidecar(tabId);
+        }
+      } catch (error) {
+        console.error(`[App] Background cleanup error for tab ${tabId}:`, error);
+      }
+    };
+
+    // Fire and forget - cleanup runs in background
+    void cleanupResources();
   }, [tabs, activeTabId]);
 
   // Close tab with confirmation if generating (shows custom dialog)
@@ -990,7 +1002,7 @@ export default function App() {
       {exitConfirmState && (
         <ConfirmDialog
           title="退出应用"
-          message={`有 ${exitConfirmState.runningTaskCount} 个定时任务正在运行中。退出后任务将被停止。确定要退出吗？`}
+          message={`有 ${exitConfirmState.runningTaskCount} 个心跳循环正在运行中。退出后任务将被停止。确定要退出吗？`}
           confirmText="退出"
           cancelText="取消"
           confirmVariant="danger"

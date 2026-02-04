@@ -86,6 +86,8 @@ import {
   getMcpServers,
   resetSession,
   waitForSessionIdle,
+  setSystemPromptConfig,
+  clearSystemPromptConfig,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
@@ -166,31 +168,46 @@ type CronExecutePayload = {
   };
   /** Run mode: "single_session" (keep context) or "new_session" (fresh each time) */
   runMode?: 'single_session' | 'new_session';
+  /** Task execution interval in minutes (for System Prompt context) */
+  intervalMinutes?: number;
+  /** Current execution number, 1-based (for System Prompt context) */
+  executionNumber?: number;
 };
 
-// Build a cron task prompt with context
-function buildCronPrompt(userPrompt: string, taskId: string, isFirstExecution: boolean, aiCanExit: boolean): string {
-  const exitToolInstructions = aiCanExit
-    ? `如果任务目标已完全达成，无需继续定时执行，请调用 \`exit_cron_task\` 工具来结束任务，并提供结束原因。`
-    : `注意：任务创建者禁用了 AI 自主结束功能，你无法调用 exit_cron_task 工具。请继续执行任务直到达到预设的结束条件。`;
+/**
+ * Build the System Prompt append content for cron task execution.
+ * This content will be appended to the default claude_code system prompt.
+ *
+ * Note: User's original prompt is sent separately via enqueueUserMessage(),
+ * keeping it clean without wrapper templates.
+ */
+function buildCronSystemPromptAppend(
+  taskId: string,
+  intervalMinutes: number,
+  executionNumber: number,
+  aiCanExit: boolean
+): string {
+  // Format interval for display
+  const intervalText = intervalMinutes >= 60
+    ? `${Math.floor(intervalMinutes / 60)} 小时${intervalMinutes % 60 > 0 ? ` ${intervalMinutes % 60} 分钟` : ''}`
+    : `${intervalMinutes} 分钟`;
 
-  const cronContext = `<cron-task-context>
-你正在执行一个定时任务 (Task ID: ${taskId})。
+  // Build base content - always present
+  let content = `<cron-task-instructions>
+你正处于循环任务模式 (Task ID: ${taskId})。
+每隔 ${intervalText} 系统触发执行一次，当前是第 ${executionNumber} 次执行。`;
 
-${isFirstExecution ? '这是该任务的第一次执行。' : '这是该任务的一次周期性执行。'}
+  // Only add exit instructions if AI can exit (avoid redundant info)
+  if (aiCanExit) {
+    content += `
 
-请执行以下任务：
-</cron-task-context>
+如果任务目标已完全达成，无需继续定时执行，请调用 \`mcp__cron-tools__exit_cron_task\` 工具来结束任务。`;
+  }
 
-${userPrompt}
-
-<cron-task-instructions>
-${exitToolInstructions}
-
-如果任务需要继续定时执行（例如需要持续监控、定期检查等），正常完成本次执行即可，系统会按设定的间隔再次触发。
+  content += `
 </cron-task-instructions>`;
 
-  return cronContext;
+  return content;
 }
 
 function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; port: number } {
@@ -605,7 +622,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const { taskId, prompt, isFirstExecution, aiCanExit, permissionMode, model, providerEnv } = payload;
+        const { taskId, prompt, aiCanExit, permissionMode, model, providerEnv, intervalMinutes, executionNumber } = payload;
 
         if (!taskId || !prompt) {
           return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
@@ -618,16 +635,28 @@ async function main() {
         // Pass sessionId for proper isolation between concurrent tasks
         setCronTaskContext(taskId, aiCanExit ?? false, currentSessionId);
 
-        // Wrap the prompt with cron task context
-        const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
+        // Set System Prompt append for cron task context
+        // This injects task instructions at the system prompt level (semantically correct)
+        // instead of wrapping the user's prompt
+        setSystemPromptConfig({
+          mode: 'append',
+          content: buildCronSystemPromptAppend(
+            taskId,
+            intervalMinutes ?? 15,
+            executionNumber ?? 1,
+            aiCanExit ?? false
+          )
+        });
 
         try {
-          console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
-          await enqueueUserMessage(cronPrompt, [], permissionMode ?? 'auto', model, providerEnv);
+          console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
+          // Send the user's original prompt (clean, without wrapper templates)
+          await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
           return jsonResponse({ success: true });
         } catch (error) {
           // Clear context on error
           clearCronTaskContext(currentSessionId);
+          clearSystemPromptConfig();
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
             500
@@ -639,14 +668,18 @@ async function main() {
       // This endpoint is used by Rust for direct Sidecar invocation without frontend
       // It waits for the execution to complete and returns the result
       if (pathname === '/cron/execute-sync' && request.method === 'POST') {
+        console.log('[cron] execute-sync: endpoint matched');
+
         let payload: CronExecutePayload;
         try {
           payload = (await request.json()) as CronExecutePayload;
-        } catch {
+          console.log('[cron] execute-sync: payload parsed', { taskId: payload.taskId, hasPrompt: !!payload.prompt, runMode: payload.runMode });
+        } catch (e) {
+          console.error('[cron] execute-sync: JSON parse error', e);
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const { taskId, prompt, sessionId, isFirstExecution, aiCanExit, permissionMode, model, providerEnv, runMode } = payload;
+        const { taskId, prompt, sessionId, aiCanExit, permissionMode, model, providerEnv, runMode, intervalMinutes, executionNumber } = payload;
 
         if (!taskId || !prompt) {
           return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
@@ -674,26 +707,56 @@ async function main() {
           console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
         } else if (sessionId) {
           // single_session mode: switch to the task's stored session (keeps context)
+          console.log(`[cron] execute-sync taskId=${taskId} attempting to switch to session ${sessionId}`);
           const switched = await switchToSession(sessionId);
           if (!switched) {
-            console.warn(`[cron] execute-sync taskId=${taskId} failed to switch to session ${sessionId}, continuing with current session`);
+            console.warn(`[cron] execute-sync taskId=${taskId} failed to switch to session ${sessionId}, will use current session instead`);
+            // Log current session state for debugging
+            const currentState = getAgentState();
+            console.log(`[cron] execute-sync taskId=${taskId} current session state: agentDir=${currentState.agentDir}, sessionState=${currentState.sessionState}, hasInitialPrompt=${currentState.hasInitialPrompt}`);
           } else {
             console.log(`[cron] execute-sync taskId=${taskId} single_session mode: switched to session ${sessionId}`);
           }
+        } else {
+          console.log(`[cron] execute-sync taskId=${taskId} no sessionId provided, using current session`);
         }
 
         // Set cron task context so the exit_cron_task tool knows which task is running
         // Pass sessionId for proper isolation between concurrent tasks
         setCronTaskContext(taskId, aiCanExit ?? false, effectiveSessionId);
+        console.log(`[cron] execute-sync: cron context set for taskId=${taskId}`);
 
-        // Wrap the prompt with cron task context
-        const cronPrompt = buildCronPrompt(prompt, taskId, isFirstExecution ?? false, aiCanExit ?? false);
+        // Set System Prompt append for cron task context
+        // This injects task instructions at the system prompt level (semantically correct)
+        // instead of wrapping the user's prompt
+        try {
+          const systemPromptAppend = buildCronSystemPromptAppend(
+            taskId,
+            intervalMinutes ?? 15,
+            executionNumber ?? 1,
+            aiCanExit ?? false
+          );
+          console.log(`[cron] execute-sync: system prompt built, length=${systemPromptAppend.length}`);
+
+          setSystemPromptConfig({
+            mode: 'append',
+            content: systemPromptAppend
+          });
+          console.log('[cron] execute-sync: system prompt config set');
+        } catch (e) {
+          console.error('[cron] execute-sync: error building/setting system prompt', e);
+          clearCronTaskContext(effectiveSessionId);
+          return jsonResponse({ success: false, error: `System prompt error: ${e}` }, 500);
+        }
 
         try {
-          console.log(`[cron] execute-sync taskId=${taskId} runMode=${effectiveRunMode} isFirst=${isFirstExecution ?? false} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
+          console.log(`[cron] execute-sync taskId=${taskId} runMode=${effectiveRunMode} interval=${intervalMinutes}min exec#${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
 
           // Enqueue the message (this starts the async execution)
-          await enqueueUserMessage(cronPrompt, [], permissionMode ?? 'auto', model, providerEnv);
+          // Send the user's original prompt (clean, without wrapper templates)
+          console.log('[cron] execute-sync: about to enqueue user message');
+          await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
+          console.log('[cron] execute-sync: user message enqueued');
 
           // Wait for session to become idle (execution complete)
           // Timeout: 10 minutes max execution time
@@ -702,6 +765,7 @@ async function main() {
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
             clearCronTaskContext(effectiveSessionId);
+            clearSystemPromptConfig();
             return jsonResponse({
               success: false,
               error: 'Execution timed out after 10 minutes'
@@ -744,24 +808,31 @@ async function main() {
             }
           }
 
-          // Clear context after execution
+          // Clear cron task context after execution
           clearCronTaskContext(effectiveSessionId);
+          // Note: System Prompt config is NOT cleared here intentionally.
+          // System Prompt only takes effect when query() is called (session creation).
+          // For single_session mode, subsequent executions reuse the existing session,
+          // so the config won't be used again anyway. Keeping it set is harmless.
 
           console.log(`[cron] execute-sync taskId=${taskId} completed, aiRequestedExit=${aiRequestedExit}, exitReason=${exitReason}`);
 
-          return jsonResponse({
+          const response = {
             success: true,
             aiRequestedExit,
             exitReason
-          });
+          };
+          console.log(`[cron] execute-sync taskId=${taskId} returning response:`, JSON.stringify(response));
+          return jsonResponse(response);
         } catch (error) {
           // Clear context on error
           clearCronTaskContext(effectiveSessionId);
+          clearSystemPromptConfig();
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
           console.error(`[cron] execute-sync taskId=${taskId} error:`, error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-            500
-          );
+          const errorResponse = { success: false, error: errorMessage };
+          console.log(`[cron] execute-sync taskId=${taskId} returning error response:`, JSON.stringify(errorResponse));
+          return jsonResponse(errorResponse, 500);
         }
       }
 

@@ -2,7 +2,7 @@
 // Shows all active cron tasks with controls to open/stop them
 
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, StopCircle, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
+import { HeartPulse, StopCircle, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
 import { getAllCronTasks, stopCronTask } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatCronInterval, getCronStatusText } from '@/types/cronTask';
@@ -95,8 +95,8 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
           <div className="flex items-center gap-2">
-            <Clock className="h-5 w-5 text-[var(--accent)]" />
-            <h2 className="text-base font-semibold text-[var(--ink)]">定时任务调试面板</h2>
+            <HeartPulse className="h-5 w-5 text-[var(--accent)]" />
+            <h2 className="text-base font-semibold text-[var(--ink)]">心跳循环调试面板</h2>
             <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
               DEV
             </span>
@@ -134,7 +134,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
             </div>
           ) : tasks.length === 0 ? (
             <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
-              没有活跃的定时任务
+              没有活跃的心跳循环任务
             </div>
           ) : (
             <div className="space-y-3">
@@ -248,7 +248,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
         {/* Footer */}
         <div className="border-t border-[var(--line)] px-5 py-3">
           <p className="text-[10px] text-[var(--ink-faint)]">
-            此面板仅供开发调试使用，显示所有运行中或暂停的定时任务
+            此面板仅供开发调试使用，显示所有运行中或暂停的心跳循环任务
           </p>
         </div>
       </div>

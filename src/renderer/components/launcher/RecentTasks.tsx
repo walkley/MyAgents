@@ -188,7 +188,7 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                             {/* Cron task tag */}
                             {hasCronTask && (
                                 <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                                    定时
+                                    心跳
                                 </span>
                             )}
 

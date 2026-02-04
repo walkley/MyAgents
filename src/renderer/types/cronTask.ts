@@ -94,7 +94,7 @@ export const CRON_INTERVAL_PRESETS = [
 /**
  * Minimum interval in minutes
  */
-export const MIN_CRON_INTERVAL = 15;
+export const MIN_CRON_INTERVAL = 5;
 
 /**
  * Format interval for display

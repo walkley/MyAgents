@@ -1076,6 +1076,7 @@ export default function TabProvider({
         return () => {
             if (sseRef.current) {
                 void sseRef.current.disconnect();
+                sseRef.current = null;  // Allow garbage collection
             }
             if (stopTimeoutRef.current) {
                 clearTimeout(stopTimeoutRef.current);
@@ -1224,7 +1225,9 @@ export default function TabProvider({
             const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
-                console.error(`[TabProvider ${tabId}] Session not found`);
+                // Session not found is not necessarily an error - it may have been deleted
+                // or be a newly created empty session. Log as info, not error.
+                console.log(`[TabProvider ${tabId}] Session ${targetSessionId} not found in storage (may be deleted or empty)`);
                 return false;
             }
 
@@ -1319,11 +1322,30 @@ export default function TabProvider({
             return;
         }
 
-        // Case 2: Upgraded from pending to real - skip (we're already in this session)
-        // This happens when backend creates the real session after first message
+        // Case 2: Upgraded from pending to real session
+        // This happens when backend creates the real session after first message (including cron task)
         if (wasPendingSession) {
-            console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
+            // Case 2a: Already have data (normal message flow) - skip
+            if (initialSessionLoadedRef.current) {
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
+                return;
+            }
+
+            // Case 2b: Session is currently running (e.g., cron task executing) - skip
+            // CRITICAL: Do NOT call loadSession while AI is responding, as it would abort the current session!
+            // The messages will come through SSE stream naturally.
+            // Use isStreamingRef (ref) to get the latest value, avoiding stale closure issues
+            if (isStreamingRef.current) {
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, session is streaming, skipping loadSession`);
+                initialSessionLoadedRef.current = true;  // Mark as loaded to prevent future attempts
+                return;
+            }
+
+            // Case 2c: Switching from an unused pending session to a real session - need to load data
+            // This happens when user selects a history session while current tab has unused pending session
+            console.log(`[TabProvider ${tabId}] Switching from unused pending to ${sessionId}, loading session`);
             initialSessionLoadedRef.current = true;
+            void loadSession(sessionId);
             return;
         }
 

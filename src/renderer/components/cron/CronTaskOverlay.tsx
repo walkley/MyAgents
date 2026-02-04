@@ -1,7 +1,7 @@
-// Cron Task Overlay - Covers input area when task is running
+// Cron Task Overlay - Covers input area when heartbeat loop task is running
 // Follows design_guide.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
-import { Clock, Square, Pencil } from 'lucide-react';
+import { HeartPulse, Square, Pencil } from 'lucide-react';
 import type { CronTaskStatus } from '@/types/cronTask';
 import { formatCronInterval } from '@/types/cronTask';
 
@@ -15,11 +15,11 @@ interface CronTaskOverlayProps {
   onSettings: () => void;
 }
 
-// Animated clock icon for running state
-function AnimatedClockIcon({ isRunning }: { isRunning: boolean }) {
+// Animated heart pulse icon for running state
+function AnimatedHeartIcon({ isRunning }: { isRunning: boolean }) {
   return (
     <div className="relative">
-      <Clock className={`h-4 w-4 text-[var(--accent)] ${isRunning ? '' : 'opacity-60'}`} />
+      <HeartPulse className={`h-4 w-4 text-[var(--accent)] ${isRunning ? '' : 'opacity-60'}`} />
       {isRunning && (
         <span className="absolute -right-0.5 -top-0.5 h-2 w-2">
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-40" />
@@ -101,14 +101,14 @@ export default function CronTaskOverlay({
       <div className="flex items-center gap-3 min-w-0">
         {/* Status Icon */}
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--accent)]/10">
-          <AnimatedClockIcon isRunning={isRunning} />
+          <AnimatedHeartIcon isRunning={isRunning} />
         </div>
 
         {/* Status Text */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-[var(--ink)]">
-              定时任务运行中
+              心跳循环运行中
             </span>
             {timeDisplay && (
               <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${

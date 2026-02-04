@@ -25,7 +25,7 @@ import {
   getEnabledMcpServerIds,
   updateProjectMcpServers,
 } from '@/config/configService';
-import { CUSTOM_EVENTS } from '../../shared/constants';
+import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 // CronTaskConfig type is used via useCronTask hook
 
 interface ChatProps {
@@ -150,17 +150,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   });
 
   // Sync cron task's sessionId when session is created after task creation
-  // This happens when user starts a cron task from an empty session
+  // This handles two cases:
+  // 1. Task has empty sessionId (legacy) - needs to be updated
+  // 2. Task has pending sessionId (pending-xxx) and real sessionId is now available
   const sessionIdSyncedRef = useRef<string | null>(null);
   useEffect(() => {
     const task = cronState.task;
     if (!task || !sessionId) return;
 
-    // If task has empty sessionId but we now have a real sessionId, update the task
+    // Skip if sessionId is still pending (no real session ID yet)
+    if (isPendingSessionId(sessionId)) return;
+
+    // If task has empty or pending sessionId but we now have a real sessionId, update the task
     // Use ref to prevent duplicate updates for the same sessionId
-    if (task.sessionId === '' && sessionId && sessionIdSyncedRef.current !== sessionId) {
+    const taskNeedsUpdate = task.sessionId === '' || isPendingSessionId(task.sessionId);
+    if (taskNeedsUpdate && sessionIdSyncedRef.current !== sessionId) {
       sessionIdSyncedRef.current = sessionId;
-      console.log(`[Chat] Syncing cron task sessionId: taskId=${task.id}, sessionId=${sessionId}`);
+      console.log(`[Chat] Syncing cron task sessionId: taskId=${task.id}, oldSessionId=${task.sessionId}, newSessionId=${sessionId}`);
       void updateCronTaskSessionId(sessionId);
     }
   }, [cronState.task, sessionId, updateCronTaskSessionId]);
@@ -285,8 +291,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           // 2. The Rust scheduler executes on session-specific Sidecar
           // 3. When user goes back to the original session, state will be restored (above code)
           // 4. Per PRD: "暂停后允许手动对话" - task continues while user interacts with other sessions
-          console.log('[Chat] Clearing frontend cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
-          disableCronMode();
+          //
+          // EXCEPTION: Don't clear if this is a pending -> real session ID upgrade (same cron task!)
+          // This happens when SDK creates the real session after first message
+          const isSessionUpgrade = isPendingSessionId(cronState.task.sessionId) && !isPendingSessionId(sessionId);
+          if (isSessionUpgrade) {
+            console.log('[Chat] Session ID upgraded from pending to real, keeping cron state:', cronState.task.sessionId, '->', sessionId);
+          } else {
+            console.log('[Chat] Clearing frontend cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
+            disableCronMode();
+          }
         }
 
         cronLoadedSessionRef.current = sessionId;
@@ -504,10 +518,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
 
       // If cron mode is enabled and task hasn't started yet, start the task
       if (cronState.isEnabled && !cronState.task && cronState.config) {
-        // Update config with the actual prompt (user's message)
-        updateCronConfig({ prompt: text });
-        // Start the cron task - this will execute immediately and schedule future executions
-        await startCronTask();
+        // Start the cron task - pass prompt directly to avoid React state timing issues
+        // The prompt is passed as a parameter because updateCronConfig() is async
+        // and the state wouldn't be updated before startCronTask() is called
+        await startCronTask(text);
         return; // startCronTask handles the message sending via onExecute callback
       }
 

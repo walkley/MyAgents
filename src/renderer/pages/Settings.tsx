@@ -1265,9 +1265,9 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                 {/* Cron Task Notifications */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">定时任务通知</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">心跳循环通知</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            定时任务执行完成时发送系统通知
+                                            心跳循环执行完成时发送系统通知
                                         </p>
                                     </div>
                                     <button
@@ -1623,9 +1623,9 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">定时任务</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">心跳循环</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        查看和管理运行中的定时任务（开发调试用）
+                                                        查看和管理运行中的心跳循环任务（开发调试用）
                                                     </p>
                                                 </div>
                                                 <button

@@ -103,10 +103,25 @@ export function useCronTask(options: UseCronTaskOptions) {
   }, []);
 
   // Create and start the cron task
-  const startTask = useCallback(async () => {
+  // Optional prompt parameter allows caller to pass the prompt directly,
+  // avoiding React state update timing issues (stale closure problem)
+  const startTask = useCallback(async (promptOverride?: string) => {
     // Use ref to get latest state to avoid stale closure
     const currentConfig = stateRef.current.config;
     if (!currentConfig) return;
+
+    // Use promptOverride if provided, otherwise fall back to config.prompt
+    // This fixes the timing issue where updateConfig() hasn't updated the ref yet
+    const effectivePrompt = promptOverride ?? currentConfig.prompt;
+
+    if (!effectivePrompt) {
+      console.error('[useCronTask] Cannot start task: prompt is empty');
+      setState(prev => ({
+        ...prev,
+        error: 'Prompt is required to start the task',
+      }));
+      return;
+    }
 
     setState(prev => ({ ...prev, isStarting: true, error: null }));
 
@@ -116,7 +131,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         workspacePath,
         sessionId,
         tabId,
-        prompt: currentConfig.prompt,
+        prompt: effectivePrompt,
         intervalMinutes: currentConfig.intervalMinutes,
         endConditions: currentConfig.endConditions,
         runMode: currentConfig.runMode,

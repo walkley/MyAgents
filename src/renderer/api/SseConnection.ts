@@ -295,8 +295,15 @@ export class SseConnection {
 
     /**
      * Disconnect SSE stream
+     * Safe to call multiple times - subsequent calls are no-ops
      */
     async disconnect(): Promise<void> {
+        // Guard: if already disconnected (or never connected), do nothing
+        // This prevents duplicate cleanup work and duplicate logs
+        if (!this.tauriConnected && !this.eventSource) {
+            return;
+        }
+
         console.debug(`[SSE ${this.connectionId}] Disconnecting`);
 
         // Stop any pending reconnection attempts

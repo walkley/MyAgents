@@ -138,8 +138,8 @@ export default function SessionHistoryDropdown({
                 setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
 
                 // If we deleted the current session, trigger "new conversation" behavior
+                // Don't close the dropdown - keep it open so user can continue browsing history
                 if (isDeletingCurrentSession) {
-                    onClose(); // Close the dropdown
                     onDeleteCurrentSession(); // Reset to new conversation state
                 }
             } else {
@@ -241,7 +241,7 @@ export default function SessionHistoryDropdown({
                                             )}
                                             {sessionCronTaskMap.has(session.id) && (
                                                 <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                                                    定时
+                                                    心跳
                                                 </span>
                                             )}
                                             <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
@@ -294,7 +294,7 @@ export default function SessionHistoryDropdown({
                                                     <button
                                                         className="flex h-6 w-6 cursor-not-allowed items-center justify-center rounded opacity-0 group-hover:opacity-50"
                                                         disabled
-                                                        title="请先停止定时任务后再删除"
+                                                        title="请先停止心跳循环后再删除"
                                                     >
                                                         <Trash2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                                                     </button>
