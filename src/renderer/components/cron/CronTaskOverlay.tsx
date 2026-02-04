@@ -19,11 +19,11 @@ interface CronTaskOverlayProps {
 function AnimatedHeartIcon({ isRunning }: { isRunning: boolean }) {
   return (
     <div className="relative">
-      <HeartPulse className={`h-4 w-4 text-[var(--accent)] ${isRunning ? '' : 'opacity-60'}`} />
+      <HeartPulse className={`h-4 w-4 text-red-500 ${isRunning ? '' : 'opacity-60'}`} />
       {isRunning && (
         <span className="absolute -right-0.5 -top-0.5 h-2 w-2">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-40" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--accent)]" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-500 opacity-40" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
         </span>
       )}
     </div>
@@ -96,11 +96,11 @@ export default function CronTaskOverlay({
   };
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-[var(--accent)]/20 bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
+    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-red-500/20 bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
       {/* Left: Status Info */}
       <div className="flex items-center gap-3 min-w-0">
         {/* Status Icon */}
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--accent)]/10">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500/10">
           <AnimatedHeartIcon isRunning={isRunning} />
         </div>
 
@@ -113,7 +113,7 @@ export default function CronTaskOverlay({
             {timeDisplay && (
               <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${
                 timeDisplay.isCountdown
-                  ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                  ? 'bg-red-500/10 text-red-500'
                   : 'bg-[var(--paper-inset)] text-[var(--ink-secondary)]'
               }`}>
                 {timeDisplay.isCountdown && (

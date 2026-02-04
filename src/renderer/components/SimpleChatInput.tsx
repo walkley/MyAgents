@@ -1482,7 +1482,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   }}
                   className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
                     cronModeEnabled
-                      ? 'bg-[var(--accent)]/15 text-[var(--accent)] hover:bg-[var(--accent)]/25'
+                      ? 'bg-red-500/15 text-red-500 hover:bg-red-500/25'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
                   }`}
                   title={cronModeEnabled ? '心跳循环已启用' : '开启心跳循环'}

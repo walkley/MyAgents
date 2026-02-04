@@ -254,7 +254,7 @@ function CronTaskSettingsForm({
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HeartPulse className="h-5 w-5 text-[var(--accent)]" />
+            <HeartPulse className="h-5 w-5 text-red-500" />
             <h2 className="text-lg font-semibold text-[var(--ink)]">心跳循环</h2>
           </div>
           <button
