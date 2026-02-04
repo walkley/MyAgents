@@ -1,7 +1,7 @@
 // Cron Task Overlay - Covers input area when heartbeat loop task is running
 // Follows design_guide.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
-import { HeartPulse, Square, Pencil } from 'lucide-react';
+import { HeartPulse, Pencil } from 'lucide-react';
 import type { CronTaskStatus } from '@/types/cronTask';
 import { formatCronInterval } from '@/types/cronTask';
 
@@ -96,7 +96,7 @@ export default function CronTaskOverlay({
   };
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-red-500/20 bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
+    <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-red-500/10 bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
       {/* Left: Status Info */}
       <div className="flex items-center gap-3 min-w-0">
         {/* Status Icon */}
@@ -131,12 +131,12 @@ export default function CronTaskOverlay({
         </div>
       </div>
 
-      {/* Right: Control Buttons */}
+      {/* Right: Control Buttons - consistent styling with rounded borders */}
       <div className="flex shrink-0 items-center gap-2">
         {/* Settings Button */}
         <button
           onClick={onSettings}
-          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+          className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:border-[var(--ink-muted)] hover:text-[var(--ink)]"
         >
           <Pencil className="h-3.5 w-3.5" />
           修改
@@ -145,9 +145,9 @@ export default function CronTaskOverlay({
         {/* Stop Button */}
         <button
           onClick={onStop}
-          className="flex items-center gap-1.5 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/5 px-3 py-1.5 text-xs font-medium text-[var(--error)] transition-colors hover:bg-[var(--error)]/10"
+          className="flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/5"
         >
-          <Square className="h-3.5 w-3.5" />
+          <span className="h-3 w-3 rounded-[2px] bg-current" />
           停止
         </button>
       </div>
