@@ -1208,7 +1208,14 @@ export default function TabProvider({
     }, [tabId]);
 
     // Load session from history
-    const loadSession = useCallback(async (targetSessionId: string): Promise<boolean> => {
+    // Options:
+    // - skipLoadingReset: If true, don't reset isLoading to false. Useful when caller
+    //   knows an operation is in progress (e.g., cron task execution) and will manage
+    //   the loading state separately.
+    const loadSession = useCallback(async (
+        targetSessionId: string,
+        options?: { skipLoadingReset?: boolean }
+    ): Promise<boolean> => {
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
 
@@ -1280,8 +1287,12 @@ export default function TabProvider({
             isNewSessionRef.current = false; // Allow SSE replays again
             isStreamingRef.current = false;  // Stop any streaming state
             setMessages(loadedMessages);
-            setIsLoading(false);
-            setSessionState('idle');  // Reset session state when loading historical session
+            // Only reset loading state if not explicitly skipped
+            // (caller may be managing loading state for an in-progress operation like cron task)
+            if (!options?.skipLoadingReset) {
+                setIsLoading(false);
+                setSessionState('idle');  // Reset session state when loading historical session
+            }
             setSystemStatus(null);
             setAgentError(null);
             // Update current session ID to reflect the loaded session

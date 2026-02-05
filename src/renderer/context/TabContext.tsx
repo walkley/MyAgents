@@ -90,7 +90,7 @@ export interface TabContextValue extends TabState {
     // Chat actions
     sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }, isCron?: boolean) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
-    loadSession: (sessionId: string) => Promise<boolean>;
+    loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
     resetSession: () => Promise<boolean>;
 
     // Tab-scoped API functions (use this Tab's Sidecar)

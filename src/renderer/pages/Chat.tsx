@@ -293,16 +293,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           restoreCronTask(task);
 
           // Check if task is currently executing (e.g., execution started before app restart)
-          // This check runs after restoreFromTask to ensure cron state is ready
+          // If executing, set loading state immediately - loadSession will skip resetting it
           const executing = await isTaskExecuting(task.id);
           if (executing) {
-            console.log('[Chat] Cron task is currently executing, will set loading state');
-            // Use setTimeout to ensure this runs AFTER session loading completes
-            // (loadSession resets isLoading to false, we need to override that)
-            setTimeout(() => {
-              console.log('[Chat] Setting loading state for cron execution');
-              setIsLoading(true);
-            }, 100);
+            console.log('[Chat] Cron task is currently executing, setting loading state');
+            setIsLoading(true);
+            // Load session with skipLoadingReset to preserve loading state
+            if (sessionId) {
+              await loadSession(sessionId, { skipLoadingReset: true });
+            }
           }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
@@ -333,7 +332,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     };
 
     void loadCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading, loadSession]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {
