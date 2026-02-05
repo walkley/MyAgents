@@ -23,6 +23,11 @@ export interface AutoScrollControls {
    * Use this when user sends a message to ensure they see their query
    */
   scrollToBottom: () => void;
+  /**
+   * Instantly scroll to bottom without animation
+   * Use this when switching sessions to avoid slow scroll through all messages
+   */
+  scrollToBottomInstant: () => void;
 }
 
 export function useAutoScroll(
@@ -46,6 +51,9 @@ export function useAutoScroll(
 
   // Track scroll position to detect user scroll direction
   const lastScrollTopRef = useRef(0);
+
+  // Track first message ID to detect session switch (messages completely replaced)
+  const firstMessageIdRef = useRef<string | null>(null);
 
   const cancelAnimation = useCallback(() => {
     if (animationFrameRef.current !== null && typeof window !== 'undefined') {
@@ -147,14 +155,23 @@ export function useAutoScroll(
   }, [animateSmoothScroll]);
 
   /**
-   * Instant scroll to bottom (used for initial load or large jumps)
+   * Instant scroll to bottom (used for initial load, session switch, or large jumps)
+   * Also re-enables auto-scroll and cancels any ongoing animation
    */
   const scrollToBottomInstant = useCallback(() => {
-    if (!isAutoScrollEnabledRef.current || isPausedRef.current) return;
     const element = containerRef.current;
     if (!element) return;
+
+    // Cancel any ongoing smooth scroll animation
+    cancelAnimation();
+
+    // Re-enable auto-scroll
+    isAutoScrollEnabledRef.current = true;
+    isPausedRef.current = false;
+
+    // Instant scroll without animation
     element.scrollTop = element.scrollHeight;
-  }, []);
+  }, [cancelAnimation]);
 
   /**
    * Force scroll to bottom and re-enable auto-scroll
@@ -185,12 +202,33 @@ export function useAutoScroll(
     };
   }, [cancelAnimation]);
 
-  // Start smooth scroll when messages change
+  // Handle messages change - detect session switch vs. new messages
   useEffect(() => {
-    if (isAutoScrollEnabledRef.current) {
+    const currentFirstId = messages.length > 0 ? messages[0].id : null;
+    const previousFirstId = firstMessageIdRef.current;
+
+    // Update tracked first message ID
+    firstMessageIdRef.current = currentFirstId;
+
+    // Skip if auto-scroll is disabled
+    if (!isAutoScrollEnabledRef.current) return;
+
+    // Detect session switch: first message ID changed (or messages went from empty to non-empty)
+    // This means the entire message list was replaced, not just appended
+    const isSessionSwitch = previousFirstId !== null && currentFirstId !== previousFirstId;
+    const isInitialLoad = previousFirstId === null && currentFirstId !== null;
+
+    if (isSessionSwitch || isInitialLoad) {
+      // Session switch or initial load - use instant scroll to avoid slow animation
+      // Use requestAnimationFrame to ensure DOM has updated with new messages
+      requestAnimationFrame(() => {
+        scrollToBottomInstant();
+      });
+    } else if (messages.length > 0) {
+      // Normal message append - use smooth scroll
       startSmoothScroll();
     }
-  }, [messages, startSmoothScroll]);
+  }, [messages, startSmoothScroll, scrollToBottomInstant]);
 
   // Start smooth scroll when loading starts, stop when loading ends
   useEffect(() => {
@@ -286,5 +324,5 @@ export function useAutoScroll(
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only run on mount
   }, []);
 
-  return { containerRef, pauseAutoScroll, scrollToBottom };
+  return { containerRef, pauseAutoScroll, scrollToBottom, scrollToBottomInstant };
 }
