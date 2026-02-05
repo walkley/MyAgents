@@ -637,18 +637,19 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             const currentEmail = status.info.email;
             const cached = providerVerifyStatusRef.current[SUBSCRIPTION_PROVIDER_ID];
 
-            // Check if we can use cached result
-            if (!forceVerify && cached) {
+            // Only use cache for successful verifications (valid status)
+            // Failed verifications are always retried
+            if (!forceVerify && cached && cached.status === 'valid') {
                 const isExpired = isVerifyExpired(cached.verifiedAt);
                 const isSameAccount = cached.accountEmail === currentEmail;
 
                 if (!isExpired && isSameAccount) {
-                    // Use cached result
-                    console.log('[Settings] Using cached subscription verification:', cached.status);
+                    // Use cached successful result
+                    console.log('[Settings] Using cached subscription verification (valid)');
                     if (isMounted) {
                         setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
                             ...prev,
-                            verifyStatus: cached.status,
+                            verifyStatus: 'valid',
                         } : prev);
                     }
                     return;
@@ -660,6 +661,8 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 } else if (!isSameAccount) {
                     console.log('[Settings] Subscription account changed, re-verifying...');
                 }
+            } else if (cached && cached.status === 'invalid') {
+                console.log('[Settings] Previous verification failed, retrying...');
             }
 
             // Set loading state
@@ -671,8 +674,11 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
                 const newStatus = result.success ? 'valid' : 'invalid';
 
-                // Save to cache with account email
-                await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, newStatus, currentEmail);
+                if (result.success) {
+                    // Only cache successful verifications
+                    await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+                }
+                // Don't cache failures - they will be retried next time
 
                 if (isMounted) {
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
@@ -683,8 +689,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 }
             } catch (err) {
                 console.error('[Settings] Subscription verify failed:', err);
-                // Save failure to cache
-                await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, 'invalid', currentEmail);
+                // Don't cache failures - they will be retried next time
 
                 if (isMounted) {
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
@@ -743,24 +748,23 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
             const newStatus = result.success ? 'valid' : 'invalid';
 
-            // Save to cache with account email
-            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, newStatus, currentEmail);
+            if (result.success) {
+                // Only cache successful verifications
+                await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+                toast.success('验证成功');
+            } else {
+                // Don't cache failures - they will be retried next time
+                toast.error(result.error || '验证失败');
+            }
 
             setSubscriptionStatus(prev => prev ? {
                 ...prev,
                 verifyStatus: newStatus,
                 verifyError: result.error
             } : prev);
-
-            if (result.success) {
-                toast.success('验证成功');
-            } else {
-                toast.error(result.error || '验证失败');
-            }
         } catch (err) {
             console.error('[Settings] Subscription re-verify failed:', err);
-            // Save failure to cache
-            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'invalid', currentEmail);
+            // Don't cache failures - they will be retried next time
 
             setSubscriptionStatus(prev => prev ? {
                 ...prev,
@@ -1782,6 +1786,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                                 <div className="flex items-center gap-1.5 text-[var(--success)]">
                                                                     <Check className="h-3.5 w-3.5" />
                                                                     <span className="font-medium">已验证</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={handleReVerifySubscription}
+                                                                        disabled={subscriptionVerifying}
+                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                        title="重新验证"
+                                                                    >
+                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                    </button>
                                                                 </div>
                                                             )}
                                                             {subscriptionStatus.verifyStatus === 'invalid' && (
