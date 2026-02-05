@@ -26,8 +26,12 @@ async function invokeCommand<T>(cmd: string, args?: Record<string, unknown>): Pr
   if (!isTauriEnvironment()) {
     throw new Error('Cron tasks are only available in Tauri environment');
   }
+  console.log('[cronTaskClient] invokeCommand:', cmd, args);
   const invoke = await getInvoke();
-  return invoke(cmd, args);
+  console.log('[cronTaskClient] invoke function obtained, calling...');
+  const result = await invoke<T>(cmd, args);
+  console.log('[cronTaskClient] invoke completed:', cmd);
+  return result;
 }
 
 /**
@@ -105,8 +109,17 @@ export const getTasksToRecover = (): Promise<CronTask[]> =>
 // ============= Cron Scheduler Control =============
 
 /** Start the scheduler for a task (called after task is started) */
-export const startCronScheduler = (taskId: string): Promise<void> =>
-  invokeCommand('cmd_start_cron_scheduler', { taskId });
+export const startCronScheduler = async (taskId: string): Promise<void> => {
+  console.log('[cronTaskClient] startCronScheduler called for task:', taskId);
+  try {
+    const result = await invokeCommand<void>('cmd_start_cron_scheduler', { taskId });
+    console.log('[cronTaskClient] startCronScheduler completed for task:', taskId);
+    return result;
+  } catch (error) {
+    console.error('[cronTaskClient] startCronScheduler failed for task:', taskId, error);
+    throw error;
+  }
+};
 
 /** Mark a task as currently executing (called when execution starts) */
 export const markTaskExecuting = (taskId: string): Promise<void> =>
