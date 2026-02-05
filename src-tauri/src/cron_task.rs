@@ -1361,17 +1361,23 @@ pub async fn cmd_start_cron_scheduler(
     app_handle: tauri::AppHandle,
     task_id: String,
 ) -> Result<(), String> {
+    log::info!("[CronTask] cmd_start_cron_scheduler called for task: {}", task_id);
+
     let manager = get_cron_task_manager();
+    log::debug!("[CronTask] Got manager, getting task...");
 
     // Get task info for session activation
     let task = manager.get_task(&task_id).await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
+    log::debug!("[CronTask] Got task: {}, session_id: {}", task_id, task.session_id);
 
     // Ensure Session has a Sidecar with CronTask as owner
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
+        log::debug!("[CronTask] Got sidecar state, ensuring session sidecar...");
         let workspace_path = std::path::Path::new(&task.workspace_path);
         let owner = SidecarOwner::CronTask(task_id.clone());
 
+        log::info!("[CronTask] Calling ensure_session_sidecar for session: {}", task.session_id);
         match ensure_session_sidecar(&app_handle, &sidecar_state, &task.session_id, workspace_path, owner) {
             Ok(result) => {
                 log::info!(
