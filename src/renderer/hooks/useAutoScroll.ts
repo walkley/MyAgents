@@ -60,6 +60,9 @@ export function useAutoScroll(
   // Initialize as undefined so first render triggers isInitialLoad
   const lastSessionIdRef = useRef<string | null | undefined>(undefined);
 
+  // Flag to indicate we need to scroll to bottom after messages load
+  const pendingScrollRef = useRef(false);
+
   // Store animation function in ref for recursive RAF calls (avoids lint warning about self-reference)
   const animateSmoothScrollRef = useRef<(() => void) | null>(null);
 
@@ -255,26 +258,39 @@ export function useAutoScroll(
     }
 
     if (isSessionSwitch || isInitialLoad) {
-      // Session switch or initial load - ALWAYS scroll to bottom regardless of auto-scroll state
-      // This ensures user sees the latest messages when switching sessions
-      // Use double requestAnimationFrame to ensure DOM has fully updated
+      // Mark that we need to scroll when messages load
+      // Don't scroll immediately because messages may not be in DOM yet
       if (isDebugMode()) {
-        console.log('[useAutoScroll] Session switch detected, scheduling scrollToBottomInstant');
+        console.log('[useAutoScroll] Session switch detected, setting pending scroll flag');
       }
+      pendingScrollRef.current = true;
+    }
+  }, [sessionId]);
+
+  // Handle messages change - scroll to bottom if pending, otherwise smooth scroll
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    // If we have a pending scroll from session switch, do instant scroll
+    if (pendingScrollRef.current) {
+      pendingScrollRef.current = false;
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] Messages loaded with pending scroll, executing scrollToBottomInstant');
+      }
+      // Use RAF to ensure DOM has rendered the messages
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToBottomInstant();
         });
       });
+      return;
     }
-  }, [sessionId, scrollToBottomInstant]);
 
-  // Handle messages change - only for smooth scroll during normal operation
-  useEffect(() => {
-    if (messages.length > 0 && isAutoScrollEnabledRef.current) {
+    // Normal message change - use smooth scroll if enabled
+    if (isAutoScrollEnabledRef.current) {
       startSmoothScroll();
     }
-  }, [messages, startSmoothScroll]);
+  }, [messages, startSmoothScroll, scrollToBottomInstant]);
 
   // Start smooth scroll when loading starts, stop when loading ends
   useEffect(() => {
