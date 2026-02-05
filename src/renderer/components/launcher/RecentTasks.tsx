@@ -14,6 +14,16 @@ import { getAllCronTasks } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
 
+/**
+ * Extract folder name from path (cross-platform, handles both / and \)
+ */
+function getFolderName(path: string): string {
+    if (!path) return 'Workspace';
+    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = normalized.split('/');
+    return parts[parts.length - 1] || 'Workspace';
+}
+
 interface RecentTasksProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
@@ -200,7 +210,7 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                             {/* Workspace info */}
                             <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
                                 <FolderOpen className="h-3 w-3" />
-                                <span className="max-w-[80px] truncate">{project.name}</span>
+                                <span className="max-w-[80px] truncate">{getFolderName(project.path)}</span>
                             </div>
                         </button>
                     );
