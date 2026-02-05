@@ -47,13 +47,18 @@ export function useAutoScroll(
 
   // Keep isLoading in a ref so animation loop can access it
   const isLoadingRef = useRef(isLoading);
-  isLoadingRef.current = isLoading;
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
 
   // Track scroll position to detect user scroll direction
   const lastScrollTopRef = useRef(0);
 
   // Track first message ID to detect session switch (messages completely replaced)
   const firstMessageIdRef = useRef<string | null>(null);
+
+  // Store animation function in ref for recursive RAF calls (avoids lint warning about self-reference)
+  const animateSmoothScrollRef = useRef<(() => void) | null>(null);
 
   const cancelAnimation = useCallback(() => {
     if (animationFrameRef.current !== null && typeof window !== 'undefined') {
@@ -110,8 +115,8 @@ export function useAutoScroll(
     if (distance <= SNAP_THRESHOLD_PX) {
       element.scrollTop = targetScrollTop;
       // Keep animation loop running while loading to catch new content
-      if (isLoadingRef.current) {
-        animationFrameRef.current = requestAnimationFrame(animateSmoothScroll);
+      if (isLoadingRef.current && animateSmoothScrollRef.current) {
+        animationFrameRef.current = requestAnimationFrame(animateSmoothScrollRef.current);
       } else {
         isAnimatingRef.current = false;
       }
@@ -136,9 +141,16 @@ export function useAutoScroll(
     const newScrollTop = Math.min(currentScrollTop + scrollAmount, targetScrollTop);
     element.scrollTop = newScrollTop;
 
-    // Continue animation
-    animationFrameRef.current = requestAnimationFrame(animateSmoothScroll);
+    // Continue animation via ref (avoids lint warning about self-reference in useCallback)
+    if (animateSmoothScrollRef.current) {
+      animationFrameRef.current = requestAnimationFrame(animateSmoothScrollRef.current);
+    }
   }, []);
+
+  // Keep ref updated with latest function
+  useEffect(() => {
+    animateSmoothScrollRef.current = animateSmoothScroll;
+  }, [animateSmoothScroll]);
 
   /**
    * Start smooth scroll animation (or continue if already running)
@@ -315,14 +327,8 @@ export function useAutoScroll(
     };
   }, [startSmoothScroll]);
 
-  // Initial scroll to bottom when first rendered with content
-  useEffect(() => {
-    if (messages.length > 0) {
-      // Use instant scroll for initial load
-      scrollToBottomInstant();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only run on mount
-  }, []);
+  // Note: Initial scroll is handled by the messages change effect (isInitialLoad case)
+  // No separate mount effect needed - it would cause duplicate scroll calls
 
   return { containerRef, pauseAutoScroll, scrollToBottom, scrollToBottomInstant };
 }

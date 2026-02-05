@@ -398,64 +398,36 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Handle Rust scheduler execution complete event
   // This is emitted after Rust directly executes via Sidecar (not via frontend)
   const handleExecutionComplete = useCallback(async (payload: { taskId: string; success: boolean; executionCount: number }) => {
-    // Always log this key event for troubleshooting
-    console.log('[useCronTask] cron:execution-complete received:', payload.taskId, 'eventCount:', payload.executionCount);
-
     const currentTask = stateRef.current.task;
-    const currentState = stateRef.current;
 
-    // Always log state for troubleshooting execution count issues
-    console.log('[useCronTask] handleExecutionComplete state:', {
-      hasCurrentTask: !!currentTask,
-      currentTaskId: currentTask?.id,
-      currentCount: currentTask?.executionCount,
-      isEnabled: currentState.isEnabled,
-      payloadTaskId: payload.taskId,
-    });
+    // Debug logging (only in debug mode to avoid production noise)
+    if (isDebugMode()) {
+      console.log('[useCronTask] cron:execution-complete received:', payload.taskId, 'eventCount:', payload.executionCount);
+      console.log('[useCronTask] handleExecutionComplete state:', {
+        hasCurrentTask: !!currentTask,
+        currentTaskId: currentTask?.id,
+        payloadTaskId: payload.taskId,
+      });
+    }
 
     // If task ID doesn't match, this event is for a different Tab - ignore it
     // cron:execution-complete is a global event, all Tabs receive it
     if (currentTask && currentTask.id !== payload.taskId) {
-      console.log('[useCronTask] handleExecutionComplete: event for different task, ignoring. current:', currentTask.id, 'event:', payload.taskId);
       return;
     }
 
-    // If no current task but isEnabled, this might be a state sync issue
-    // Only attempt fallback if we don't have a task yet (not when IDs mismatch)
+    // If no current task, ignore the event
+    // We don't do fallback refresh because:
+    // 1. The event's taskId might belong to a different Tab
+    // 2. Without currentTask, we can't verify ownership
+    // 3. The Tab that owns this task will handle the event
     if (!currentTask) {
-      if (payload.taskId && currentState.isEnabled) {
-        console.log('[useCronTask] No current task but isEnabled, attempting fallback refresh:', payload.taskId);
-        try {
-          const task = await getCronTask(payload.taskId);
-          console.log('[useCronTask] Fallback: fetched task count:', task.executionCount);
-          // Check if component is still mounted before updating state
-          if (!mountedRef.current) return;
-
-          // Update state and sync stateRef atomically within setState callback
-          setState(prev => {
-            const newState = { ...prev, task };
-            stateRef.current = newState;
-            console.log('[useCronTask] Fallback: state updated with count:', task.executionCount);
-            return newState;
-          });
-
-          // Notify caller
-          if (optionsRef.current.onExecutionComplete) {
-            optionsRef.current.onExecutionComplete(task);
-          }
-          return;
-        } catch (error) {
-          console.error('[useCronTask] Fallback refresh failed:', error);
-        }
-      }
-      console.log('[useCronTask] handleExecutionComplete: no current task, returning early');
       return;
     }
 
     // Refresh task state from server to get updated lastExecutedAt and executionCount
     try {
       const task = await getCronTask(payload.taskId);
-      console.log('[useCronTask] Task refreshed from server:', task.id, 'count:', task.executionCount);
       // Check if component is still mounted before updating state
       if (!mountedRef.current) return;
 
@@ -463,7 +435,6 @@ export function useCronTask(options: UseCronTaskOptions) {
       setState(prev => {
         const newState = { ...prev, task };
         stateRef.current = newState;
-        console.log('[useCronTask] State updated with refreshed task, count:', task.executionCount);
         return newState;
       });
 
