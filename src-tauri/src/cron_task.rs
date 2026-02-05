@@ -588,24 +588,27 @@ impl CronTaskManager {
                             break;
                         }
 
-                        // Check end conditions after execution
-                        let task_updated = {
+                        // Check end conditions after execution and get updated execution count
+                        let (should_stop, updated_execution_count) = {
                             let tasks_guard = tasks.read().await;
-                            tasks_guard.get(&task_id_owned).cloned()
-                        };
-                        if let Some(t) = task_updated {
-                            if check_end_conditions_static(&t) {
-                                log::info!("[CronTask] Task {} reached end condition after execution", task_id_owned);
-                                stop_task_internal(&handle, &tasks, &task_id_owned, None).await;
-                                break;
+                            if let Some(t) = tasks_guard.get(&task_id_owned) {
+                                (check_end_conditions_static(t), t.execution_count)
+                            } else {
+                                (false, task.execution_count + 1) // Fallback (shouldn't happen)
                             }
+                        };
+                        if should_stop {
+                            log::info!("[CronTask] Task {} reached end condition after execution", task_id_owned);
+                            stop_task_internal(&handle, &tasks, &task_id_owned, None).await;
+                            break;
                         }
 
-                        // Emit event for frontend UI update (optional)
+                        // Emit event for frontend UI update
+                        // Use updated_execution_count from tasks RwLock (not the stale task snapshot)
                         let _ = handle.emit("cron:execution-complete", serde_json::json!({
                             "taskId": task_id_owned,
                             "success": success,
-                            "executionCount": task.execution_count + 1
+                            "executionCount": updated_execution_count
                         }));
                     }
                     Err(e) => {
