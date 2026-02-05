@@ -149,10 +149,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     onExecutionComplete: async (task) => {
       // Called when a single execution completes (task may still be running)
       // Refresh the session to show the latest messages
-      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount);
+      // Use task.sessionId (the cron task's actual session) instead of Chat's sessionId
+      // which may be a pending/different session
+      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId);
       setIsLoading(false);
-      if (sessionId) {
-        await loadSession(sessionId);
+      if (task.sessionId) {
+        await loadSession(task.sessionId);
       }
     },
     // Register for SSE cron:task-exit-requested events via TabContext
