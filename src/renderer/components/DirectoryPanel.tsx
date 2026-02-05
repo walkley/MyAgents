@@ -1080,7 +1080,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                   const data = node.data as DirectoryTreeNode;
                   const isDir = data.type === 'dir';
                   // Check if this is the myagents_files folder (special folder for imported files)
-                  const isMyAgentsFiles = data.path === 'myagents_files' && isDir;
+                  const _isMyAgentsFiles = data.path === 'myagents_files' && isDir;
                   const Icon =
                     isDir ?
                       node.isOpen ?

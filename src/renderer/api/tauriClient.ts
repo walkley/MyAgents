@@ -2,7 +2,7 @@
 // Handles sidecar lifecycle and provides server URL for HTTP communication
 
 import { invoke } from '@tauri-apps/api/core';
-import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
+import { isTauriEnvironment } from '@/utils/browserMock';
 
 /** Sidecar status returned from Rust backend */
 export interface SidecarStatus {
@@ -463,6 +463,25 @@ export async function stopTabSidecar(tabId: string): Promise<void> {
 }
 
 /**
+ * Stop SSE proxy for a specific Tab
+ * Should be called BEFORE stopping the Sidecar to avoid EOF errors
+ * @param tabId - Tab identifier
+ */
+export async function stopSseProxy(tabId: string): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('stop_sse_proxy', { tabId });
+        console.debug(`[tauriClient] Tab ${tabId} SSE proxy stopped`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to stop SSE proxy for tab ${tabId}:`, error);
+        // Don't throw - cleanup should be best-effort
+    }
+}
+
+/**
  * Get server URL for a specific Tab
  * @param tabId - Tab identifier
  */
@@ -660,4 +679,310 @@ export async function stopAllSidecars(): Promise<void> {
  */
 export function resetTabServerUrlCache(tabId: string): void {
     tabServerUrls.delete(tabId);
+}
+
+// ============= Session Activation API =============
+// These functions support Session singleton constraint
+
+/** Session activation information */
+export interface SessionActivation {
+    session_id: string;
+    tab_id: string | null;
+    task_id: string | null;  // If activated by cron task, contains the task ID
+    port: number;
+    workspace_path: string;
+    is_cron_task: boolean;
+}
+
+/** Sidecar info for a workspace */
+export interface SidecarInfo {
+    port: number;
+    workspace_path: string;
+    is_healthy: boolean;
+}
+
+/** Cron task execution response */
+export interface CronExecuteResponse {
+    success: boolean;
+    error?: string;
+    ai_requested_exit?: boolean;
+    exit_reason?: string;
+}
+
+/** Cron task execution provider environment */
+export interface ProviderEnv {
+    base_url?: string;
+    api_key?: string;
+}
+
+/**
+ * Get activation status for a session
+ * @param sessionId - Session identifier
+ * @returns SessionActivation if session is activated, null if not
+ */
+export async function getSessionActivation(sessionId: string): Promise<SessionActivation | null> {
+    if (!isTauri()) {
+        return null;
+    }
+
+    try {
+        return await invoke<SessionActivation | null>('cmd_get_session_activation', { sessionId });
+    } catch (error) {
+        console.error(`[tauriClient] Failed to get session activation for ${sessionId}:`, error);
+        return null;
+    }
+}
+
+/**
+ * Activate a session (mark it as in-use by a Tab/Sidecar)
+ * @param sessionId - Session identifier
+ * @param tabId - Tab that owns this session (null for cron tasks)
+ * @param port - Sidecar port
+ * @param workspacePath - Workspace directory path
+ * @param isCronTask - Whether this is a cron task activation
+ */
+export async function activateSession(
+    sessionId: string,
+    tabId: string | null,
+    taskId: string | null,
+    port: number,
+    workspacePath: string,
+    isCronTask: boolean = false
+): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('cmd_activate_session', {
+            sessionId,
+            tabId: tabId ?? null,
+            taskId: taskId ?? null,
+            port,
+            workspacePath,
+            isCronTask,
+        });
+        console.debug(`[tauriClient] Session ${sessionId} activated by tab ${tabId || 'cron'}, task: ${taskId || 'none'}`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to activate session ${sessionId}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Deactivate a session (mark it as no longer in-use)
+ * @param sessionId - Session identifier
+ */
+export async function deactivateSession(sessionId: string): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('cmd_deactivate_session', { sessionId });
+        console.debug(`[tauriClient] Session ${sessionId} deactivated`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to deactivate session ${sessionId}:`, error);
+        // Don't throw - deactivation should be best-effort
+    }
+}
+
+/**
+ * Update a session's owning Tab (for Tab switching within same Sidecar)
+ * @param sessionId - Session identifier
+ * @param newTabId - New Tab identifier
+ */
+export async function updateSessionTab(sessionId: string, newTabId: string | null | undefined): Promise<void> {
+    if (!isTauri()) {
+        return;
+    }
+
+    try {
+        await invoke('cmd_update_session_tab', { sessionId, newTabId: newTabId ?? null });
+        console.debug(`[tauriClient] Session ${sessionId} transferred to tab ${newTabId ?? 'none'}`);
+    } catch (error) {
+        console.error(`[tauriClient] Failed to update session tab for ${sessionId}:`, error);
+        throw error;
+    }
+}
+
+
+// ============= Session-Centric Sidecar API (v0.1.11) =============
+// These functions support the new Owner model where Sidecar lifecycle
+// is tied to Sessions, not Tabs or CronTasks.
+
+/** Result from ensureSessionSidecar */
+export interface EnsureSidecarResult {
+    port: number;
+    isNew: boolean;
+}
+
+/**
+ * Ensure a Session has a Sidecar running, adding the specified owner.
+ * If the Session already has a healthy Sidecar, just adds the owner.
+ * If no Sidecar exists, creates a new one with the owner.
+ *
+ * @param sessionId - Session identifier
+ * @param workspacePath - Workspace directory path
+ * @param ownerType - Type of owner ('tab' | 'cron_task')
+ * @param ownerId - ID of the owner (Tab ID or CronTask ID)
+ * @returns {port, isNew} where isNew is true if a new Sidecar was started
+ */
+export async function ensureSessionSidecar(
+    sessionId: string,
+    workspacePath: string,
+    ownerType: 'tab' | 'cron_task',
+    ownerId: string
+): Promise<EnsureSidecarResult> {
+    if (!isTauri()) {
+        return { port: 3000, isNew: false };
+    }
+
+    try {
+        const result = await invoke<EnsureSidecarResult>('cmd_ensure_session_sidecar', {
+            sessionId,
+            workspacePath,
+            ownerType,
+            ownerId,
+        });
+        console.debug(`[tauriClient] ensureSessionSidecar: session=${sessionId}, owner=${ownerType}:${ownerId}, port=${result.port}, isNew=${result.isNew}`);
+        return result;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to ensure session sidecar for ${sessionId}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Release an owner from a Session's Sidecar.
+ * If this was the last owner, the Sidecar is stopped.
+ *
+ * @param sessionId - Session identifier
+ * @param ownerType - Type of owner ('tab' | 'cron_task')
+ * @param ownerId - ID of the owner (Tab ID or CronTask ID)
+ * @returns true if the Sidecar was stopped (no more owners)
+ */
+export async function releaseSessionSidecar(
+    sessionId: string,
+    ownerType: 'tab' | 'cron_task',
+    ownerId: string
+): Promise<boolean> {
+    if (!isTauri()) {
+        return false;
+    }
+
+    try {
+        const stopped = await invoke<boolean>('cmd_release_session_sidecar', {
+            sessionId,
+            ownerType,
+            ownerId,
+        });
+        console.debug(`[tauriClient] releaseSessionSidecar: session=${sessionId}, owner=${ownerType}:${ownerId}, stopped=${stopped}`);
+        return stopped;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to release session sidecar for ${sessionId}:`, error);
+        // Don't throw - release should be best-effort
+        return false;
+    }
+}
+
+/**
+ * Get the port for a Session's Sidecar
+ *
+ * @param sessionId - Session identifier
+ * @returns Port number if Session has a Sidecar, null otherwise
+ */
+export async function getSessionPort(sessionId: string): Promise<number | null> {
+    if (!isTauri()) {
+        return 3000;
+    }
+
+    try {
+        const port = await invoke<number | null>('cmd_get_session_port', { sessionId });
+        return port;
+    } catch (error) {
+        console.warn(`[tauriClient] Failed to get session port for ${sessionId}:`, error);
+        return null;
+    }
+}
+
+/**
+ * Upgrade a session ID (e.g., from "pending-xxx" to real session ID)
+ * This updates HashMap keys in Rust without stopping the Sidecar.
+ *
+ * @param oldSessionId - The old session ID (typically "pending-{tabId}")
+ * @param newSessionId - The new real session ID
+ * @returns true if the upgrade was successful
+ */
+export async function upgradeSessionId(
+    oldSessionId: string,
+    newSessionId: string
+): Promise<boolean> {
+    if (!isTauri()) {
+        return true;
+    }
+
+    try {
+        const upgraded = await invoke<boolean>('cmd_upgrade_session_id', {
+            oldSessionId,
+            newSessionId,
+        });
+        console.debug(`[tauriClient] upgradeSessionId: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+        return upgraded;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to upgrade session ID from ${oldSessionId} to ${newSessionId}:`, error);
+        return false;
+    }
+}
+
+/**
+ * Execute a cron task synchronously via Sidecar
+ * This is the full execution that waits for completion and returns results
+ *
+ * @param workspacePath - Workspace directory path
+ * @param taskId - Cron task identifier
+ * @param sessionId - Session ID for activation tracking (prevents Sidecar kill during execution)
+ * @param prompt - Task prompt to execute
+ * @param isFirstExecution - Whether this is the first execution
+ * @param aiCanExit - Whether AI can exit the task
+ * @param permissionMode - Permission mode ('auto' | 'always_ask' | 'always_allow')
+ * @param model - Optional model to use
+ * @param providerEnv - Optional provider environment (API key, base URL)
+ */
+export async function executeCronTask(
+    workspacePath: string,
+    taskId: string,
+    sessionId: string,
+    prompt: string,
+    isFirstExecution?: boolean,
+    aiCanExit?: boolean,
+    permissionMode?: string,
+    model?: string,
+    providerEnv?: ProviderEnv
+): Promise<CronExecuteResponse> {
+    if (!isTauri()) {
+        return { success: false, error: 'Not in Tauri environment' };
+    }
+
+    try {
+        const response = await invoke<CronExecuteResponse>('cmd_execute_cron_task', {
+            workspacePath,
+            taskId,
+            sessionId,
+            prompt,
+            isFirstExecution: isFirstExecution ?? null,
+            aiCanExit: aiCanExit ?? null,
+            permissionMode: permissionMode ?? null,
+            model: model ?? null,
+            providerEnv: providerEnv ?? null,
+        });
+        console.debug(`[tauriClient] Cron task ${taskId} execution completed:`, response);
+        return response;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to execute cron task ${taskId}:`, error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
 }

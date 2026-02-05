@@ -8,6 +8,18 @@ import { AlertCircle, ChevronDown, FolderOpen, Loader2, MoreVertical, Play, Tras
 
 import { getModelsDisplay, type Project, type Provider } from '@/config/types';
 
+/**
+ * Extract folder name from path (cross-platform, handles both / and \)
+ * This is more reliable than using project.name which might have historical issues
+ */
+function getFolderName(path: string): string {
+    if (!path) return 'Workspace';
+    // Normalize path separators (support both / and \) and trim trailing slashes
+    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = normalized.split('/');
+    return parts[parts.length - 1] || 'Workspace';
+}
+
 interface WorkspaceCardProps {
     project: Project;
     providers: Provider[];
@@ -88,7 +100,7 @@ export default function WorkspaceCard({
                 </div>
                 <div className="min-w-0 flex-1 pt-0.5">
                     <h3 className="truncate text-[13px] font-medium text-[var(--ink)]">
-                        {project.name}
+                        {getFolderName(project.path)}
                     </h3>
                     <p className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]/70">
                         {project.path}

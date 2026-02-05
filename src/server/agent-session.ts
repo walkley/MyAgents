@@ -1,10 +1,11 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
-import { getCrossPlatformEnv, buildCrossPlatformEnv } from './utils/platform';
+import { getCrossPlatformEnv } from './utils/platform';
+import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -12,7 +13,7 @@ import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
 import { broadcast } from './sse';
-import { initLogger, appendLog, getLogLines as getLogLinesFromLogger, cleanupOldLogs } from './AgentLogger';
+import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -137,7 +138,7 @@ type MessageQueueItem = {
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
-const pendingAttachments: MessageAttachment[] = [];
+const _pendingAttachments: MessageAttachment[] = [];
 // Current permission mode for the session (updates on each user message)
 let currentPermissionMode: PermissionMode = 'auto';
 // Current model for the session (updates on each user message if changed)
@@ -151,9 +152,84 @@ export type ProviderEnv = {
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 // SDK session ID to resume from (set by switchToSession)
 let resumeSessionId: string | undefined = undefined;
+
+// ===== System Prompt Configuration =====
+// Supports three modes:
+// - 'preset': Use default claude_code system prompt (default)
+// - 'replace': Completely replace with custom system prompt
+// - 'append': Append content to the default claude_code system prompt
+export type SystemPromptMode = 'preset' | 'replace' | 'append';
+
+export type SystemPromptConfig =
+  | { mode: 'preset' }
+  | { mode: 'replace'; content: string }
+  | { mode: 'append'; content: string };
+
+let currentSystemPromptConfig: SystemPromptConfig = { mode: 'preset' };
+
+/**
+ * Set custom system prompt configuration.
+ * This affects the next session creation (when query() is called).
+ *
+ * @param config - System prompt configuration
+ *   - { mode: 'preset' }: Use default claude_code preset
+ *   - { mode: 'replace', content: '...' }: Replace with custom system prompt
+ *   - { mode: 'append', content: '...' }: Append to claude_code preset
+ */
+export function setSystemPromptConfig(config: SystemPromptConfig): void {
+  currentSystemPromptConfig = config;
+  if (isDebugMode) {
+    console.log(`[agent] System prompt config set: mode=${config.mode}${config.mode !== 'preset' ? `, content length=${config.content.length}` : ''}`);
+  }
+}
+
+/**
+ * Clear system prompt configuration back to default preset.
+ */
+export function clearSystemPromptConfig(): void {
+  currentSystemPromptConfig = { mode: 'preset' };
+  if (isDebugMode) {
+    console.log('[agent] System prompt config cleared to default preset');
+  }
+}
+
+/**
+ * Get current system prompt configuration.
+ * Returns a shallow copy to prevent external mutation.
+ */
+export function getSystemPromptConfig(): SystemPromptConfig {
+  // Return a copy to prevent external mutation of internal state
+  return { ...currentSystemPromptConfig };
+}
+
+/**
+ * Build the systemPrompt option for SDK query() call.
+ * Translates our config format to SDK's expected format.
+ */
+function buildSystemPromptOption(): string | { type: 'preset'; preset: 'claude_code'; append?: string } {
+  switch (currentSystemPromptConfig.mode) {
+    case 'replace':
+      // Complete replacement with custom system prompt
+      return currentSystemPromptConfig.content;
+    case 'append':
+      // Use preset with appended content
+      return {
+        type: 'preset' as const,
+        preset: 'claude_code' as const,
+        append: currentSystemPromptConfig.content
+      };
+    case 'preset':
+    default:
+      // Default preset without modifications
+      return {
+        type: 'preset' as const,
+        preset: 'claude_code' as const
+      };
+  }
+}
 // SDK ready signal - prevents messageGenerator from yielding before SDK's ProcessTransport is ready
-let sdkReadyResolve: (() => void) | null = null;
-let sdkReadyPromise: Promise<void> | null = null;
+let _sdkReadyResolve: (() => void) | null = null;
+let _sdkReadyPromise: Promise<void> | null = null;
 
 // ===== Turn-level Usage Tracking =====
 // Token usage for the current turn, extracted from SDK result message
@@ -235,6 +311,7 @@ function loadMcpServersFromConfig(): McpServerDefinition[] {
       return [];
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic fs import for config loading
     const content = require('fs').readFileSync(configPath, 'utf-8');
     const config = JSON.parse(content);
 
@@ -321,6 +398,24 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: true };
   }
 
+  // Extract server ID from tool name: mcp__<server-id>__<tool-name>
+  const parts = toolName.split('__');
+  if (parts.length < 3) {
+    return { allowed: false, reason: '无效的 MCP 工具名称' };
+  }
+  const serverId = parts[1];
+
+  // Special case: cron-tools is a built-in MCP server for cron task management
+  // Always allow when we're in a cron task context (regardless of user's MCP settings)
+  if (serverId === 'cron-tools') {
+    const cronContext = getCronTaskContext();
+    if (cronContext.taskId) {
+      return { allowed: true };
+    }
+    // Not in cron context - this tool shouldn't be available
+    return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
+  }
+
   // Case 1: MCP not set (null) - allow all (backward compatible)
   if (currentMcpServers === null) {
     return { allowed: true };
@@ -332,13 +427,6 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
   }
 
   // Case 3: User enabled specific MCP - check if this tool's server is enabled
-  // Extract server ID from tool name: mcp__<server-id>__<tool-name>
-  const parts = toolName.split('__');
-  if (parts.length < 3) {
-    return { allowed: false, reason: '无效的 MCP 工具名称' };
-  }
-  const serverId = parts[1];
-
   // Check if this server is in the enabled list
   const isEnabled = currentMcpServers.some(s => s.id === serverId);
   if (isEnabled) {
@@ -385,7 +473,7 @@ function buildSettingSources(): ('user' | 'project')[] {
  * - Fallback to npx for environments where bun is unavailable
  * - Custom MCP can use any user-preferred tools
  */
-function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
+function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronToolsServer> {
   // Use memory cache if set (even if empty - user explicitly disabled all MCP)
   // Only fall back to config file if never set (null)
   let servers: McpServerDefinition[];
@@ -397,14 +485,22 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
     if (isDebugMode) console.log(`[agent] Using workspace MCP: ${servers.map(s => s.id).join(', ') || 'none'}`);
   }
 
-  if (servers.length === 0) {
-    // Return empty object
-    // SDK auto-discovery is controlled via buildSettingSources() - when MCP is explicitly
-    // configured, settingSources excludes 'user' to prevent unwanted MCP discovery
-    return {};
+  const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
+
+  // Add cron tools server if we're in a cron task context
+  const cronContext = getCronTaskContext();
+  if (cronContext.taskId) {
+    result['cron-tools'] = cronToolsServer;
+    console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
   }
 
-  const result: Record<string, SdkMcpServerConfig> = {};
+  // Return early if no user MCP servers (but may have cron-tools)
+  if (servers.length === 0) {
+    if (Object.keys(result).length > 0) {
+      console.log(`[agent] Built SDK MCP servers: ${Object.keys(result).join(', ')}`);
+    }
+    return result;
+  }
 
   for (const server of servers) {
     // Log server env for debugging
@@ -419,6 +515,7 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig> {
       // For npx commands, try to use bundled bun (bun x is npx-compatible)
       // This ensures the app works without requiring Node.js/npm
       if (command === 'npx') {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
         const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
         const runtime = getBundledRuntimePath();
 
@@ -584,7 +681,14 @@ async function handleAskUserQuestion(
 
   // Wait for user response or abort
   return new Promise((resolve) => {
-    let timer: ReturnType<typeof setTimeout>;
+    // Timeout after 10 minutes (user needs time to think)
+    const timer = setTimeout(() => {
+      if (pendingAskUserQuestions.has(requestId)) {
+        cleanup();
+        console.warn('[AskUserQuestion] Timed out after 10 minutes');
+        resolve(null);
+      }
+    }, 10 * 60 * 1000);
 
     const cleanup = () => {
       clearTimeout(timer);
@@ -600,15 +704,6 @@ async function handleAskUserQuestion(
 
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
-
-    // Timeout after 10 minutes (user needs time to think)
-    timer = setTimeout(() => {
-      if (pendingAskUserQuestions.has(requestId)) {
-        cleanup();
-        console.warn('[AskUserQuestion] Timed out after 10 minutes');
-        resolve(null);
-      }
-    }, 10 * 60 * 1000);
 
     pendingAskUserQuestions.set(requestId, { resolve, input: questionInput, timer });
   });
@@ -820,7 +915,7 @@ function persistMessagesToStorage(
   updateSessionMetadata(sessionId, { lastActiveAt: new Date().toISOString() });
 }
 
-function getSessionId(): string {
+export function getSessionId(): string {
   return sessionId;
 }
 
@@ -1772,8 +1867,8 @@ export async function resetSession(): Promise<void> {
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 5. Clear SDK ready signal state (same as switchToSession)
-  sdkReadyResolve = null;
-  sdkReadyPromise = null;
+  _sdkReadyResolve = null;
+  _sdkReadyPromise = null;
 
   // 7. Reset processing state
   shouldAbortSession = false;
@@ -1854,8 +1949,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   systemInitInfo = null;
 
   // Clear SDK ready signal state
-  sdkReadyResolve = null;
-  sdkReadyPromise = null;
+  _sdkReadyResolve = null;
+  _sdkReadyPromise = null;
 
   // Preserve target sessionId so new messages are saved to the same session
   sessionId = targetSessionId as `${string}-${string}-${string}-${string}-${string}`;
@@ -2056,7 +2151,6 @@ export async function enqueueUserMessage(
   }
 
   // Persist session to SessionStore on first message
-  const isFirstMessage = !hasInitialPrompt;
   if (!hasInitialPrompt) {
     hasInitialPrompt = true;
     // Create and save session metadata
@@ -2164,6 +2258,49 @@ export function isSessionActive(): boolean {
   return isProcessing || querySession !== null;
 }
 
+/**
+ * Wait for the current session to become idle
+ * Returns true if idle, false if timeout
+ * @param timeoutMs Maximum time to wait in milliseconds (default: 10 minutes)
+ * @param pollIntervalMs How often to check status (default: 500ms)
+ */
+// Helper function to check if session is idle (avoids TypeScript type narrowing issues)
+function isSessionIdle(): boolean {
+  return sessionState === 'idle';
+}
+
+export async function waitForSessionIdle(
+  timeoutMs: number = 600000,
+  pollIntervalMs: number = 500
+): Promise<boolean> {
+  const startTime = Date.now();
+  console.log(`[agent] waitForSessionIdle: starting, sessionState=${sessionState}`);
+
+  // Brief wait to allow async operations to start (prevents false early return)
+  // Note: Only check sessionState === 'idle' because isProcessing and querySession
+  // remain set until the entire session ends (for await loop in startStreamingSession).
+  // The sessionState is set to 'idle' by handleMessageComplete() after each message,
+  // which correctly indicates "no message is being processed" for cron sync execution.
+  if (isSessionIdle()) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (isSessionIdle()) {
+      console.log('[agent] waitForSessionIdle: already idle, returning true');
+      return true;
+    }
+  }
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (isSessionIdle()) {
+      console.log(`[agent] waitForSessionIdle: became idle after ${Date.now() - startTime}ms`);
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+
+  console.warn('[agent] waitForSessionIdle: timeout reached');
+  return false;
+}
+
 export async function interruptCurrentResponse(): Promise<boolean> {
   if (!querySession) {
     // 即使没有 querySession，如果 isStreamingMessage 为 true，也需要重置状态
@@ -2259,10 +2396,7 @@ async function startStreamingSession(): Promise<void> {
             broadcast('chat:debug-message', message);
           }
         },
-        systemPrompt: {
-          type: 'preset',
-          preset: 'claude_code'
-        },
+        systemPrompt: buildSystemPromptOption(),
         cwd: agentDir,
         includePartialMessages: true,
         mcpServers: buildSdkMcpServers(),
@@ -2278,6 +2412,17 @@ async function startStreamingSession(): Promise<void> {
             return {
               behavior: 'deny' as const,
               message: mcpCheck.reason
+            };
+          }
+
+          // Special case: cron-tools is a built-in trusted server
+          // When allowed by checkMcpToolPermission, skip user confirmation entirely
+          // (AI should be able to exit cron task without user approval)
+          if (toolName.startsWith('mcp__cron-tools__')) {
+            console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
             };
           }
 
@@ -2340,7 +2485,9 @@ async function startStreamingSession(): Promise<void> {
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {
         systemInitInfo = nextSystemInit;
-        broadcast('chat:system-init', { info: systemInitInfo });
+        // Include our sessionId (for SessionStore) alongside SDK's system info
+        // Frontend needs our sessionId to match against history records
+        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
 
         // Save SDK session_id for future resume functionality
         if (nextSystemInit.session_id) {
@@ -2879,6 +3026,8 @@ async function startStreamingSession(): Promise<void> {
     if (sessionState !== 'error') {
       setSessionState('idle');
     }
+    // Clear cron task context after session ends
+    clearCronTaskContext();
     resolveTermination!();
   }
 }

@@ -8,15 +8,14 @@ import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
+import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import {
     getModelsDisplay,
     PRESET_PROVIDERS,
     type Provider,
-    type ProviderVerifyStatus,
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
-    PRESET_MCP_SERVERS,
     MCP_DISCOVERY_LINKS,
     isVerifyExpired,
     SUBSCRIPTION_PROVIDER_ID,
@@ -31,7 +30,8 @@ import {
     deleteCustomMcpServer,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
-import { isDebugMode, getBuildVersions } from '@/utils/debug';
+import { useAutostart } from '@/hooks/useAutostart';
+import { getBuildVersions } from '@/utils/debug';
 import {
     isDeveloperSectionUnlocked,
     unlockDeveloperSection,
@@ -43,12 +43,12 @@ import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
 // Settings sub-sections
-type SettingsSection = 'providers' | 'mcp' | 'skills' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
 // Verification status for each provider
-type VerifyStatus = 'idle' | 'loading' | 'valid' | 'invalid';
+type _VerifyStatus = 'idle' | 'loading' | 'valid' | 'invalid';
 
 // Use shared type with verification state
 type SubscriptionStatus = SubscriptionStatusWithVerify;
@@ -91,7 +91,7 @@ interface SettingsProps {
     onSectionChange?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['providers', 'mcp', 'skills', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -174,7 +174,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     const {
         apiKeys,
         saveApiKey,
-        deleteApiKey: deleteApiKeyService,
+        deleteApiKey: _deleteApiKeyService,
         providerVerifyStatus,
         saveProviderVerifyStatus,
         config,
@@ -186,12 +186,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
         updateCustomProvider,
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
-        removePresetCustomModel,
+        removePresetCustomModel: _removePresetCustomModel,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+
+    // Autostart hook for managing launch on startup
+    const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
 
     // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
@@ -343,6 +346,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             setUpdateError(String(err));
             toastRef.current.error(`检查更新失败: ${err}`);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef is stable
     }, [appVersion]);
 
     // Restart to apply update
@@ -406,6 +410,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Developer section unlock state
     const [devSectionVisible, setDevSectionVisible] = useState(isDeveloperSectionUnlocked);
+    const [showCronDebugPanel, setShowCronDebugPanel] = useState(false);
     const logoTapCountRef = useRef(0);
     const logoTapTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -445,6 +450,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Anthropic subscription status
     const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
+    const [subscriptionVerifying, setSubscriptionVerifying] = useState(false);
 
     // Ref for verify timeout cleanup
     const verifyTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
@@ -587,7 +593,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             track('mcp_add', { type: mcpForm.type });
 
             toast.success('MCP 服务器已添加');
-        } catch (err) {
+        } catch {
             toast.error('添加失败');
         }
     };
@@ -603,7 +609,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             track('mcp_remove');
 
             toast.success('已删除');
-        } catch (err) {
+        } catch {
             toast.error('删除失败');
         }
     };
@@ -631,18 +637,19 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             const currentEmail = status.info.email;
             const cached = providerVerifyStatusRef.current[SUBSCRIPTION_PROVIDER_ID];
 
-            // Check if we can use cached result
-            if (!forceVerify && cached) {
+            // Only use cache for successful verifications (valid status)
+            // Failed verifications are always retried
+            if (!forceVerify && cached && cached.status === 'valid') {
                 const isExpired = isVerifyExpired(cached.verifiedAt);
                 const isSameAccount = cached.accountEmail === currentEmail;
 
                 if (!isExpired && isSameAccount) {
-                    // Use cached result
-                    console.log('[Settings] Using cached subscription verification:', cached.status);
+                    // Use cached successful result
+                    console.log('[Settings] Using cached subscription verification (valid)');
                     if (isMounted) {
                         setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
                             ...prev,
-                            verifyStatus: cached.status,
+                            verifyStatus: 'valid',
                         } : prev);
                     }
                     return;
@@ -654,6 +661,8 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 } else if (!isSameAccount) {
                     console.log('[Settings] Subscription account changed, re-verifying...');
                 }
+            } else if (cached && cached.status === 'invalid') {
+                console.log('[Settings] Previous verification failed, retrying...');
             }
 
             // Set loading state
@@ -665,8 +674,11 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
                 const newStatus = result.success ? 'valid' : 'invalid';
 
-                // Save to cache with account email
-                await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, newStatus, currentEmail);
+                if (result.success) {
+                    // Only cache successful verifications
+                    await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+                }
+                // Don't cache failures - they will be retried next time
 
                 if (isMounted) {
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
@@ -677,8 +689,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 }
             } catch (err) {
                 console.error('[Settings] Subscription verify failed:', err);
-                // Save failure to cache
-                await saveProviderVerifyStatusRef.current(SUBSCRIPTION_PROVIDER_ID, 'invalid', currentEmail);
+                // Don't cache failures - they will be retried next time
 
                 if (isMounted) {
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
@@ -721,6 +732,50 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             clearTimeout(timer);
         };
     }, []); // Only run on mount - refs handle the latest values
+
+    // Force re-verify subscription (called from UI button)
+    const handleReVerifySubscription = useCallback(async () => {
+        if (!subscriptionStatus?.available || !subscriptionStatus?.info?.email) {
+            return;
+        }
+
+        const currentEmail = subscriptionStatus.info.email;
+        setSubscriptionVerifying(true);
+        setSubscriptionStatus(prev => prev ? { ...prev, verifyStatus: 'loading', verifyError: undefined } : prev);
+
+        try {
+            console.log('[Settings] Force re-verifying subscription...');
+            const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
+            const newStatus = result.success ? 'valid' : 'invalid';
+
+            if (result.success) {
+                // Only cache successful verifications
+                await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+                toast.success('验证成功');
+            } else {
+                // Don't cache failures - they will be retried next time
+                toast.error(result.error || '验证失败');
+            }
+
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: newStatus,
+                verifyError: result.error
+            } : prev);
+        } catch (err) {
+            console.error('[Settings] Subscription re-verify failed:', err);
+            // Don't cache failures - they will be retried next time
+
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: 'invalid',
+                verifyError: err instanceof Error ? err.message : '验证失败'
+            } : prev);
+            toast.error('验证失败');
+        } finally {
+            setSubscriptionVerifying(false);
+        }
+    }, [subscriptionStatus, saveProviderVerifyStatus, toast]);
 
     // Verify API key for a provider
     const verifyProvider = useCallback(async (provider: Provider, apiKey: string) => {
@@ -791,8 +846,9 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Cleanup timeouts on unmount
     useEffect(() => {
+        const timeouts = verifyTimeoutRef.current;
         return () => {
-            Object.values(verifyTimeoutRef.current).forEach(clearTimeout);
+            Object.values(timeouts).forEach(clearTimeout);
         };
     }, []);
 
@@ -1145,6 +1201,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                         工具 & MCP
                     </button>
                     <button
+                        onClick={() => setActiveSection('general')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        通用
+                    </button>
+                    <button
                         onClick={() => setActiveSection('about')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'about'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1167,6 +1232,115 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                 {/* Other sections use narrower layout */}
                 <div className={`mx-auto max-w-xl px-8 py-8 ${activeSection === 'skills' ? 'hidden' : ''}`}>
+
+                    {activeSection === 'general' && (
+                        <div className="space-y-6">
+                            <div>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
+                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                    配置应用程序的通用行为
+                                </p>
+                            </div>
+
+                            {/* Startup Settings */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">启动设置</h3>
+
+                                {/* Auto Start */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">开机启动</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            系统启动时自动运行 MyAgents
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={async () => {
+                                            const success = await setAutostart(!autostartEnabled);
+                                            if (success) {
+                                                toast.success(autostartEnabled ? '已关闭开机启动' : '已开启开机启动');
+                                            } else {
+                                                toast.error('设置失败，请重试');
+                                            }
+                                        }}
+                                        disabled={autostartLoading}
+                                        className={`relative h-6 w-11 flex-shrink-0 rounded-full transition-colors ${
+                                            autostartLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                                        } ${
+                                            autostartEnabled
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[#C4C4C4]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                autostartEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                {/* Minimize to Tray */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">最小化到托盘</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            关闭窗口时最小化到系统托盘而非退出应用
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            updateConfig({ minimizeToTray: !config.minimizeToTray });
+                                            toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
+                                        }}
+                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
+                                            config.minimizeToTray
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[#C4C4C4]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.minimizeToTray ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Notification Settings */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
+
+                                {/* Task Notifications */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">启用通知</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            AI 完成任务或需要用户确认时通知提醒
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            updateConfig({ cronNotifications: !config.cronNotifications });
+                                            toast.success(config.cronNotifications ? '已关闭任务通知' : '已开启任务通知');
+                                        }}
+                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
+                                            config.cronNotifications
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[#C4C4C4]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.cronNotifications ? 'translate-x-5' : 'translate-x-0.5'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {activeSection === 'about' && (
                         <div className="space-y-6">
@@ -1494,9 +1668,33 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                 </div>
                                             )}
                                         </div>
+
+                                        {/* Cron Task Debug Panel */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">心跳循环</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        查看和管理运行中的心跳循环任务（开发调试用）
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => setShowCronDebugPanel(true)}
+                                                    className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
+                                                >
+                                                    打开面板
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}
+
+                            {/* Cron Task Debug Panel Modal */}
+                            <CronTaskDebugPanel
+                                isOpen={showCronDebugPanel}
+                                onClose={() => setShowCronDebugPanel(false)}
+                            />
                         </div>
                     )}
 
@@ -1588,12 +1786,30 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                                 <div className="flex items-center gap-1.5 text-[var(--success)]">
                                                                     <Check className="h-3.5 w-3.5" />
                                                                     <span className="font-medium">已验证</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={handleReVerifySubscription}
+                                                                        disabled={subscriptionVerifying}
+                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                        title="重新验证"
+                                                                    >
+                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                    </button>
                                                                 </div>
                                                             )}
                                                             {subscriptionStatus.verifyStatus === 'invalid' && (
                                                                 <div className="flex items-center gap-1.5 text-[var(--error)]">
                                                                     <AlertCircle className="h-3.5 w-3.5" />
                                                                     <span className="font-medium">验证失败</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={handleReVerifySubscription}
+                                                                        disabled={subscriptionVerifying}
+                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                        title="重新验证"
+                                                                    >
+                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                    </button>
                                                                 </div>
                                                             )}
                                                             {subscriptionStatus.verifyStatus === 'idle' && (

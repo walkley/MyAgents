@@ -29,14 +29,14 @@ interface LauncherProps {
     onOpenSettings?: (initialSection?: string) => void;
 }
 
-export default function Launcher({ onLaunchProject, isStarting, startError, onOpenSettings }: LauncherProps) {
+export default function Launcher({ onLaunchProject, isStarting, startError: _startError, onOpenSettings }: LauncherProps) {
     const toast = useToast();
     const {
         config,
         projects,
         providers,
         isLoading,
-        error,
+        error: _error,
         addProject,
         updateProject,
         removeProject,
@@ -44,7 +44,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError, onOp
         apiKeys,
         refreshProviderData,
     } = useConfig();
-    const [addError, setAddError] = useState<string | null>(null);
+    const [_addError, setAddError] = useState<string | null>(null);
     const [activeMenuProjectId, setActiveMenuProjectId] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
     const [showLogs, setShowLogs] = useState(false);

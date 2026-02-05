@@ -6,11 +6,24 @@
  * is delayed (e.g., macOS permission dialogs)
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Clock, FolderOpen, MessageSquare, RefreshCw } from 'lucide-react';
 
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { getAllCronTasks } from '@/api/cronTaskClient';
+import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
+import { isTauriEnvironment } from '@/utils/browserMock';
+
+/**
+ * Extract folder name from path (cross-platform, handles both / and \)
+ */
+function getFolderName(path: string): string {
+    if (!path) return 'Workspace';
+    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = normalized.split('/');
+    return parts[parts.length - 1] || 'Workspace';
+}
 
 interface RecentTasksProps {
     projects: Project[];
@@ -32,10 +45,20 @@ function SectionHeader() {
 
 export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) {
     const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([]);
+    const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [retryCount, setRetryCount] = useState(0);
+    const [_retryCount, setRetryCount] = useState(0);
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Map sessionId to active cron task (running only)
+    const sessionCronTaskMap = useMemo(() => {
+        return new Map(
+            cronTasks
+                .filter(t => t.status === 'running')
+                .map(t => [t.sessionId, t])
+        );
+    }, [cronTasks]);
 
     const fetchSessions = useCallback(async (currentRetryCount = 0) => {
         if (currentRetryCount === 0) {
@@ -44,12 +67,17 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
         setError(null);
 
         try {
-            const sessions = await getSessions();
+            // Fetch sessions and cron tasks in parallel
+            const [sessions, tasks] = await Promise.all([
+                getSessions(),
+                getAllCronTasks().catch(() => [] as CronTask[]), // Cron tasks are optional
+            ]);
             // Sort by lastActiveAt descending and take top 3
             const sorted = sessions
                 .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime())
                 .slice(0, 3);
             setRecentSessions(sorted);
+            setCronTasks(tasks);
             setRetryCount(0); // Reset retry count on success
         } catch (err) {
             console.error('[RecentTasks] Failed to load sessions:', err);
@@ -79,6 +107,36 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
             }
         };
     }, [fetchSessions]);
+
+    // Listen for cron task stopped events to refresh the badge display
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+
+        let isMounted = true;
+        let unlisten: (() => void) | null = null;
+
+        (async () => {
+            const { listen } = await import('@tauri-apps/api/event');
+            // Check if component was unmounted during async import
+            if (!isMounted) return;
+
+            unlisten = await listen<{ taskId: string; exitReason?: string }>('cron:task-stopped', () => {
+                // Refresh cron tasks to update the "心跳" badge
+                // Guard against calling setState after unmount
+                if (!isMounted) return;
+                getAllCronTasks()
+                    .then(tasks => {
+                        if (isMounted) setCronTasks(tasks);
+                    })
+                    .catch(() => { /* ignore errors */ });
+            });
+        })();
+
+        return () => {
+            isMounted = false;
+            if (unlisten) unlisten();
+        };
+    }, []);
 
     const handleManualRetry = useCallback(() => {
         setRetryCount(0);
@@ -154,6 +212,8 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                     const project = getProjectForSession(session);
                     if (!project) return null;
 
+                    const hasCronTask = sessionCronTaskMap.has(session.id);
+
                     return (
                         <button
                             key={session.id}
@@ -166,6 +226,13 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                                 <span>{formatTime(session.lastActiveAt)}</span>
                             </div>
 
+                            {/* Cron task tag */}
+                            {hasCronTask && (
+                                <span className="flex-shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
+                                    心跳
+                                </span>
+                            )}
+
                             {/* Session title */}
                             <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                                 {session.title}
@@ -174,7 +241,7 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
                             {/* Workspace info */}
                             <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
                                 <FolderOpen className="h-3 w-3" />
-                                <span className="max-w-[80px] truncate">{project.name}</span>
+                                <span className="max-w-[80px] truncate">{getFolderName(project.path)}</span>
                             </div>
                         </button>
                     );

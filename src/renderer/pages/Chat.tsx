@@ -9,11 +9,14 @@ import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState } from '@/context/TabContext';
 import { useAutoScroll } from '@/hooks/useAutoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
+import { useCronTask } from '@/hooks/useCronTask';
+import { getSessionCronTask, updateCronTaskTab, isTaskExecuting } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -22,23 +25,27 @@ import {
   getEnabledMcpServerIds,
   updateProjectMcpServers,
 } from '@/config/configService';
-import { CUSTOM_EVENTS } from '../../shared/constants';
+import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+// CronTaskConfig type is used via useCronTask hook
 
 interface ChatProps {
   onBack?: () => void;
   onNewSession?: () => void;
+  /** Called when user selects a different session from history - uses Session singleton logic */
+  onSwitchSession?: (sessionId: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
+    tabId,
     agentDir,
     sessionId,
     messages,
     isLoading,
     sessionState,
     unifiedLogs,
-    systemInitInfo,
+    systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
     isActive,
@@ -59,6 +66,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     respondAskUserQuestion,
     apiPost,
     setSessionState,
+    onCronTaskExitRequested,
   } = useTabState();
 
   // Get config to find current project provider
@@ -74,11 +82,14 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   const [showHistory, setShowHistory] = useState(false);
   const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
-  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
+  const [workspaceRefreshKey, _setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentProvider?.primaryModel
   );
+  // Cron task state
+  const [showCronSettings, setShowCronSettings] = useState(false);
+  const [cronPrompt, setCronPrompt] = useState('');
 
   // Ref for input focus
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -105,6 +116,72 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
   }, []);
+
+  // Cron task management hook
+  const {
+    state: cronState,
+    enableCronMode,
+    disableCronMode,
+    updateConfig: _updateCronConfig,
+    updateRunningConfig,
+    startTask: startCronTask,
+    stop: stopCronTask,
+    restoreFromTask: restoreCronTask,
+    updateSessionId: updateCronTaskSessionId,
+  } = useCronTask({
+    workspacePath: agentDir,
+    sessionId: sessionId ?? '',
+    tabId,
+    onExecute: async (_taskId, prompt, _isFirstExecution, _aiCanExit) => {
+      // Send cron task message
+      // Note: taskId, isFirstExecution, aiCanExit are available for future enhancements
+      // (e.g., injecting cron context into system prompt)
+      const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
+        baseUrl: currentProvider.config.baseUrl,
+        apiKey: apiKeys[currentProvider.id],
+        authType: currentProvider.authType,
+      } : undefined;
+      await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
+    },
+    onComplete: (task, reason) => {
+      console.log('[Chat] Cron task completed:', task.id, reason);
+    },
+    onExecutionComplete: async (task) => {
+      // Called when a single execution completes (task may still be running)
+      // Refresh the session to show the latest messages
+      // Use task.sessionId (the cron task's actual session) instead of Chat's sessionId
+      // which may be a pending/different session
+      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId);
+      setIsLoading(false);
+      if (task.sessionId) {
+        await loadSession(task.sessionId);
+      }
+    },
+    // Register for SSE cron:task-exit-requested events via TabContext
+    onCronTaskExitRequestedRef: onCronTaskExitRequested,
+  });
+
+  // Sync cron task's sessionId when session is created after task creation
+  // This handles two cases:
+  // 1. Task has empty sessionId (legacy) - needs to be updated
+  // 2. Task has pending sessionId (pending-xxx) and real sessionId is now available
+  const sessionIdSyncedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const task = cronState.task;
+    if (!task || !sessionId) return;
+
+    // Skip if sessionId is still pending (no real session ID yet)
+    if (isPendingSessionId(sessionId)) return;
+
+    // If task has empty or pending sessionId but we now have a real sessionId, update the task
+    // Use ref to prevent duplicate updates for the same sessionId
+    const taskNeedsUpdate = task.sessionId === '' || isPendingSessionId(task.sessionId);
+    if (taskNeedsUpdate && sessionIdSyncedRef.current !== sessionId) {
+      sessionIdSyncedRef.current = sessionId;
+      console.log(`[Chat] Syncing cron task sessionId: taskId=${task.id}, oldSessionId=${task.sessionId}, newSessionId=${sessionId}`);
+      void updateCronTaskSessionId(sessionId);
+    }
+  }, [cronState.task, sessionId, updateCronTaskSessionId]);
 
   // File drop zone for chat area (HTML5 drag-drop for non-Tauri/development)
   const handleFileDrop = useCallback((files: File[]) => {
@@ -185,6 +262,100 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     currentProject?.mcpEnabledServers ?? []
   );
 
+  // Track which session's cron task state has been loaded
+  const cronLoadedSessionRef = useRef<string | null>(null);
+
+  // Track if we need to set loading state after TabProvider's loadSession completes
+  // This is used when restoring a cron task that is currently executing
+  const pendingCronLoadingRef = useRef(false);
+
+  // Track previous messages reference to detect when loadSession completes
+  // Using reference comparison instead of length to handle edge case where
+  // message count stays the same after loadSession
+  const prevMessagesRef = useRef(messages);
+
+  // Restore or clear cron task state when session changes
+  // 方案 A: Rust 统一恢复 - Scheduler 由 Rust 层 initialize_cron_manager 自动恢复
+  // 前端只负责同步 UI 状态
+  //
+  // This handles:
+  // 1. App restart recovery - restore cron task UI for running/paused tasks
+  //    (Scheduler already started by Rust layer)
+  // 2. Tab re-open - reconnect to existing cron task
+  // 3. Session switch - clear cron state if switching to a session without cron task
+  useEffect(() => {
+    if (!sessionId || !tabId || !isTauriEnvironment()) return;
+
+    // Skip if already loaded for this session
+    if (cronLoadedSessionRef.current === sessionId) return;
+
+    const loadCronTaskState = async () => {
+      try {
+        const task = await getSessionCronTask(sessionId);
+
+        if (task && task.status === 'running') {
+          console.log('[Chat] Restoring cron task UI for session:', sessionId, task.id, 'to tab:', tabId);
+
+          // Update task's tabId to this new tab
+          await updateCronTaskTab(task.id, tabId);
+
+          // Restore UI state only - Scheduler is managed by Rust layer (方案 A)
+          // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
+          restoreCronTask(task);
+
+          // Check if task is currently executing (e.g., execution started before app restart)
+          // If executing, mark it so we can set loading state after TabProvider's loadSession completes
+          // NOTE: Do NOT call loadSession here - TabProvider already handles session loading
+          // Calling it here causes infinite loop with TabProvider's session loading effect
+          const executing = await isTaskExecuting(task.id);
+          if (executing) {
+            console.log('[Chat] Cron task is currently executing, marking for loading state');
+            pendingCronLoadingRef.current = true;
+          }
+        } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
+          // Current cron state is for a different session - clear FRONTEND state only
+          // This happens when user switches from a cron-task session to a regular session
+          // Note: Only clear if cronState.task.sessionId is NOT empty (empty means task was just created)
+          //
+          // IMPORTANT: We do NOT call stopCronTask() here because:
+          // 1. The task should continue running for its original session
+          // 2. The Rust scheduler executes on session-specific Sidecar
+          // 3. When user goes back to the original session, state will be restored (above code)
+          // 4. Per PRD: "暂停后允许手动对话" - task continues while user interacts with other sessions
+          //
+          // EXCEPTION: Don't clear if this is a pending -> real session ID upgrade (same cron task!)
+          // This happens when SDK creates the real session after first message
+          const isSessionUpgrade = isPendingSessionId(cronState.task.sessionId) && !isPendingSessionId(sessionId);
+          if (isSessionUpgrade) {
+            console.log('[Chat] Session ID upgraded from pending to real, keeping cron state:', cronState.task.sessionId, '->', sessionId);
+          } else {
+            console.log('[Chat] Clearing frontend cron state (session changed from', cronState.task.sessionId, 'to', sessionId, ')');
+            disableCronMode();
+          }
+        }
+
+        cronLoadedSessionRef.current = sessionId;
+      } catch (error) {
+        console.error('[Chat] Failed to load cron task state:', error);
+      }
+    };
+
+    void loadCronTaskState();
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
+
+  // Set loading state after TabProvider's loadSession completes (for cron task executing scenario)
+  // This effect watches for messages reference changes, which indicates loadSession has completed
+  // Using reference comparison (not length) to handle edge case where message count stays the same
+  useEffect(() => {
+    // Only proceed if we have pending cron loading and messages array has changed
+    if (pendingCronLoadingRef.current && messages !== prevMessagesRef.current) {
+      console.log('[Chat] loadSession completed, setting loading state for cron execution');
+      setIsLoading(true);
+      pendingCronLoadingRef.current = false;
+    }
+    prevMessagesRef.current = messages;
+  }, [messages, setIsLoading]);
+
   // Load MCP config on mount and sync to backend
   useEffect(() => {
     const loadMcpConfig = async () => {
@@ -214,6 +385,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
       }
     };
     loadMcpConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reload when project MCP config changes
   }, [currentProject?.mcpEnabledServers]);
 
   // Sync workspace MCP to project config when it changes
@@ -247,6 +419,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     } catch (err) {
       console.error('[Chat] Failed to sync MCP servers:', err);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
   }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
 
   // Sync selectedModel when provider changes
@@ -256,7 +429,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     }
   }, [currentProvider?.id, currentProvider?.primaryModel]);
 
-  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages);
+  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -308,6 +481,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
     };
 
     void syncConfigOnTabActivate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- providers.length is only used for debug logging
   }, [isActive, refreshProviderData, currentProject?.mcpEnabledServers, apiPost]);
 
   // Connect SSE when component mounts
@@ -388,6 +562,15 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
         apiKey: apiKeys[currentProvider.id], // Get from stored apiKeys, not provider object
         authType: currentProvider.authType,
       } : undefined;
+
+      // If cron mode is enabled and task hasn't started yet, start the task
+      if (cronState.isEnabled && !cronState.task && cronState.config) {
+        // Start the cron task - pass prompt directly to avoid React state timing issues
+        // The prompt is passed as a parameter because updateCronConfig() is async
+        // and the state wouldn't be updated before startCronTask() is called
+        await startCronTask(text);
+        return; // startCronTask handles the message sending via onExecute callback
+      }
 
       const success = await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
       if (!success) {
@@ -489,9 +672,21 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
                 agentDir={agentDir}
                 currentSessionId={sessionId}
                 onSelectSession={(id) => {
+                  // Note: If cron task is running, App.tsx handleSwitchSession will create a new tab
                   track('session_switch');
-                  void loadSession(id);
+                  // Use Session singleton logic via App.tsx if available
+                  if (onSwitchSession) {
+                    onSwitchSession(id);
+                  } else {
+                    // Fallback: direct load in current Tab (only if no cron task running)
+                    if (cronState.task?.status === 'running') {
+                      console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
+                      return;
+                    }
+                    void loadSession(id);
+                  }
                 }}
+                onDeleteCurrentSession={handleNewSession}
                 isOpen={showHistory}
                 onClose={() => setShowHistory(false)}
               />
@@ -578,7 +773,7 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             systemStatus={systemStatus}
           />
 
-          {/* Floating input - manages its own state for performance */}
+          {/* Floating input with integrated cron task components */}
           <SimpleChatInput
             ref={chatInputRef}
             onSend={handleSendMessage}
@@ -609,6 +804,25 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
             onRefreshProviders={refreshProviderData}
             onOpenAgentSettings={() => setShowWorkspaceConfig(true)}
             onWorkspaceRefresh={triggerWorkspaceRefresh}
+            // Cron task props - StatusBar and Overlay are rendered inside SimpleChatInput
+            cronModeEnabled={cronState.isEnabled}
+            cronConfig={cronState.config}
+            cronTask={cronState.task}
+            onCronButtonClick={() => setShowCronSettings(true)}
+            onCronSettings={() => setShowCronSettings(true)}
+            onCronCancel={disableCronMode}
+            onCronStop={async () => {
+              // Stop the task and restore the original prompt to the input
+              const originalPrompt = await stopCronTask();
+              if (originalPrompt) {
+                chatInputRef.current?.setValue(originalPrompt);
+              }
+              // Note: CRON_TASK_STOPPED event no longer needed
+              // With Session-centric Sidecar (Owner model), stopping a cron task only releases
+              // the CronTask owner. If Tab still owns the Sidecar, it continues running.
+              // No SSE reconnection or Sidecar restart is needed.
+            }}
+            onInputChange={(text) => setCronPrompt(text)}
           />
         </div>
       </div>
@@ -642,6 +856,51 @@ export default function Chat({ onBack, onNewSession }: ChatProps) {
           refreshKey={workspaceRefreshKey}
         />
       )}
+
+      {/* Cron Task Settings Modal */}
+      <CronTaskSettingsModal
+        isOpen={showCronSettings}
+        onClose={() => setShowCronSettings(false)}
+        initialPrompt={cronPrompt}
+        initialConfig={cronState.config}
+        onConfirm={(config) => {
+          // Pass current model, permissionMode, and providerEnv to ensure the cron task
+          // uses the same settings that are active when user enables cron mode
+          const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
+            baseUrl: currentProvider.config.baseUrl,
+            apiKey: apiKeys[currentProvider.id],
+          } : undefined;
+
+          // If task is already running, only update config (preserves task state)
+          // Otherwise, enable cron mode which will prepare for a new task
+          if (cronState.task) {
+            // Task is running - update config without resetting task state
+            updateRunningConfig({
+              ...config,
+              model: selectedModel,
+              permissionMode: permissionMode,
+              providerEnv: providerEnv,
+            });
+          } else {
+            // No task running - enable cron mode normally
+            enableCronMode({
+              ...config,
+              model: selectedModel,
+              permissionMode: permissionMode,
+              providerEnv: providerEnv,
+            });
+          }
+          // Track cron_enable event
+          track('cron_enable', {
+            interval_minutes: config.intervalMinutes,
+            run_mode: config.runMode,
+            has_time_limit: !!config.endConditions.deadline,
+            has_count_limit: !!(config.endConditions.maxExecutions && config.endConditions.maxExecutions > 0),
+            notify_enabled: config.notifyEnabled,
+          });
+          setShowCronSettings(false);
+        }}
+      />
     </div>
   );
 }

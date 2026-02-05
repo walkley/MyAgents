@@ -2,15 +2,29 @@
 // Main entry point with sidecar lifecycle management
 
 mod commands;
+pub mod cron_task;
 pub mod logger;
 mod proxy_config;
 mod sidecar;
 mod sse_proxy;
+mod tray;
 mod updater;
 
-use sidecar::{cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars};
+use sidecar::{
+    cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
+    // Session activation commands (for Session singleton tracking)
+    cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
+    cmd_update_session_tab,
+    // Cron task execution command
+    cmd_execute_cron_task,
+    // Session-centric Sidecar API (v0.1.11)
+    cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
+    cmd_upgrade_session_id,
+};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tauri::{Emitter, Listener, Manager};
+use tauri_plugin_autostart::MacosLauncher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,11 +36,17 @@ pub fn run() {
     let sidecar_state = create_sidecar_state();
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
+    let sidecar_state_for_tray_exit = sidecar_state.clone();
 
     // Track if cleanup has been performed to avoid duplicate cleanup
+    // All clones share the same underlying AtomicBool - whichever exit path
+    // triggers first will do cleanup, and all others will see the flag as true
+    // and skip. The separate variables are needed because each is moved into
+    // a different closure (window event, tray exit, app exit).
     let cleanup_done = Arc::new(AtomicBool::new(false));
     let cleanup_done_for_window = cleanup_done.clone();
     let cleanup_done_for_exit = cleanup_done.clone();
+    let cleanup_done_for_tray_exit = cleanup_done.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -40,6 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .manage(sidecar_state)
         .manage(sse_proxy_state)
         .invoke_handler(tauri::generate_handler![
@@ -71,6 +92,37 @@ pub fn run() {
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
+            // Cron task commands
+            cron_task::cmd_create_cron_task,
+            cron_task::cmd_start_cron_task,
+            cron_task::cmd_stop_cron_task,
+            cron_task::cmd_delete_cron_task,
+            cron_task::cmd_get_cron_task,
+            cron_task::cmd_get_cron_tasks,
+            cron_task::cmd_get_workspace_cron_tasks,
+            cron_task::cmd_get_session_cron_task,
+            cron_task::cmd_get_tab_cron_task,
+            cron_task::cmd_record_cron_execution,
+            cron_task::cmd_update_cron_task_tab,
+            cron_task::cmd_update_cron_task_session,
+            cron_task::cmd_get_tasks_to_recover,
+            // Cron scheduler commands
+            cron_task::cmd_start_cron_scheduler,
+            cron_task::cmd_mark_task_executing,
+            cron_task::cmd_mark_task_complete,
+            cron_task::cmd_is_task_executing,
+            // Session activation commands (for Session singleton)
+            cmd_get_session_activation,
+            cmd_activate_session,
+            cmd_deactivate_session,
+            cmd_update_session_tab,
+            // Cron task execution (Rust -> Sidecar direct call)
+            cmd_execute_cron_task,
+            // Session-centric Sidecar API (v0.1.11)
+            cmd_ensure_session_sidecar,
+            cmd_release_session_sidecar,
+            cmd_get_session_port,
+            cmd_upgrade_session_id,
         ])
         .setup(|app| {
             // Initialize logging for all builds
@@ -92,6 +144,23 @@ pub fn run() {
                     .build(),
             )?;
 
+            // Setup system tray
+            if let Err(e) = tray::setup_tray(app) {
+                log::error!("[App] Failed to setup system tray: {}", e);
+            }
+
+            // Setup tray exit handler (for when user confirms exit from tray menu)
+            let app_handle_for_tray = app.handle().clone();
+            app.listen("tray:confirm-exit", move |_| {
+                log::info!("[App] Tray exit confirmed by user");
+                use std::sync::atomic::Ordering::Relaxed;
+                if !cleanup_done_for_tray_exit.swap(true, Relaxed) {
+                    log::info!("[App] Cleaning up sidecars before exit...");
+                    let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
+                }
+                app_handle_for_tray.exit(0);
+            });
+
             // Open DevTools in debug builds
             #[cfg(debug_assertions)]
             {
@@ -111,6 +180,13 @@ pub fn run() {
                 }
             }
 
+            // Initialize cron task manager with app handle
+            let cron_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                cron_task::initialize_cron_manager(cron_app_handle).await;
+            });
+            log::info!("[App] Cron task manager initialized");
+
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");
             let app_handle = app.handle().clone();
@@ -123,30 +199,55 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(move |_window, event| {
-            // Clean up when main window is destroyed (X button, Cmd+W)
-            if let tauri::WindowEvent::Destroyed = event {
-                // Only cleanup once (Relaxed is sufficient for simple flag)
-                use std::sync::atomic::Ordering::Relaxed;
-                if !cleanup_done_for_window.swap(true, Relaxed) {
-                    log::info!("[App] Window destroyed, cleaning up sidecars...");
-                    let _ = stop_all_sidecars(&sidecar_state_for_window);
+        .on_window_event(move |window, event| {
+            match event {
+                // Handle window close request (X button) - minimize to tray instead
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // Check if minimize to tray is enabled
+                    // Emit event to frontend to check config and decide
+                    log::info!("[App] Window close requested, emitting event to frontend");
+                    let _ = window.emit("window:close-requested", ());
+                    // Prevent default close behavior - let frontend decide
+                    api.prevent_close();
                 }
+                // Clean up when window is actually destroyed
+                tauri::WindowEvent::Destroyed => {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    if !cleanup_done_for_window.swap(true, Relaxed) {
+                        log::info!("[App] Window destroyed, cleaning up sidecars...");
+                        let _ = stop_all_sidecars(&sidecar_state_for_window);
+                    }
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    // Run with event handler to catch Cmd+Q and Dock quit
-    app.run(move |_app_handle, event| {
-        // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
-        if let tauri::RunEvent::ExitRequested { .. } = event {
-            // Only cleanup once (Relaxed is sufficient for simple flag)
-            use std::sync::atomic::Ordering::Relaxed;
-            if !cleanup_done_for_exit.swap(true, Relaxed) {
-                log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
-                let _ = stop_all_sidecars(&sidecar_state_for_exit);
+    // Run with event handler to catch Cmd+Q, Dock quit, and Dock click
+    app.run(move |app_handle, event| {
+        match event {
+            // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
+            tauri::RunEvent::ExitRequested { .. } => {
+                // Only cleanup once (Relaxed is sufficient for simple flag)
+                use std::sync::atomic::Ordering::Relaxed;
+                if !cleanup_done_for_exit.swap(true, Relaxed) {
+                    log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    let _ = stop_all_sidecars(&sidecar_state_for_exit);
+                }
             }
+            // Handle Dock icon click on macOS (Reopen event)
+            // This is triggered when user clicks the Dock icon while app is running but window is hidden
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                log::info!("[App] Dock icon clicked (Reopen), showing main window");
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            _ => {}
         }
     });
 }

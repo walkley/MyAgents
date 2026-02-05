@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
 import type { Message } from '@/types/chat';
+import { isDebugMode } from '@/utils/debug';
 
 const BOTTOM_SNAP_THRESHOLD_PX = 32;
 
@@ -23,11 +24,17 @@ export interface AutoScrollControls {
    * Use this when user sends a message to ensure they see their query
    */
   scrollToBottom: () => void;
+  /**
+   * Instantly scroll to bottom without animation
+   * Use this when switching sessions to avoid slow scroll through all messages
+   */
+  scrollToBottomInstant: () => void;
 }
 
 export function useAutoScroll(
   isLoading: boolean,
-  messages: Message[]
+  messages: Message[],
+  sessionId?: string | null
 ): AutoScrollControls {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollEnabledRef = useRef(true);
@@ -42,10 +49,22 @@ export function useAutoScroll(
 
   // Keep isLoading in a ref so animation loop can access it
   const isLoadingRef = useRef(isLoading);
-  isLoadingRef.current = isLoading;
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
 
   // Track scroll position to detect user scroll direction
   const lastScrollTopRef = useRef(0);
+
+  // Track session ID to detect session switch
+  // Initialize as undefined so first render triggers isInitialLoad
+  const lastSessionIdRef = useRef<string | null | undefined>(undefined);
+
+  // Flag to indicate we need to scroll to bottom after messages load
+  const pendingScrollRef = useRef(false);
+
+  // Store animation function in ref for recursive RAF calls (avoids lint warning about self-reference)
+  const animateSmoothScrollRef = useRef<(() => void) | null>(null);
 
   const cancelAnimation = useCallback(() => {
     if (animationFrameRef.current !== null && typeof window !== 'undefined') {
@@ -102,8 +121,8 @@ export function useAutoScroll(
     if (distance <= SNAP_THRESHOLD_PX) {
       element.scrollTop = targetScrollTop;
       // Keep animation loop running while loading to catch new content
-      if (isLoadingRef.current) {
-        animationFrameRef.current = requestAnimationFrame(animateSmoothScroll);
+      if (isLoadingRef.current && animateSmoothScrollRef.current) {
+        animationFrameRef.current = requestAnimationFrame(animateSmoothScrollRef.current);
       } else {
         isAnimatingRef.current = false;
       }
@@ -128,9 +147,16 @@ export function useAutoScroll(
     const newScrollTop = Math.min(currentScrollTop + scrollAmount, targetScrollTop);
     element.scrollTop = newScrollTop;
 
-    // Continue animation
-    animationFrameRef.current = requestAnimationFrame(animateSmoothScroll);
+    // Continue animation via ref (avoids lint warning about self-reference in useCallback)
+    if (animateSmoothScrollRef.current) {
+      animationFrameRef.current = requestAnimationFrame(animateSmoothScrollRef.current);
+    }
   }, []);
+
+  // Keep ref updated with latest function
+  useEffect(() => {
+    animateSmoothScrollRef.current = animateSmoothScroll;
+  }, [animateSmoothScroll]);
 
   /**
    * Start smooth scroll animation (or continue if already running)
@@ -147,14 +173,41 @@ export function useAutoScroll(
   }, [animateSmoothScroll]);
 
   /**
-   * Instant scroll to bottom (used for initial load or large jumps)
+   * Instant scroll to bottom (used for initial load, session switch, or large jumps)
+   * Also re-enables auto-scroll and cancels any ongoing animation
    */
   const scrollToBottomInstant = useCallback(() => {
-    if (!isAutoScrollEnabledRef.current || isPausedRef.current) return;
     const element = containerRef.current;
-    if (!element) return;
-    element.scrollTop = element.scrollHeight;
-  }, []);
+    if (!element) {
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] scrollToBottomInstant: no container element');
+      }
+      return;
+    }
+
+    // Cancel any ongoing smooth scroll animation
+    cancelAnimation();
+
+    // Re-enable auto-scroll
+    isAutoScrollEnabledRef.current = true;
+    isPausedRef.current = false;
+
+    const beforeScrollTop = element.scrollTop;
+    const scrollHeight = element.scrollHeight;
+    const clientHeight = element.clientHeight;
+
+    // Instant scroll without animation
+    element.scrollTop = scrollHeight;
+
+    if (isDebugMode()) {
+      console.log('[useAutoScroll] scrollToBottomInstant:', {
+        beforeScrollTop,
+        scrollHeight,
+        clientHeight,
+        afterScrollTop: element.scrollTop,
+      });
+    }
+  }, [cancelAnimation]);
 
   /**
    * Force scroll to bottom and re-enable auto-scroll
@@ -185,12 +238,59 @@ export function useAutoScroll(
     };
   }, [cancelAnimation]);
 
-  // Start smooth scroll when messages change
+  // Handle session switch - use sessionId for reliable detection
   useEffect(() => {
+    const previousSessionId = lastSessionIdRef.current;
+    const isSessionSwitch = previousSessionId !== undefined && sessionId !== previousSessionId;
+    const isInitialLoad = previousSessionId === undefined && sessionId !== undefined;
+
+    // Update tracked session ID
+    lastSessionIdRef.current = sessionId;
+
+    if (isDebugMode()) {
+      console.log('[useAutoScroll] sessionId changed:', {
+        previousSessionId,
+        currentSessionId: sessionId,
+        isSessionSwitch,
+        isInitialLoad,
+        isAutoScrollEnabled: isAutoScrollEnabledRef.current,
+      });
+    }
+
+    if (isSessionSwitch || isInitialLoad) {
+      // Mark that we need to scroll when messages load
+      // Don't scroll immediately because messages may not be in DOM yet
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] Session switch detected, setting pending scroll flag');
+      }
+      pendingScrollRef.current = true;
+    }
+  }, [sessionId]);
+
+  // Handle messages change - scroll to bottom if pending, otherwise smooth scroll
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    // If we have a pending scroll from session switch, do instant scroll
+    if (pendingScrollRef.current) {
+      pendingScrollRef.current = false;
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] Messages loaded with pending scroll, executing scrollToBottomInstant');
+      }
+      // Use RAF to ensure DOM has rendered the messages
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          scrollToBottomInstant();
+        });
+      });
+      return;
+    }
+
+    // Normal message change - use smooth scroll if enabled
     if (isAutoScrollEnabledRef.current) {
       startSmoothScroll();
     }
-  }, [messages, startSmoothScroll]);
+  }, [messages, startSmoothScroll, scrollToBottomInstant]);
 
   // Start smooth scroll when loading starts, stop when loading ends
   useEffect(() => {
@@ -277,14 +377,8 @@ export function useAutoScroll(
     };
   }, [startSmoothScroll]);
 
-  // Initial scroll to bottom when first rendered with content
-  useEffect(() => {
-    if (messages.length > 0) {
-      // Use instant scroll for initial load
-      scrollToBottomInstant();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only run on mount
-  }, []);
+  // Note: Initial scroll is handled by the messages change effect (isInitialLoad case)
+  // No separate mount effect needed - it would cause duplicate scroll calls
 
-  return { containerRef, pauseAutoScroll, scrollToBottom };
+  return { containerRef, pauseAutoScroll, scrollToBottom, scrollToBottomInstant };
 }

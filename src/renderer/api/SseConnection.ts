@@ -13,10 +13,11 @@
  * - Uses native EventSource with full multiple connection support
  */
 
+import type React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import { getTabServerUrl } from './tauriClient';
+import { getTabServerUrl, getSessionPort } from './tauriClient';
 import { isTauriEnvironment } from '../utils/browserMock';
 
 // Event types that should be parsed as JSON
@@ -45,6 +46,7 @@ const JSON_EVENTS = new Set([
     'chat:agent-error',
     'permission:request', // Permission prompt for tool usage
     'ask-user-question:request', // AskUserQuestion tool prompt
+    'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
 ]);
 
 // Event types that can be JSON or plain string
@@ -88,6 +90,7 @@ export class SseConnection {
     private eventHandler: SseEventHandler | null = null;
     private statusHandler: SseConnectionStatusHandler | null = null;
     private connectionId: string;
+    private sessionIdRef?: React.MutableRefObject<string | null>; // For Session-centric port lookup
 
     // Reconnection state
     private reconnectAttempts = 0;
@@ -95,8 +98,9 @@ export class SseConnection {
     private isReconnecting = false;
     private shouldReconnect = true; // Set to false when intentionally disconnecting
 
-    constructor(connectionId: string) {
+    constructor(connectionId: string, sessionIdRef?: React.MutableRefObject<string | null>) {
         this.connectionId = connectionId;
+        this.sessionIdRef = sessionIdRef;
     }
 
     /**
@@ -196,8 +200,8 @@ export class SseConnection {
     private async connectBrowser(): Promise<void> {
         if (this.eventSource) return;
 
-        // Use Tab-specific server URL
-        const serverUrl = await getTabServerUrl(this.connectionId);
+        // Use Tab-specific server URL (or fixed port if provided)
+        const serverUrl = await this.getServerUrl();
         const sseUrl = `${serverUrl}/chat/stream`;
 
         console.debug(`[SSE ${this.connectionId}] Connecting browser EventSource:`, sseUrl);
@@ -234,8 +238,8 @@ export class SseConnection {
     private async connectTauri(): Promise<void> {
         if (this.tauriConnected) return;
 
-        // Use Tab-specific server URL
-        const serverUrl = await getTabServerUrl(this.connectionId);
+        // Use Tab-specific server URL (or fixed port if provided)
+        const serverUrl = await this.getServerUrl();
         const sseUrl = `${serverUrl}/chat/stream`;
 
         console.debug(`[SSE ${this.connectionId}] Connecting Tauri SSE proxy:`, sseUrl);
@@ -291,8 +295,15 @@ export class SseConnection {
 
     /**
      * Disconnect SSE stream
+     * Safe to call multiple times - subsequent calls are no-ops
      */
     async disconnect(): Promise<void> {
+        // Guard: if already disconnected (or never connected), do nothing
+        // This prevents duplicate cleanup work and duplicate logs
+        if (!this.tauriConnected && !this.eventSource) {
+            return;
+        }
+
         console.debug(`[SSE ${this.connectionId}] Disconnecting`);
 
         // Stop any pending reconnection attempts
@@ -446,11 +457,30 @@ export class SseConnection {
             this.reconnectTimer = null;
         }
     }
+
+    /**
+     * Get the server URL for this connection
+     * Session-centric: first try to get port from sessionId, then fallback to tabId lookup
+     */
+    private async getServerUrl(): Promise<string> {
+        // Session-centric: try to get port from sessionId first
+        const sessionId = this.sessionIdRef?.current;
+        if (sessionId) {
+            const port = await getSessionPort(sessionId);
+            if (port !== null) {
+                return `http://127.0.0.1:${port}`;
+            }
+        }
+        // Fallback to Tab-based lookup (legacy compatibility)
+        return getTabServerUrl(this.connectionId);
+    }
 }
 
 /**
  * Create a new SSE connection instance
+ * @param connectionId - Tab ID for this connection
+ * @param sessionIdRef - Ref to current sessionId for Session-centric port lookup
  */
-export function createSseConnection(connectionId: string): SseConnection {
-    return new SseConnection(connectionId);
+export function createSseConnection(connectionId: string, sessionIdRef?: React.MutableRefObject<string | null>): SseConnection {
+    return new SseConnection(connectionId, sessionIdRef);
 }

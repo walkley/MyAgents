@@ -27,6 +27,8 @@ export interface SessionMetadata {
     createdAt: string;
     lastActiveAt: string;
     stats?: SessionStats;
+    /** Associated cron task ID (if this session is used by a scheduled task) */
+    cronTaskId?: string;
 }
 
 export interface SessionMessage {

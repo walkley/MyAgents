@@ -19,87 +19,127 @@ MyAgents 是基于 Tauri v2 的桌面应用，提供 Claude Agent SDK 的图形�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Tauri Desktop App                         │
-├──────────────────────────┬──────────────────────────────────┤
-│     React Frontend       │        Rust Backend              │
-│      (WebView)           │        (src-tauri)               │
-│                          │                                  │
-│  ┌──────────────────┐    │    ┌────────────────────────┐    │
-│  │   SseConnection  │    │    │     sse_proxy.rs       │    │
-│  │ (per-Tab 实例)   │◄───┼────│  多实例连接管理         │    │
-│  │ listen(sse:tabId:*)│   │   │  HashMap<tabId, conn>  │    │
-│  └──────────────────┘    │    └───────────┬────────────┘    │
-│                          │                │ reqwest         │
-│  ┌──────────────────┐    │                ▼                 │
-│  │  TabProvider.tsx │    │       ┌──────────────────┐       │
-│  │  (仅 Chat 页面)  │────┼────►  │ Bun Sidecar 多实例│       │
-│  │  apiGet/apiPost  │    │       │ :31415 :31416 ...│       │
-│  └──────────────────┘    │       └──────────────────┘       │
-│                          │                                  │
-│  ┌──────────────────┐    │    ┌────────────────────────┐    │
-│  │ Settings/Launcher│────┼────│   Global Sidecar       │    │
-│  │  (无 TabProvider)│    │    │  (全局功能/API验证)    │    │
-│  │   Global API     │    │    └────────────────────────┘    │
-│  └──────────────────┘    │                                  │
-└──────────────────────────┴──────────────────────────────────┘
+├──────────────────────────────────────────────────────────────┤
+│                        React Frontend                        │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │   Tab 1     │  │   Tab 2     │  │  Settings   │          │
+│  │ session_123 │  │ session_456 │  │  Launcher   │          │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
+│         │                │                │                  │
+├─────────┼────────────────┼────────────────┼──────────────────┤
+│         │                │                │     Rust Layer   │
+│         │                │                │                  │
+│   ┌─────┴────────────────┴─────┐   ┌─────┴───────────────┐  │
+│   │     SidecarManager         │   │   Global Sidecar    │  │
+│   │  Session-Centric Model     │   │  (Settings/API验证)  │  │
+│   └─────┬────────────────┬─────┘   └─────────────────────┘  │
+│         │                │                                   │
+│         ▼                ▼                                   │
+│  ┌─────────────┐  ┌─────────────┐                           │
+│  │ Sidecar A   │  │ Sidecar B   │   ← Session 级别          │
+│  │ session_123 │  │ session_456 │   (1:1 对应)              │
+│  │ :31415      │  │ :31416      │                           │
+│  └─────────────┘  └─────────────┘                           │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### 核心概念：Session-Centric Sidecar 架构 (v0.1.10+)
+
+| 概念 | 说明 |
+|------|------|
+| **Sidecar = Agent 实例** | 一个 Sidecar 进程 = 一个 Claude Agent SDK 实例 |
+| **Session:Sidecar = 1:1** | 每个 Session 最多有一个 Sidecar，严格对应 |
+| **后端优先，前端辅助** | Sidecar 可独立运行（定时任务），无需前端 Tab |
+| **Owner 模型** | Tab 和 CronTask 是 Sidecar 的"使用者"，不是"拥有者" |
 
 ### Sidecar 使用边界
 
 | 页面类型 | TabProvider | Sidecar 类型 | API 来源 |
 |----------|-------------|--------------|----------|
-| Chat | ✅ 包裹 | Tab Sidecar | `useTabState()` |
+| Chat | ✅ 包裹 | Session Sidecar | `useTabState()` |
 | Settings | ❌ 不包裹 | Global Sidecar | `apiFetch.ts` |
 | Launcher | ❌ 不包裹 | Global Sidecar | `apiFetch.ts` |
 
 **设计原则**：
-- **Chat 页面**需要独立的 Sidecar（有 `agentDir`，项目级 AI 对话）
+- **Chat 页面**需要 Session Sidecar（有 `sessionId`，项目级 AI 对话）
 - **Settings/Launcher**使用 Global Sidecar（全局功能、API 验证等）
 - 不在 TabProvider 内的组件调用 `useTabStateOptional()` 返回 `null`，自动 fallback 到 Global API
 
 ## 核心模块
 
-### 1. Multi-Tab 多实例架构 (`src/renderer/context/`)
+### 1. Session-Centric Sidecar Manager (`src-tauri/src/sidecar.rs`)
 
-**每个 Tab 拥有独立的 Sidecar 进程和 SSE 连接**：
-
-| 组件 | 职责 |
-|------|------|
-| `TabContext.tsx` | Context 定义，提供 Tab-scoped API |
-| `TabProvider.tsx` | 状态容器，管理 messages/logs/SSE/Sidecar |
-
-**Tab-Scoped API**：
-```typescript
-// 每个 Tab 使用自己的 Sidecar 端口
-const { apiGet, apiPost, stopResponse } = useTabState();
-```
-
-### 2. Rust Sidecar Manager (`src-tauri/src/sidecar.rs`)
-
-**多实例进程管理**：
+**核心数据结构**：
 
 ```rust
-pub struct SidecarManager {
-    instances: HashMap<String, SidecarInstance>, // tabId -> instance
-    port_counter: AtomicU16,                     // 动态端口分配
+/// Sidecar 使用者类型
+pub enum SidecarOwner {
+    Tab(String),      // Tab ID
+    CronTask(String), // CronTask ID
 }
 
-pub struct SidecarInstance {
-    process: Child,
-    port: u16,
-    agent_dir: Option<PathBuf>,
-    healthy: bool,
-    is_global: bool,
+/// Session 级别的 Sidecar 实例
+pub struct SessionSidecar {
+    pub session_id: String,
+    pub port: u16,
+    pub workspace_path: PathBuf,
+    pub owners: HashSet<SidecarOwner>,  // 可以有多个使用者
+    pub healthy: bool,
+}
+
+/// Session 激活记录
+pub struct SessionActivation {
+    pub session_id: String,
+    pub tab_id: Option<String>,
+    pub task_id: Option<String>,
+    pub port: u16,
+    pub workspace_path: String,
+    pub is_cron_task: bool,
+}
+
+/// 多实例 Sidecar 管理器
+pub struct SidecarManager {
+    /// Session ID -> SessionSidecar (Session-centric 主存储)
+    sidecars: HashMap<String, SessionSidecar>,
+
+    /// Session ID -> SessionActivation (激活状态追踪)
+    session_activations: HashMap<String, SessionActivation>,
+
+    /// Tab ID -> SidecarInstance (遗留，仅 Global Sidecar 使用)
+    instances: HashMap<String, SidecarInstance>,
+
+    port_counter: AtomicU16,
 }
 ```
 
 **IPC 命令**：
+
 | 命令 | 用途 |
 |------|------|
-| `cmd_start_tab_sidecar` | 为 Tab 启动独立 Sidecar |
-| `cmd_stop_tab_sidecar` | 停止指定 Tab 的 Sidecar |
-| `cmd_get_tab_server_url` | 获取 Tab 的服务端口 URL |
-| `cmd_start_global_sidecar` | 启动全局 Sidecar (Settings) |
+| `cmd_ensure_session_sidecar` | 确保 Session 有运行中的 Sidecar |
+| `cmd_release_session_sidecar` | 释放 Owner 对 Sidecar 的使用 |
+| `cmd_get_session_port` | 获取 Session 的 Sidecar 端口 |
+| `cmd_get_session_activation` | 查询 Session 激活状态 |
+| `cmd_activate_session` | 激活 Session（记录到 HashMap）|
+| `cmd_deactivate_session` | 取消 Session 激活 |
+| `cmd_upgrade_session_id` | 升级 Session ID（场景 4 handover）|
+| `cmd_start_global_sidecar` | 启动 Global Sidecar |
 | `cmd_stop_all_sidecars` | 应用退出时清理全部 |
+
+### 2. Multi-Tab 前端架构 (`src/renderer/context/`)
+
+**每个 Tab 可以连接到一个 Session 的 Sidecar**：
+
+| 组件 | 职责 |
+|------|------|
+| `TabContext.tsx` | Context 定义，提供 Tab-scoped API |
+| `TabProvider.tsx` | 状态容器，管理 messages/logs/SSE/Session |
+
+**Tab-Scoped API**：
+```typescript
+// 每个 Tab 通过 Session ID 获取对应的 Sidecar 端口
+const { apiGet, apiPost, stopResponse } = useTabState();
+```
 
 ### 3. Rust SSE Proxy (`src-tauri/src/sse_proxy.rs`)
 
@@ -138,40 +178,50 @@ pub struct SseProxyState {
 | `types/session.ts` | Session 类型定义 |
 | `agent-session.ts` | 会话状态管理，包含 `resetSession()` |
 
-### 6. 会话重置机制
+### 6. Session 切换场景 (v0.1.10)
 
-用户点击「新对话」时，必须同步重置前后端状态：
+| 场景 | 描述 | 行为 |
+|------|------|------|
+| **场景 1** | 新 Tab + 新 Session | 创建新 Sidecar |
+| **场景 2** | 新 Tab + 其他 Tab 正在用的 Session | 跳转到已有 Tab |
+| **场景 3** | 同 Tab 切换到定时任务 Session | 跳转/连接到 CronTask Sidecar |
+| **场景 4** | 同 Tab 切换到无人使用的 Session | **Handover**：Sidecar 资源复用 |
 
+**场景 4 详解（Handover 机制）**：
 ```
-前端 resetSession() → POST /chat/reset → 后端 resetSession()
-                                              ├─ 中断响应
-                                              ├─ 清空 messages
-                                              └─ 生成新 sessionId
+旧 Session A 的 Sidecar → 移交给 → 新 Session B
+- HashMap key 从 session_a 改为 session_b
+- Sidecar 进程不重启，资源复用
+- 调用 POST /chat/switch-session 通知后端切换
 ```
-
-详见 [SSE 状态同步文档](./session_state_sync.md)。
 
 ## 通信流程
 
-### SSE 流式事件（多实例）
+### SSE 流式事件
 ```
 Tab1 listen('sse:tab1:*') ◄── Rust emit(sse:tab1:event) ◄── reqwest stream ◄── Sidecar:31415
 Tab2 listen('sse:tab2:*') ◄── Rust emit(sse:tab2:event) ◄── reqwest stream ◄── Sidecar:31416
 ```
 
-### HTTP API 调用（多实例）
+### HTTP API 调用
 ```
-Tab1 apiPost() ──► getTabServerUrl(tab1) ──► Rust proxy ──► Sidecar:31415
-Tab2 apiPost() ──► getTabServerUrl(tab2) ──► Rust proxy ──► Sidecar:31416
+Tab1 apiPost() ──► getSessionPort(session_123) ──► Rust proxy ──► Sidecar:31415
+Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──► Sidecar:31416
 ```
 
 ## 资源管理
 
 | 事件 | 操作 |
 |------|------|
-| 打开工作区 | `startTabSidecar(tabId, agentDir)` |
-| 关闭 Tab | `stopTabSidecar(tabId)`，Drop trait 清理进程 |
-| 应用退出 | `stopAllSidecars()`，清理临时目录 |
+| 打开/切换 Session | `ensureSessionSidecar(sessionId, workspace, ownerType, ownerId)` |
+| 关闭 Tab | `releaseSessionSidecar(sessionId, 'tab', tabId)` |
+| 定时任务启动 | `ensureSessionSidecar(sessionId, workspace, 'cron', taskId)` |
+| 定时任务结束 | `releaseSessionSidecar(sessionId, 'cron', taskId)` |
+| 应用退出 | `stopAllSidecars()`，清理全部进程 |
+
+**Owner 释放规则**：
+- 当一个 Session 的所有 Owner（Tab + CronTask）都释放后，Sidecar 才会停止
+- 单个 Tab 关闭不会停止正在被定时任务使用的 Sidecar
 
 ## 安全设计
 

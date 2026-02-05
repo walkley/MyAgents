@@ -61,6 +61,7 @@ coverage/
 .claude/
 .playwright-mcp/
 specs/prd/
+specs/research/
 
 publish_release.sh
 start_dev.sh

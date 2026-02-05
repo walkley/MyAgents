@@ -18,6 +18,7 @@ import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
+import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, type SessionState, type TabContextValue } from './TabContext';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -25,7 +26,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, stopTabSidecar, isTauri } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
 import {
     notifyMessageComplete,
@@ -90,6 +91,10 @@ interface TabProviderProps {
     isActive?: boolean;
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
+    /** Callback when sessionId changes (e.g., backend creates real session from pending-xxx) */
+    onSessionIdChange?: (newSessionId: string) => void;
+    // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
+    // Port is dynamically retrieved via getSessionPort(sessionId)
 }
 
 /**
@@ -104,11 +109,31 @@ async function handleApiResponse<T>(response: Response): Promise<T> {
 }
 
 /**
- * Create a Tab-scoped POST function
+ * Get the base URL for a Tab's Sidecar
+ * With Session-centric Sidecar (Owner model), we first try to get the port from sessionId,
+ * then fall back to tabId lookup for legacy compatibility.
+ * @param tabId - Tab identifier
+ * @param sessionId - Session identifier (optional, for Session-centric lookup)
  */
-function createPostJson(tabId: string) {
+async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<string> {
+    // Session-centric: try to get port from sessionId first
+    if (sessionId) {
+        const port = await getSessionPort(sessionId);
+        if (port !== null) {
+            return `http://127.0.0.1:${port}`;
+        }
+    }
+    // Fallback to Tab-based lookup (legacy compatibility)
+    return getTabServerUrl(tabId);
+}
+
+/**
+ * Create a Tab-scoped POST function
+ * Uses Session-centric port lookup when sessionId is available
+ */
+function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
@@ -121,10 +146,11 @@ function createPostJson(tabId: string) {
 
 /**
  * Create a Tab-scoped GET function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiGetJson(tabId: string) {
+function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url);
         return handleApiResponse<T>(response);
@@ -133,10 +159,11 @@ function createApiGetJson(tabId: string) {
 
 /**
  * Create a Tab-scoped PUT function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiPutJson(tabId: string) {
+function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
@@ -149,10 +176,11 @@ function createApiPutJson(tabId: string) {
 
 /**
  * Create a Tab-scoped DELETE function
+ * Uses Session-centric port lookup when sessionId is available
  */
-function createApiDelete(tabId: string) {
+function createApiDelete(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string): Promise<T> => {
-        const baseUrl = await getTabServerUrl(tabId);
+        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, { method: 'DELETE' });
         return handleApiResponse<T>(response);
@@ -166,16 +194,22 @@ export default function TabProvider({
     sessionId = null,
     isActive,
     onGeneratingChange,
+    onSessionIdChange,
 }: TabProviderProps) {
-    // Create Tab-scoped API functions
-    const postJson = useMemo(() => createPostJson(tabId), [tabId]);
-    const apiGetJson = useMemo(() => createApiGetJson(tabId), [tabId]);
-    const apiPutJson = useMemo(() => createApiPutJson(tabId), [tabId]);
-    const apiDeleteJson = useMemo(() => createApiDelete(tabId), [tabId]);
-
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
     const [currentSessionId, setCurrentSessionId] = useState<string | null>(sessionId);
+    // Ref to track currentSessionId in SSE event handlers and API functions (avoid stale closure)
+    const currentSessionIdRef = useRef<string | null>(currentSessionId);
+    currentSessionIdRef.current = currentSessionId;
+
+    // Create Tab-scoped API functions
+    // Uses Session-centric port lookup via currentSessionIdRef
+    const postJson = useMemo(() => createPostJson(tabId, currentSessionIdRef), [tabId]);
+    const apiGetJson = useMemo(() => createApiGetJson(tabId, currentSessionIdRef), [tabId]);
+    const apiPutJson = useMemo(() => createApiPutJson(tabId, currentSessionIdRef), [tabId]);
+    const apiDeleteJson = useMemo(() => createApiDelete(tabId, currentSessionIdRef), [tabId]);
+
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
@@ -194,9 +228,11 @@ export default function TabProvider({
         setCurrentSessionId(sessionId);
     }, [sessionId]);
 
-    // Store callback in ref to avoid triggering effect on every render
+    // Store callbacks in refs to avoid triggering effects on every render
     const onGeneratingChangeRef = useRef(onGeneratingChange);
     onGeneratingChangeRef.current = onGeneratingChange;
+    const onSessionIdChangeRef = useRef(onSessionIdChange);
+    onSessionIdChangeRef.current = onSessionIdChange;
 
     // Notify parent when generating state changes (for close confirmation)
     useEffect(() => {
@@ -211,6 +247,8 @@ export default function TabProvider({
     const seenIdsRef = useRef<Set<string>>(new Set());
     // Flag to skip message-replay after user clicks "new session"
     const isNewSessionRef = useRef(false);
+    // Ref for cron task exit handler (set by useCronTask hook via context)
+    const onCronTaskExitRequestedRef = useRef<((taskId: string, reason: string) => void) | null>(null);
     // Pending attachments to merge with next user message from SSE replay
     const pendingAttachmentsRef = useRef<{
         id: string;
@@ -246,6 +284,9 @@ export default function TabProvider({
         // Clear pending prompts to prevent stale UI
         setPendingPermission(null);
         setPendingAskUserQuestion(null);
+        // Clear current session ID - no active session until first message creates one
+        // This ensures history dropdown shows no selection for new conversations
+        setCurrentSessionId(null);
 
         // 2. Tell backend to reset (this will also broadcast chat:init)
         try {
@@ -818,9 +859,27 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
+
+                    // CRITICAL: Mark session as active immediately when system-init arrives
+                    // This happens BEFORE message-chunk, so we must set isStreamingRef here
+                    // to prevent loadSession from aborting an active cron task during sessionId upgrade
+                    isStreamingRef.current = true;
+                    setIsLoading(true);
+
+                    // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
+                    // This ensures currentSessionId stays in sync with the actual session
+                    // Use our sessionId (for SessionStore matching) not SDK's session_id
+                    const newSessionId = payload.sessionId;
+                    if (newSessionId && currentSessionIdRef.current !== newSessionId) {
+                        console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
+                        setCurrentSessionId(newSessionId);
+                        // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
+                        // This ensures history dropdown can detect if this session is already open
+                        onSessionIdChangeRef.current?.(newSessionId);
+                    }
                 }
                 break;
             }
@@ -849,6 +908,19 @@ export default function TabProvider({
                 const payload = data as { message: string } | null;
                 if (payload?.message) {
                     setAgentError(payload.message);
+                }
+                break;
+            }
+
+            // Cron task exit requested by AI via exit_cron_task tool
+            case 'cron:task-exit-requested': {
+                const payload = data as { taskId: string; reason: string; timestamp: string } | null;
+                if (payload?.taskId && payload?.reason) {
+                    console.log(`[TabProvider ${tabId}] Cron task exit requested: taskId=${payload.taskId}, reason=${payload.reason}`);
+                    // Call the handler if registered by useCronTask
+                    if (onCronTaskExitRequestedRef.current) {
+                        onCronTaskExitRequestedRef.current(payload.taskId, payload.reason);
+                    }
                 }
                 break;
             }
@@ -975,10 +1047,11 @@ export default function TabProvider({
     }, [appendLog, appendUnifiedLog, tabId, markIncompleteBlocksAsFinished]);
 
     // Connect SSE
+    // Uses Session-centric port lookup via currentSessionIdRef
     const connectSse = useCallback(async () => {
         if (sseRef.current?.isConnected()) return;
 
-        const sse = createSseConnection(tabId);
+        const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
         sseRef.current = sse;
 
@@ -1002,27 +1075,29 @@ export default function TabProvider({
         }
     }, []);
 
-    // Track agentDir for cleanup (need ref because cleanup runs after props may change)
-    const agentDirRef = useRef(agentDir);
-    agentDirRef.current = agentDir;
-
-    // Cleanup on unmount - disconnect SSE, clear pending timers, and stop Tab's Sidecar
+    // Cleanup on unmount - disconnect SSE and clear pending timers
+    // NOTE: Sidecar lifecycle is now managed by App.tsx performCloseTab(),
+    // which checks for active cron tasks before stopping.
+    // Do NOT call stopTabSidecar here - it would bypass cron task protection.
     useEffect(() => {
         return () => {
             if (sseRef.current) {
                 void sseRef.current.disconnect();
+                sseRef.current = null;  // Allow garbage collection
             }
             if (stopTimeoutRef.current) {
                 clearTimeout(stopTimeoutRef.current);
                 stopTimeoutRef.current = null;
             }
-            // Only stop Sidecar if this Tab had one (i.e., was running a project)
-            // Settings/Launcher tabs don't have sidecars (agentDir is empty string)
-            if (agentDirRef.current) {
-                void stopTabSidecar(tabId);
-            }
+            // Sidecar stop is handled by App.tsx performCloseTab()
+            // which properly checks for active cron tasks before stopping
         };
     }, [tabId]);
+
+    // Note: sidecarPort change effect removed
+    // With Session-centric Sidecar (Owner model), the port is dynamically looked up via
+    // getSessionPort(sessionId) on each API call. SSE reconnection is no longer needed
+    // when stopping cron tasks because the Sidecar continues running if Tab still owns it.
 
     // Send message with optional images, permission mode, and model
     const sendMessage = useCallback(async (
@@ -1030,7 +1105,8 @@ export default function TabProvider({
         images?: ImageAttachment[],
         permissionMode?: PermissionMode,
         model?: string,
-        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }
+        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' },
+        isCron?: boolean
     ): Promise<boolean> => {
         const trimmed = text.trim();
         if (!trimmed && (!images || images.length === 0)) return false;
@@ -1081,6 +1157,7 @@ export default function TabProvider({
                     skill,
                     has_image: hasImages,
                     has_file: false,
+                    is_cron: isCron ?? false,
                 });
             }
 
@@ -1090,6 +1167,7 @@ export default function TabProvider({
             pendingAttachmentsRef.current = null; // Clear on error
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
     }, [tabId]);
 
     // Stop response with timeout fallback
@@ -1126,16 +1204,53 @@ export default function TabProvider({
             setSystemStatus(null);
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
     }, [tabId]);
 
     // Load session from history
-    const loadSession = useCallback(async (targetSessionId: string): Promise<boolean> => {
+    // Options:
+    // - skipLoadingReset: If true, don't reset isLoading to false. Useful when caller
+    //   knows an operation is in progress (e.g., cron task execution) and will manage
+    //   the loading state separately.
+    //
+    // Note: This option is currently available for future use cases but not actively used.
+    // Chat.tsx manages loading state through pendingCronLoadingRef pattern instead of
+    // calling loadSession directly, to avoid duplicate loadSession calls with TabProvider's
+    // session loading effect.
+    const loadSession = useCallback(async (
+        targetSessionId: string,
+        options?: { skipLoadingReset?: boolean }
+    ): Promise<boolean> => {
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
+
+            // Check if session is already activated by another Tab or CronTask (Session singleton constraint)
+            const activation = await getSessionActivation(targetSessionId);
+            if (activation) {
+                // Case 1: Session is open in another Tab - jump to that Tab
+                if (activation.tab_id && activation.tab_id !== tabId) {
+                    console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is already activated by tab ${activation.tab_id}, requesting jump`);
+                    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.JUMP_TO_TAB, {
+                        detail: { targetTabId: activation.tab_id, sessionId: targetSessionId }
+                    }));
+                    return false;
+                }
+
+                // Case 2: Session is used by a CronTask without Tab - jump to show cron task UI
+                // This happens when cron task is running in background (tab was closed)
+                if (activation.is_cron_task && !activation.tab_id) {
+                    console.log(`[TabProvider ${tabId}] Session ${targetSessionId} is used by background cron task, will connect to it`);
+                    // Don't block - let the session load, Chat.tsx will restore cron task UI
+                    // The session switch will update the activation's tab_id
+                }
+            }
+
             const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
-                console.error(`[TabProvider ${tabId}] Session not found`);
+                // Session not found is not necessarily an error - it may have been deleted
+                // or be a newly created empty session. Log as info, not error.
+                console.log(`[TabProvider ${tabId}] Session ${targetSessionId} not found in storage (may be deleted or empty)`);
                 return false;
             }
 
@@ -1177,8 +1292,12 @@ export default function TabProvider({
             isNewSessionRef.current = false; // Allow SSE replays again
             isStreamingRef.current = false;  // Stop any streaming state
             setMessages(loadedMessages);
-            setIsLoading(false);
-            setSessionState('idle');  // Reset session state when loading historical session
+            // Only reset loading state if not explicitly skipped
+            // (caller may be managing loading state for an in-progress operation like cron task)
+            if (!options?.skipLoadingReset) {
+                setIsLoading(false);
+                setSessionState('idle');  // Reset session state when loading historical session
+            }
             setSystemStatus(null);
             setAgentError(null);
             // Update current session ID to reflect the loaded session
@@ -1198,30 +1317,80 @@ export default function TabProvider({
             }
             return false;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson and postJson are stable
     }, [tabId]);
 
     // Track whether initial session has been loaded
     const initialSessionLoadedRef = useRef(false);
+    // Track previous sessionId to detect changes (must be before the effect that uses it)
+    const prevSessionIdRef = useRef<string | null | undefined>(sessionId);
 
-    // Auto-load session when initial sessionId is provided and SSE is connected
+    // Unified session loading effect - handles both initial load and session changes
     useEffect(() => {
-        // Only load if:
-        // 1. sessionId is provided
-        // 2. SSE is connected (sidecar is ready)
-        // 3. We haven't loaded this session yet
-        if (sessionId && isConnected && !initialSessionLoadedRef.current) {
-            initialSessionLoadedRef.current = true;
-            console.log(`[TabProvider ${tabId}] Auto-loading initial session: ${sessionId}`);
-            void loadSession(sessionId);
-        }
-    }, [sessionId, isConnected, tabId, loadSession]);
+        const prevSessionId = prevSessionIdRef.current;
+        prevSessionIdRef.current = sessionId;
 
-    // Reset the loaded flag when sessionId changes to a different value
-    useEffect(() => {
+        // No sessionId - reset flag and return
         if (!sessionId) {
             initialSessionLoadedRef.current = false;
+            return;
         }
-    }, [sessionId]);
+
+        // Not connected yet - wait
+        if (!isConnected) {
+            return;
+        }
+
+        const isPendingSession = isPendingSessionId(sessionId);
+        const wasPendingSession = isPendingSessionId(prevSessionId);
+
+        // Case 1: Current sessionId is pending - skip (doesn't exist in backend yet)
+        if (isPendingSession) {
+            console.log(`[TabProvider ${tabId}] Session is pending (${sessionId}), skipping load`);
+            return;
+        }
+
+        // Case 2: Upgraded from pending to real session
+        // This happens when backend creates the real session after first message (including cron task)
+        if (wasPendingSession) {
+            // Case 2a: Already have data (normal message flow) - skip
+            if (initialSessionLoadedRef.current) {
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, already in session`);
+                return;
+            }
+
+            // Case 2b: Session is currently running (e.g., cron task executing) - skip
+            // CRITICAL: Do NOT call loadSession while AI is responding, as it would abort the current session!
+            // The messages will come through SSE stream naturally.
+            // Use isStreamingRef (ref) to get the latest value, avoiding stale closure issues
+            if (isStreamingRef.current) {
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, session is streaming, skipping loadSession`);
+                initialSessionLoadedRef.current = true;  // Mark as loaded to prevent future attempts
+                return;
+            }
+
+            // Case 2c: Switching from an unused pending session to a real session - need to load data
+            // This happens when user selects a history session while current tab has unused pending session
+            console.log(`[TabProvider ${tabId}] Switching from unused pending to ${sessionId}, loading session`);
+            initialSessionLoadedRef.current = true;
+            void loadSession(sessionId);
+            return;
+        }
+
+        // Case 3: Already loaded this session - skip
+        if (initialSessionLoadedRef.current && prevSessionId === sessionId) {
+            return;
+        }
+
+        // Case 4: Need to load session (initial load or session switch)
+        if (prevSessionId !== sessionId) {
+            console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading session`);
+        } else {
+            console.log(`[TabProvider ${tabId}] Initial session load: ${sessionId}`);
+        }
+        initialSessionLoadedRef.current = true;
+        void loadSession(sessionId);
+    }, [sessionId, isConnected, tabId, loadSession]);
 
     // Respond to permission request
     const respondPermission = useCallback(async (decision: 'deny' | 'allow_once' | 'always_allow') => {
@@ -1306,6 +1475,8 @@ export default function TabProvider({
         apiDelete: apiDeleteJson,
         respondPermission,
         respondAskUserQuestion,
+        // Cron task exit handler ref (mutable, no need in deps)
+        onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, isConnected,

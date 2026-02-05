@@ -14,7 +14,7 @@ import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
-import type { SkillFrontmatter, SkillDetail, SkillDetailResponse, ApiSuccessResponse } from '../../shared/skillsTypes';
+import type { SkillFrontmatter, SkillDetail } from '../../shared/skillsTypes';
 import { sanitizeFolderName } from '../../shared/utils';
 
 interface SkillDetailPanelProps {
@@ -35,7 +35,7 @@ export interface SkillDetailPanelRef {
 }
 
 const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
-    function SkillDetailPanel({ name, scope, onBack, onSaved, onDeleted, startInEditMode = false, agentDir }, ref) {
+    function SkillDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, startInEditMode = false, agentDir }, ref) {
         const toast = useToast();
         // Stabilize toast reference to avoid unnecessary effect re-runs
         const toastRef = useRef(toast);
@@ -160,7 +160,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                     } else {
                         toastRef.current.error(response.error || '加载失败');
                     }
-                } catch (err) {
+                } catch {
                     toastRef.current.error('加载失败');
                 } finally {
                     setLoading(false);
@@ -317,7 +317,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                 } else {
                     toastRef.current.error(response.error || '保存失败');
                 }
-            } catch (err) {
+            } catch {
                 toastRef.current.error('保存失败');
             } finally {
                 setSaving(false);
@@ -337,7 +337,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                 } else {
                     toastRef.current.error(response.error || '删除失败');
                 }
-            } catch (err) {
+            } catch {
                 toastRef.current.error('删除失败');
             } finally {
                 setDeleting(false);
@@ -350,7 +350,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
             try {
                 // Use full path from skill.path which is already correctly resolved by backend
                 await api.post('/agent/open-path', { fullPath: skill.path });
-            } catch (err) {
+            } catch {
                 toastRef.current.error('无法打开目录');
             }
         }, [skill, api]);

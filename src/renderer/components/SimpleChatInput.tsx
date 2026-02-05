@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Command, Wrench } from 'lucide-react';
+import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -6,6 +6,8 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabStateOptional } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, type ModelEntity } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import CronTaskStatusBar from './cron/CronTaskStatusBar';
+import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -54,6 +56,33 @@ interface SimpleChatInputProps {
   onOpenAgentSettings?: () => void;
   /** Callback to refresh workspace after files are added */
   onWorkspaceRefresh?: () => void;
+  // Cron task props
+  /** Whether cron mode is currently enabled (before task starts) */
+  cronModeEnabled?: boolean;
+  /** Cron task config (for status bar display) */
+  cronConfig?: {
+    intervalMinutes: number;
+  } | null;
+  /** Active cron task (for overlay display) */
+  cronTask?: {
+    status: 'running' | 'paused' | 'stopped' | 'completed';
+    intervalMinutes: number;
+    executionCount: number;
+    lastExecutedAt?: string;
+    endConditions?: {
+      maxExecutions?: number;
+    };
+  } | null;
+  /** Callback when cron button is clicked */
+  onCronButtonClick?: () => void;
+  /** Callback when cron settings button is clicked (from status bar or overlay) */
+  onCronSettings?: () => void;
+  /** Callback when cron is cancelled (from status bar X button) */
+  onCronCancel?: () => void;
+  /** Callback when cron task is stopped */
+  onCronStop?: () => void;
+  /** Callback when input text changes (for cron prompt tracking) */
+  onInputChange?: (text: string) => void;
 }
 
 const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
@@ -70,6 +99,8 @@ export interface SimpleChatInputHandle {
   processDroppedFilePaths?: (paths: string[]) => Promise<void>;
   /** Insert @references at cursor position or end of input */
   insertReferences: (paths: string[]) => void;
+  /** Set the input value directly (used for restoring content after cron stop) */
+  setValue: (value: string) => void;
 }
 
 // File search result type
@@ -81,7 +112,7 @@ interface FileSearchResult {
 
 const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
   value: externalValue,
-  onChange: externalOnChange,
+  onChange: _externalOnChange,
   onSend,
   onStop,
   isLoading,
@@ -104,6 +135,14 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onRefreshProviders,
   onOpenAgentSettings,
   onWorkspaceRefresh,
+  cronModeEnabled = false,
+  cronConfig,
+  cronTask,
+  onCronButtonClick,
+  onCronSettings,
+  onCronCancel,
+  onCronStop,
+  onInputChange,
 }, ref) {
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -118,6 +157,11 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalValue]);
+
+  // Notify parent of input value changes (for cron prompt tracking)
+  useEffect(() => {
+    onInputChange?.(inputValue);
+  }, [inputValue, onInputChange]);
 
   // Check if a provider is available:
   // - Subscription type: always available
@@ -214,6 +258,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
   useEffect(() => {
     textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, []);
 
   // Auto-resize textarea based on content
@@ -229,6 +274,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
       const scrollHeight = textarea.scrollHeight;
       textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
 
   // Fetch slash commands function (extracted for reuse)
@@ -432,7 +478,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
         // Add .gitignore rule for myagents_files folder
         try {
           await apiPost('/api/files/add-gitignore', { pattern: 'myagents_files/' });
-        } catch (err) {
+        } catch {
           // Non-fatal, continue silently
         }
 
@@ -641,12 +687,21 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     }, 0);
   }, [textareaRef]);
 
+  // Set input value directly (for restoring content after cron stop)
+  const setValue = useCallback((value: string) => {
+    setInputValue(value);
+    // Also focus the textarea
+    textareaRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
+  }, []);
+
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
     processDroppedFiles,
     processDroppedFilePaths,
     insertReferences,
-  }), [processDroppedFiles, processDroppedFilePaths, insertReferences]);
+    setValue,
+  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, setValue]);
 
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -851,7 +906,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
             toastRef.current.warning(`Skill "${skillName}" 复制失败，请重试`);
             return;
           }
-        } catch (err) {
+        } catch {
           toastRef.current.warning(`Skill "${skillName}" 复制超时，请重试`);
           return;
         }
@@ -1000,6 +1055,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
         handleSend();
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, isLoading, images.length, handleSend, handleSkillSelect]);
 
   const toggleExpand = () => setIsExpanded((prev) => !prev);
@@ -1016,7 +1072,34 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
       {/* Input container */}
       <div className="pointer-events-auto relative w-full max-w-3xl">
-        <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl">
+        {/* Cron task status bar - shows when cron mode enabled but task not started */}
+        {cronModeEnabled && !cronTask && cronConfig && (
+          <CronTaskStatusBar
+            intervalMinutes={cronConfig.intervalMinutes}
+            onSettings={() => onCronSettings?.()}
+            onCancel={() => onCronCancel?.()}
+          />
+        )}
+
+        <div className={`relative border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl ${
+          cronModeEnabled && !cronTask && cronConfig
+            ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
+            : 'rounded-2xl'  // Normal: fully rounded
+        }`}>
+          {/* Cron task overlay - shows when task is running */}
+          {cronTask && cronTask.status === 'running' && (
+            <CronTaskOverlay
+              status={cronTask.status}
+              intervalMinutes={cronTask.intervalMinutes}
+              executionCount={cronTask.executionCount}
+              maxExecutions={cronTask.endConditions?.maxExecutions}
+              nextExecutionTime={cronTask.lastExecutedAt
+                ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
+                : undefined}
+              onStop={() => onCronStop?.()}
+              onSettings={() => onCronSettings?.()}
+            />
+          )}
           {/* Clickable area for focus - covers input area but not toolbar */}
           <div
             className="cursor-text"
@@ -1164,7 +1247,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowPlusMenu(!showPlusMenu);
                   }}
                   className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="添加"
+                  title="添加上下文"
                 >
                   <Plus className="h-4 w-4" />
                 </button>
@@ -1254,7 +1337,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowToolMenu(false);
                   }}
                   className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="切换模式"
+                  title="切换执行模式"
                 >
                   <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.icon}</span>
                   <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.label}</span>
@@ -1319,7 +1402,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                     setShowPlusMenu(false);
                   }}
                   className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                  title="工具"
+                  title="使用工具"
                 >
                   <Wrench className="h-3.5 w-3.5" />
                   <span>工具</span>
@@ -1392,6 +1475,26 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   </div>
                 )}
               </div>
+
+              {/* Heartbeat Loop Button */}
+              {onCronButtonClick && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCronButtonClick();
+                  }}
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                    cronModeEnabled
+                      ? 'bg-red-500/15 text-red-500 hover:bg-red-500/25'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                  }`}
+                  title={cronModeEnabled ? '心跳循环已启用' : '开启心跳循环'}
+                >
+                  <HeartPulse className="h-3.5 w-3.5" />
+                  <span>心跳</span>
+                </button>
+              )}
             </div>
 
             {/* Right side - model selector + send/stop button */}

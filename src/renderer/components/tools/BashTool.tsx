@@ -1,7 +1,7 @@
 
 import type { BashInput, ToolUseSimple } from '@/types/chat';
 
-import { Terminal, AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
 
 interface BashToolProps {
   tool: ToolUseSimple;

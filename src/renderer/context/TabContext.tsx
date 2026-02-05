@@ -88,9 +88,9 @@ export interface TabContextValue extends TabState {
     disconnectSse: () => void;
 
     // Chat actions
-    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }) => Promise<boolean>;
+    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' }, isCron?: boolean) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
-    loadSession: (sessionId: string) => Promise<boolean>;
+    loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
     resetSession: () => Promise<boolean>;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
@@ -104,6 +104,9 @@ export interface TabContextValue extends TabState {
 
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
+
+    // Cron task exit event handler (set by useCronTask hook)
+    onCronTaskExitRequested: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
 
 /**
@@ -146,6 +149,7 @@ const defaultContextValue: TabContextValue = {
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
+    onCronTaskExitRequested: { current: null },
 };
 
 /**

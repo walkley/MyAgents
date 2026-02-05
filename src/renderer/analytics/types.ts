@@ -51,7 +51,12 @@ export type EventName =
   | 'file_drop'
   // 系统事件
   | 'update_check'
-  | 'update_install';
+  | 'update_install'
+  // 心跳循环
+  | 'cron_enable'
+  | 'cron_start'
+  | 'cron_stop'
+  | 'cron_recover';
 
 /**
  * message_send 事件参数
@@ -62,6 +67,7 @@ export interface MessageSendParams {
   skill?: string | null;  // 技能/指令名称
   has_image: boolean;     // 是否含图片
   has_file: boolean;      // 是否含文件
+  is_cron: boolean;       // 是否为心跳循环任务发送
 }
 
 /**

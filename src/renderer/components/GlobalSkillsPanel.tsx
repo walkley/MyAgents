@@ -47,6 +47,13 @@ export default function GlobalSkillsPanel() {
     const [canSyncFromClaude, setCanSyncFromClaude] = useState(false);
     const [syncableCount, setSyncableCount] = useState(0);
 
+    // Track mounted state to prevent setState after unmount
+    const isMountedRef = useRef(true);
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => { isMountedRef.current = false; };
+    }, []);
+
     // Check if any child is in editing mode
     const isAnyEditing = useCallback(() => {
         if (viewState.type === 'skill-detail' && skillDetailRef.current?.isEditing()) {
@@ -68,6 +75,9 @@ export default function GlobalSkillsPanel() {
                 apiGetJson<{ canSync: boolean; count: number; folders: string[] }>('/api/skill/sync-check')
             ]);
 
+            // Guard against setState after unmount
+            if (!isMountedRef.current) return;
+
             if (skillsRes.success) setSkills(skillsRes.skills);
             if (commandsRes.success) setCommands(commandsRes.commands);
 
@@ -75,9 +85,10 @@ export default function GlobalSkillsPanel() {
             setCanSyncFromClaude(syncCheckRes?.canSync ?? false);
             setSyncableCount(syncCheckRes?.count ?? 0);
         } catch {
+            if (!isMountedRef.current) return;
             toastRef.current.error('加载失败');
         } finally {
-            setLoading(false);
+            if (isMountedRef.current) setLoading(false);
         }
     }, []);
 

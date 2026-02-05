@@ -36,6 +36,7 @@ export function sanitizeFolderName(name: string): string {
     // Remove path separators and Windows reserved characters: / \ < > : " | ? *
     sanitized = sanitized.replace(/[/\\<>:"|?*]/g, '');
     // Remove control characters (0x00-0x1F, 0x7F)
+    // eslint-disable-next-line no-control-regex -- Intentional control character removal for filename sanitization
     sanitized = sanitized.replace(/[\x00-\x1f\x7f]/g, '');
     // Replace multiple spaces/hyphens with single hyphen
     sanitized = sanitized.replace(/[\s-]+/g, '-');

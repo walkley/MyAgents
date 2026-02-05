@@ -208,6 +208,9 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
+  // General settings
+  autoStart: boolean; // 开机启动
+  cronNotifications: boolean; // 定时任务通知
   // API Keys for providers (stored separately for security)
   providerApiKeys?: Record<string, string>;
   // Provider verification status (persisted after API key validation)
@@ -480,6 +483,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultProviderId: 'anthropic-sub',
   defaultPermissionMode: 'auto',
   theme: 'light',
-  minimizeToTray: false,
+  minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
+  autoStart: false,       // 默认不开启开机启动
+  cronNotifications: true,
 };

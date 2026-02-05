@@ -7,6 +7,9 @@ export interface Tab {
     view: 'launcher' | 'chat' | 'settings';
     title: string;            // Display title for the tab
     isGenerating?: boolean;   // true = AI is outputting, used for close confirmation
+    // Note: cronTaskId and sidecarPort are no longer stored in Tab.
+    // Sidecar lifecycle is now managed by SidecarManager's Owner model.
+    // Use getSessionPort(sessionId) to get the port when needed.
 }
 
 export interface TabState {

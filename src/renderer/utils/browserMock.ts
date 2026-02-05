@@ -1,8 +1,8 @@
 // Browser Mock for Tauri APIs
 // Allows the app to run in browser for rapid development without Tauri
 
-import type { Project, Provider, AppConfig, PermissionMode } from '@/config/types';
-import { DEFAULT_CONFIG, PRESET_PROVIDERS } from '@/config/types';
+import type { Project, AppConfig } from '@/config/types';
+import { DEFAULT_CONFIG } from '@/config/types';
 
 // Storage keys
 const STORAGE_KEYS = {

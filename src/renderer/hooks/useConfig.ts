@@ -18,6 +18,7 @@ import {
     saveCustomProvider as saveCustomProviderService,
     deleteCustomProvider as deleteCustomProviderService,
 } from '@/config/configService';
+import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     type AppConfig,
     DEFAULT_CONFIG,
@@ -140,6 +141,10 @@ export function useConfig(): UseConfigResult {
         const newConfig = { ...config, ...updates };
         setConfig(newConfig);
         await saveAppConfig(newConfig);
+        // Notify other components (e.g., App.tsx) that config has changed
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event(CUSTOM_EVENTS.CONFIG_CHANGED));
+        }
     }, [config]);
 
     const addProject = useCallback(async (path: string) => {

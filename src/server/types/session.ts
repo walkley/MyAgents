@@ -22,6 +22,8 @@ export interface SessionMetadata {
     sdkSessionId?: string;
     /** Session statistics */
     stats?: SessionStats;
+    /** Associated cron task ID (if this session is used by a scheduled task) */
+    cronTaskId?: string;
 }
 
 /**

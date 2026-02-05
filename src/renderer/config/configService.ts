@@ -366,6 +366,13 @@ export async function addProject(path: string): Promise<Project> {
         console.log('[configService] Project already exists, updating lastOpened');
         // Update lastOpened
         existing.lastOpened = new Date().toISOString();
+        // Fix name if it looks like a full path (historical bug on Windows)
+        // Name should be just the folder name, not the full path
+        if (existing.name && (existing.name.includes('/') || existing.name.includes('\\'))) {
+            const parts = existing.name.replace(/\\/g, '/').split('/').filter(Boolean);
+            existing.name = parts[parts.length - 1] || existing.name;
+            console.log('[configService] Fixed project name from path to:', existing.name);
+        }
         await saveProjects(projects);
         return existing;
     }

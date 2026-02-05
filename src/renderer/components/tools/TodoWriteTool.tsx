@@ -1,5 +1,5 @@
 
-import { Check, Circle, Loader2 } from 'lucide-react';
+import { Check, Loader2 } from 'lucide-react';
 
 import type { TodoWriteInput, ToolUseSimple } from '@/types/chat';
 
