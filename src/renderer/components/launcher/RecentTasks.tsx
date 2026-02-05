@@ -112,19 +112,28 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
     useEffect(() => {
         if (!isTauriEnvironment()) return;
 
+        let isMounted = true;
         let unlisten: (() => void) | null = null;
 
         (async () => {
             const { listen } = await import('@tauri-apps/api/event');
+            // Check if component was unmounted during async import
+            if (!isMounted) return;
+
             unlisten = await listen<{ taskId: string; exitReason?: string }>('cron:task-stopped', () => {
                 // Refresh cron tasks to update the "心跳" badge
+                // Guard against calling setState after unmount
+                if (!isMounted) return;
                 getAllCronTasks()
-                    .then(tasks => setCronTasks(tasks))
+                    .then(tasks => {
+                        if (isMounted) setCronTasks(tasks);
+                    })
                     .catch(() => { /* ignore errors */ });
             });
         })();
 
         return () => {
+            isMounted = false;
             if (unlisten) unlisten();
         };
     }, []);

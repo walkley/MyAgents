@@ -124,10 +124,13 @@ export function useCronTask(options: UseCronTaskOptions) {
   const updateRunningConfig = useCallback((config: Partial<CronTaskState['config']>) => {
     setState(prev => {
       if (!prev.task) return prev; // No running task, do nothing
-      return {
+      const newState = {
         ...prev,
         config: prev.config ? { ...prev.config, ...config } : null,
       };
+      // Sync stateRef for consistency with other state updates
+      stateRef.current = newState;
+      return newState;
     });
   }, []);
 

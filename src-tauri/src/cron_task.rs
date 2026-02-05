@@ -794,7 +794,7 @@ impl CronTaskManager {
 
         let session_id = task.session_id.clone();
         task.status = TaskStatus::Stopped;
-        task.exit_reason = exit_reason;
+        task.exit_reason = exit_reason.clone();
         let task_clone = task.clone();
         drop(tasks);
 
@@ -806,6 +806,16 @@ impl CronTaskManager {
         self.deactivate_session_internal(&session_id).await;
 
         self.save_to_disk().await?;
+
+        // Emit stopped event for frontend listeners (e.g., RecentTasks badge refresh)
+        let handle_opt = self.app_handle.read().await;
+        if let Some(ref handle) = *handle_opt {
+            let _ = handle.emit("cron:task-stopped", serde_json::json!({
+                "taskId": task_id,
+                "exitReason": exit_reason
+            }));
+        }
+
         log::info!("[CronTask] Stopped task: {} (CronTask released from session {})", task_id, session_id);
 
         Ok(task_clone)
