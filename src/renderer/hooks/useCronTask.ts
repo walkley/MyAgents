@@ -201,9 +201,9 @@ export function useCronTask(options: UseCronTaskOptions) {
       // Start the Rust-layer scheduler
       // The scheduler will execute immediately for first time (execution_count == 0)
       // This ensures consistent execution path for both first and subsequent executions
+      console.log('[useCronTask] Starting scheduler for task:', task.id);
       await startCronScheduler(task.id);
-
-      console.log('[useCronTask] Task started with scheduler:', startedTask.id);
+      console.log('[useCronTask] Scheduler started successfully:', startedTask.id);
     } catch (error) {
       console.error('[useCronTask] Failed to start task:', error);
       setState(prev => ({
