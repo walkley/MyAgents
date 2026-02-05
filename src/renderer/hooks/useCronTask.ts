@@ -186,12 +186,24 @@ export function useCronTask(options: UseCronTaskOptions) {
       // (Rust sends cron:execution-complete 2s after scheduler starts, but React setState is async)
       stateRef.current = newState;
 
+      // Log state after update for debugging
+      console.log('[useCronTask] Task created, state updated:', {
+        taskId: startedTask.id,
+        stateRefTaskId: stateRef.current.task?.id,
+        listenersReady: listenersReadyRef.current,
+      });
+
       // Start the Rust-layer scheduler
       // The scheduler will execute immediately for first time (execution_count == 0)
       // This ensures consistent execution path for both first and subsequent executions
       await startCronScheduler(task.id);
 
-      console.log('[useCronTask] Task started with scheduler:', startedTask.id);
+      // Verify state is still correct after scheduler starts
+      console.log('[useCronTask] Task started with scheduler:', {
+        taskId: startedTask.id,
+        stateRefTaskIdAfter: stateRef.current.task?.id,
+        executionCount: startedTask.executionCount,
+      });
     } catch (error) {
       console.error('[useCronTask] Failed to start task:', error);
       setState(prev => ({
@@ -369,18 +381,50 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Handle Rust scheduler execution complete event
   // This is emitted after Rust directly executes via Sidecar (not via frontend)
   const handleExecutionComplete = useCallback(async (payload: { taskId: string; success: boolean; executionCount: number }) => {
+    // Log immediately - before any checks, to verify event is received
+    console.log('[useCronTask] *** cron:execution-complete EVENT RECEIVED ***');
+    console.log('[useCronTask] Event payload:', JSON.stringify(payload));
+
     const currentTask = stateRef.current.task;
+    const currentState = stateRef.current;
 
     // Debug: log event receipt and state for troubleshooting
-    console.log('[useCronTask] Received cron:execution-complete event:', {
+    console.log('[useCronTask] Current state check:', {
       payload,
       hasCurrentTask: !!currentTask,
       currentTaskId: currentTask?.id,
+      isEnabled: currentState.isEnabled,
+      hasConfig: !!currentState.config,
       listenersReady: listenersReadyRef.current,
     });
 
     if (!currentTask || currentTask.id !== payload.taskId) {
-      console.warn('[useCronTask] Ignoring execution-complete: task mismatch or no current task');
+      // More detailed warning to help diagnose the issue
+      console.warn('[useCronTask] Task mismatch details:', {
+        expectedTaskId: payload.taskId,
+        currentTaskId: currentTask?.id,
+        currentTaskStatus: currentTask?.status,
+        stateRefTask: stateRef.current.task ? 'exists' : 'null',
+      });
+
+      // Fallback: If no current task but event has valid taskId, try to refresh anyway
+      // This handles edge cases where stateRef might be out of sync
+      if (payload.taskId && currentState.isEnabled) {
+        console.log('[useCronTask] Attempting fallback refresh for taskId:', payload.taskId);
+        try {
+          const task = await getCronTask(payload.taskId);
+          console.log('[useCronTask] Fallback refresh succeeded:', {
+            taskId: task.id,
+            executionCount: task.executionCount,
+          });
+          setState(prev => ({ ...prev, task }));
+          // Also update stateRef immediately
+          stateRef.current = { ...stateRef.current, task };
+          return;
+        } catch (error) {
+          console.error('[useCronTask] Fallback refresh failed:', error);
+        }
+      }
       return;
     }
 
@@ -393,8 +437,15 @@ export function useCronTask(options: UseCronTaskOptions) {
         taskId: task.id,
         executionCount: task.executionCount,
         status: task.status,
+        previousCount: stateRef.current.task?.executionCount,
       });
-      setState(prev => ({ ...prev, task }));
+
+      // Update state and immediately sync stateRef
+      const newState = { ...stateRef.current, task };
+      setState(newState);
+      stateRef.current = newState;
+
+      console.log('[useCronTask] State updated with new executionCount:', task.executionCount);
 
       // Check if task stopped (end conditions met or AI exit)
       if (task.status === 'stopped') {
@@ -513,7 +564,13 @@ export function useCronTask(options: UseCronTaskOptions) {
       unlistenComplete = await listen<{ taskId: string; success: boolean; executionCount: number }>(
         'cron:execution-complete',
         (event) => {
-          handleExecutionCompleteRef.current?.(event.payload);
+          // Log at listener level to confirm event is being received
+          console.log('[useCronTask] Tauri listener received cron:execution-complete, hasHandler:', !!handleExecutionCompleteRef.current);
+          if (handleExecutionCompleteRef.current) {
+            handleExecutionCompleteRef.current(event.payload);
+          } else {
+            console.error('[useCronTask] Handler ref is null! Event payload:', event.payload);
+          }
         }
       );
 
