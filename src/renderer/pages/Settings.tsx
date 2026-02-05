@@ -450,6 +450,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
     // Anthropic subscription status
     const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
+    const [subscriptionVerifying, setSubscriptionVerifying] = useState(false);
 
     // Ref for verify timeout cleanup
     const verifyTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
@@ -726,6 +727,51 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             clearTimeout(timer);
         };
     }, []); // Only run on mount - refs handle the latest values
+
+    // Force re-verify subscription (called from UI button)
+    const handleReVerifySubscription = useCallback(async () => {
+        if (!subscriptionStatus?.available || !subscriptionStatus?.info?.email) {
+            return;
+        }
+
+        const currentEmail = subscriptionStatus.info.email;
+        setSubscriptionVerifying(true);
+        setSubscriptionStatus(prev => prev ? { ...prev, verifyStatus: 'loading', verifyError: undefined } : prev);
+
+        try {
+            console.log('[Settings] Force re-verifying subscription...');
+            const result = await apiPostJson<{ success: boolean; error?: string }>('/api/subscription/verify', {});
+            const newStatus = result.success ? 'valid' : 'invalid';
+
+            // Save to cache with account email
+            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, newStatus, currentEmail);
+
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: newStatus,
+                verifyError: result.error
+            } : prev);
+
+            if (result.success) {
+                toast.success('验证成功');
+            } else {
+                toast.error(result.error || '验证失败');
+            }
+        } catch (err) {
+            console.error('[Settings] Subscription re-verify failed:', err);
+            // Save failure to cache
+            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'invalid', currentEmail);
+
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: 'invalid',
+                verifyError: err instanceof Error ? err.message : '验证失败'
+            } : prev);
+            toast.error('验证失败');
+        } finally {
+            setSubscriptionVerifying(false);
+        }
+    }, [subscriptionStatus, saveProviderVerifyStatus, toast]);
 
     // Verify API key for a provider
     const verifyProvider = useCallback(async (provider: Provider, apiKey: string) => {
@@ -1742,6 +1788,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                                 <div className="flex items-center gap-1.5 text-[var(--error)]">
                                                                     <AlertCircle className="h-3.5 w-3.5" />
                                                                     <span className="font-medium">验证失败</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={handleReVerifySubscription}
+                                                                        disabled={subscriptionVerifying}
+                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                        title="重新验证"
+                                                                    >
+                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                    </button>
                                                                 </div>
                                                             )}
                                                             {subscriptionStatus.verifyStatus === 'idle' && (
