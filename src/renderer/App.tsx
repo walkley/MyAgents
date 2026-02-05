@@ -29,7 +29,17 @@ export default function App() {
   const { updateReady, updateVersion, restartAndUpdate } = useUpdater();
 
   // App config for tray behavior
-  const { config } = useConfig();
+  const { config, reload: reloadConfig } = useConfig();
+
+  // Listen for config changes from other components (e.g., Settings page)
+  useEffect(() => {
+    const handleConfigChange = () => {
+      console.log('[App] Config changed, reloading...');
+      void reloadConfig();
+    };
+    window.addEventListener(CUSTOM_EVENTS.CONFIG_CHANGED, handleConfigChange);
+    return () => window.removeEventListener(CUSTOM_EVENTS.CONFIG_CHANGED, handleConfigChange);
+  }, [reloadConfig]);
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
