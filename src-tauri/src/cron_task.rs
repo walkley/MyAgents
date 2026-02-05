@@ -678,9 +678,9 @@ impl CronTaskManager {
 
     /// Create a new cron task (does not start it)
     pub async fn create_task(&self, config: CronTaskConfig) -> Result<CronTask, String> {
-        // Validate minimum interval (15 minutes)
-        if config.interval_minutes < 15 {
-            return Err("Interval must be at least 15 minutes".to_string());
+        // Validate minimum interval (5 minutes, matches frontend MIN_CRON_INTERVAL)
+        if config.interval_minutes < 5 {
+            return Err("Interval must be at least 5 minutes".to_string());
         }
 
         let task = CronTask {

@@ -13,6 +13,7 @@ import { getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { getAllCronTasks } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
+import { isTauriEnvironment } from '@/utils/browserMock';
 
 /**
  * Extract folder name from path (cross-platform, handles both / and \)
@@ -106,6 +107,27 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
             }
         };
     }, [fetchSessions]);
+
+    // Listen for cron task stopped events to refresh the badge display
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+
+        let unlisten: (() => void) | null = null;
+
+        (async () => {
+            const { listen } = await import('@tauri-apps/api/event');
+            unlisten = await listen<{ taskId: string; exitReason?: string }>('cron:task-stopped', () => {
+                // Refresh cron tasks to update the "心跳" badge
+                getAllCronTasks()
+                    .then(tasks => setCronTasks(tasks))
+                    .catch(() => { /* ignore errors */ });
+            });
+        })();
+
+        return () => {
+            if (unlisten) unlisten();
+        };
+    }, []);
 
     const handleManualRetry = useCallback(() => {
         setRetryCount(0);

@@ -107,14 +107,28 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Disable cron mode (cancel before starting)
   const disableCronMode = useCallback(() => {
     setState(initialState);
+    stateRef.current = initialState;
   }, []);
 
-  // Update config while in cron mode
+  // Update config while in cron mode (before task starts)
   const updateConfig = useCallback((config: Partial<CronTaskState['config']>) => {
     setState(prev => ({
       ...prev,
       config: prev.config ? { ...prev.config, ...config } : null,
     }));
+  }, []);
+
+  // Update config for a running task (preserves task state)
+  // Note: Some config changes (like intervalMinutes) won't affect the currently running scheduler
+  // They will take effect on the next task start. Only notifyEnabled takes effect immediately.
+  const updateRunningConfig = useCallback((config: Partial<CronTaskState['config']>) => {
+    setState(prev => {
+      if (!prev.task) return prev; // No running task, do nothing
+      return {
+        ...prev,
+        config: prev.config ? { ...prev.config, ...config } : null,
+      };
+    });
   }, []);
 
   // Create and start the cron task
@@ -224,6 +238,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       // Rust scheduler will detect status change and stop
       // Reset to initial state
       setState(initialState);
+      // Immediately update stateRef to avoid race condition with event handlers
+      stateRef.current = initialState;
       console.log('[useCronTask] Task stopped:', stoppedTask.id);
       return originalPrompt;
     } catch (error) {
@@ -248,6 +264,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         }
         // Reset state
         setState(initialState);
+        stateRef.current = initialState;
       }
     } catch (error) {
       console.error('[useCronTask] Failed to refresh task:', error);
@@ -276,6 +293,7 @@ export function useCronTask(options: UseCronTaskOptions) {
 
       // Reset state
       setState(initialState);
+      stateRef.current = initialState;
     } catch (error) {
       console.error('[useCronTask] Failed to stop task:', error);
     }
@@ -337,6 +355,7 @@ export function useCronTask(options: UseCronTaskOptions) {
           optionsRef.current.onComplete(updatedTask, updatedTask.exitReason ?? undefined);
         }
         setState(initialState);
+        stateRef.current = initialState;
       }
     } finally {
       await markTaskComplete(payload.taskId);
@@ -386,6 +405,7 @@ export function useCronTask(options: UseCronTaskOptions) {
           optionsRef.current.onComplete(task, task.exitReason ?? undefined);
         }
         setState(initialState);
+        stateRef.current = initialState;
       }
     } catch (error) {
       console.error('[useCronTask] Failed to refresh task after execution:', error);
@@ -577,6 +597,7 @@ export function useCronTask(options: UseCronTaskOptions) {
     enableCronMode,
     disableCronMode,
     updateConfig,
+    updateRunningConfig,
     startTask,
     stop,
     refresh,

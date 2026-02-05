@@ -123,6 +123,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     enableCronMode,
     disableCronMode,
     updateConfig: _updateCronConfig,
+    updateRunningConfig,
     startTask: startCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
@@ -826,12 +827,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             baseUrl: currentProvider.config.baseUrl,
             apiKey: apiKeys[currentProvider.id],
           } : undefined;
-          enableCronMode({
-            ...config,
-            model: selectedModel,
-            permissionMode: permissionMode,
-            providerEnv: providerEnv,
-          });
+
+          // If task is already running, only update config (preserves task state)
+          // Otherwise, enable cron mode which will prepare for a new task
+          if (cronState.task) {
+            // Task is running - update config without resetting task state
+            updateRunningConfig({
+              ...config,
+              model: selectedModel,
+              permissionMode: permissionMode,
+              providerEnv: providerEnv,
+            });
+          } else {
+            // No task running - enable cron mode normally
+            enableCronMode({
+              ...config,
+              model: selectedModel,
+              permissionMode: permissionMode,
+              providerEnv: providerEnv,
+            });
+          }
           // Track cron_enable event
           track('cron_enable', {
             interval_minutes: config.intervalMinutes,
