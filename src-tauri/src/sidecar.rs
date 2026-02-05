@@ -1466,10 +1466,17 @@ pub fn ensure_session_sidecar<R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
 ) -> Result<EnsureSidecarResult, String> {
+    log::info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
+
     // Ensure file descriptor limit is high enough for Bun
     ensure_high_file_descriptor_limit();
 
-    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+    log::debug!("[sidecar] Acquiring manager lock...");
+    let mut manager_guard = manager.lock().map_err(|e| {
+        log::error!("[sidecar] Failed to acquire manager lock: {}", e);
+        e.to_string()
+    })?;
+    log::debug!("[sidecar] Manager lock acquired");
 
     // Check if Session already has a healthy Sidecar
     // We use a two-phase approach to avoid holding the lock during HTTP check:
