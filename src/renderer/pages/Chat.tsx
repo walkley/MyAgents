@@ -263,6 +263,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   // Track which session's cron task state has been loaded
   const cronLoadedSessionRef = useRef<string | null>(null);
 
+  // Track if we need to set loading state after TabProvider's loadSession completes
+  // This is used when restoring a cron task that is currently executing
+  const pendingCronLoadingRef = useRef(false);
+
+  // Track previous messages length to detect when loadSession completes
+  const prevMessagesLengthRef = useRef(messages.length);
+
   // Restore or clear cron task state when session changes
   // 方案 A: Rust 统一恢复 - Scheduler 由 Rust 层 initialize_cron_manager 自动恢复
   // 前端只负责同步 UI 状态
@@ -293,15 +300,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           restoreCronTask(task);
 
           // Check if task is currently executing (e.g., execution started before app restart)
-          // If executing, set loading state immediately - loadSession will skip resetting it
+          // If executing, mark it so we can set loading state after TabProvider's loadSession completes
+          // NOTE: Do NOT call loadSession here - TabProvider already handles session loading
+          // Calling it here causes infinite loop with TabProvider's session loading effect
           const executing = await isTaskExecuting(task.id);
           if (executing) {
-            console.log('[Chat] Cron task is currently executing, setting loading state');
-            setIsLoading(true);
-            // Load session with skipLoadingReset to preserve loading state
-            if (sessionId) {
-              await loadSession(sessionId, { skipLoadingReset: true });
-            }
+            console.log('[Chat] Cron task is currently executing, marking for loading state');
+            pendingCronLoadingRef.current = true;
           }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
@@ -332,7 +337,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     };
 
     void loadCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading, loadSession]);
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
+
+  // Set loading state after TabProvider's loadSession completes (for cron task executing scenario)
+  // This effect watches for messages changes, which indicates loadSession has completed
+  useEffect(() => {
+    // Only proceed if we have pending cron loading and messages have changed
+    if (pendingCronLoadingRef.current && messages.length !== prevMessagesLengthRef.current) {
+      console.log('[Chat] loadSession completed, setting loading state for cron execution');
+      setIsLoading(true);
+      pendingCronLoadingRef.current = false;
+    }
+    prevMessagesLengthRef.current = messages.length;
+  }, [messages.length, setIsLoading]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {
