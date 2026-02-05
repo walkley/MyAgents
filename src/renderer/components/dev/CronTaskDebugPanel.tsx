@@ -1,7 +1,7 @@
 // Developer Debug Panel for Cron Tasks
 // Shows all active cron tasks with controls to open/stop them
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartPulse, StopCircle, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
 import { getAllCronTasks, stopCronTask } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
@@ -20,19 +20,29 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
   const [pendingStopId, setPendingStopId] = useState<string | null>(null);
 
+  // Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   // Load tasks
   const loadTasks = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
       const allTasks = await getAllCronTasks();
+      // Guard against setState after unmount
+      if (!isMountedRef.current) return;
       // Filter to show only active tasks (running)
       const activeTasks = allTasks.filter(t => t.status === 'running');
       setTasks(activeTasks);
     } catch (err) {
+      if (!isMountedRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to load tasks');
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) setIsLoading(false);
     }
   }, []);
 
@@ -70,12 +80,15 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
 
     try {
       await stopCronTask(taskId);
+      // Guard against setState after unmount
+      if (!isMountedRef.current) return;
       // Reload tasks
       await loadTasks();
     } catch (err) {
+      if (!isMountedRef.current) return;
       setError(`停止任务失败: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
-      setStoppingTaskId(null);
+      if (isMountedRef.current) setStoppingTaskId(null);
     }
   }, [pendingStopId, loadTasks]);
 
