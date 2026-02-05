@@ -222,22 +222,22 @@ export function useAutoScroll(
     // Update tracked first message ID
     firstMessageIdRef.current = currentFirstId;
 
-    // Skip if auto-scroll is disabled
-    if (!isAutoScrollEnabledRef.current) return;
-
     // Detect session switch: first message ID changed (or messages went from empty to non-empty)
     // This means the entire message list was replaced, not just appended
     const isSessionSwitch = previousFirstId !== null && currentFirstId !== previousFirstId;
     const isInitialLoad = previousFirstId === null && currentFirstId !== null;
 
     if (isSessionSwitch || isInitialLoad) {
-      // Session switch or initial load - use instant scroll to avoid slow animation
-      // Use requestAnimationFrame to ensure DOM has updated with new messages
+      // Session switch or initial load - ALWAYS scroll to bottom regardless of auto-scroll state
+      // This ensures user sees the latest messages when switching sessions
+      // Use double requestAnimationFrame to ensure DOM has fully updated
       requestAnimationFrame(() => {
-        scrollToBottomInstant();
+        requestAnimationFrame(() => {
+          scrollToBottomInstant();
+        });
       });
-    } else if (messages.length > 0) {
-      // Normal message append - use smooth scroll
+    } else if (messages.length > 0 && isAutoScrollEnabledRef.current) {
+      // Normal message append - use smooth scroll (only if auto-scroll is enabled)
       startSmoothScroll();
     }
   }, [messages, startSmoothScroll, scrollToBottomInstant]);
