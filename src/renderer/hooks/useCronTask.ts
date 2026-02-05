@@ -413,11 +413,18 @@ export function useCronTask(options: UseCronTaskOptions) {
       payloadTaskId: payload.taskId,
     });
 
-    if (!currentTask || currentTask.id !== payload.taskId) {
-      // Fallback: If no current task but event has valid taskId, try to refresh anyway
-      // This handles edge cases where stateRef might be out of sync
+    // If task ID doesn't match, this event is for a different Tab - ignore it
+    // cron:execution-complete is a global event, all Tabs receive it
+    if (currentTask && currentTask.id !== payload.taskId) {
+      console.log('[useCronTask] handleExecutionComplete: event for different task, ignoring. current:', currentTask.id, 'event:', payload.taskId);
+      return;
+    }
+
+    // If no current task but isEnabled, this might be a state sync issue
+    // Only attempt fallback if we don't have a task yet (not when IDs mismatch)
+    if (!currentTask) {
       if (payload.taskId && currentState.isEnabled) {
-        console.log('[useCronTask] Task mismatch, attempting fallback refresh:', payload.taskId);
+        console.log('[useCronTask] No current task but isEnabled, attempting fallback refresh:', payload.taskId);
         try {
           const task = await getCronTask(payload.taskId);
           console.log('[useCronTask] Fallback: fetched task count:', task.executionCount);
@@ -441,7 +448,7 @@ export function useCronTask(options: UseCronTaskOptions) {
           console.error('[useCronTask] Fallback refresh failed:', error);
         }
       }
-      console.log('[useCronTask] handleExecutionComplete: no matching task, returning early');
+      console.log('[useCronTask] handleExecutionComplete: no current task, returning early');
       return;
     }
 
