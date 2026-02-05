@@ -399,19 +399,19 @@ export function useCronTask(options: UseCronTaskOptions) {
   // This is emitted after Rust directly executes via Sidecar (not via frontend)
   const handleExecutionComplete = useCallback(async (payload: { taskId: string; success: boolean; executionCount: number }) => {
     // Always log this key event for troubleshooting
-    console.log('[useCronTask] cron:execution-complete received:', payload.taskId);
+    console.log('[useCronTask] cron:execution-complete received:', payload.taskId, 'eventCount:', payload.executionCount);
 
     const currentTask = stateRef.current.task;
     const currentState = stateRef.current;
 
-    // Debug logs only in debug mode
-    if (isDebugMode()) {
-      console.log('[useCronTask] Current state:', {
-        hasCurrentTask: !!currentTask,
-        currentTaskId: currentTask?.id,
-        isEnabled: currentState.isEnabled,
-      });
-    }
+    // Always log state for troubleshooting execution count issues
+    console.log('[useCronTask] handleExecutionComplete state:', {
+      hasCurrentTask: !!currentTask,
+      currentTaskId: currentTask?.id,
+      currentCount: currentTask?.executionCount,
+      isEnabled: currentState.isEnabled,
+      payloadTaskId: payload.taskId,
+    });
 
     if (!currentTask || currentTask.id !== payload.taskId) {
       // Fallback: If no current task but event has valid taskId, try to refresh anyway
@@ -420,6 +420,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         console.log('[useCronTask] Task mismatch, attempting fallback refresh:', payload.taskId);
         try {
           const task = await getCronTask(payload.taskId);
+          console.log('[useCronTask] Fallback: fetched task count:', task.executionCount);
           // Check if component is still mounted before updating state
           if (!mountedRef.current) return;
 
@@ -427,6 +428,7 @@ export function useCronTask(options: UseCronTaskOptions) {
           setState(prev => {
             const newState = { ...prev, task };
             stateRef.current = newState;
+            console.log('[useCronTask] Fallback: state updated with count:', task.executionCount);
             return newState;
           });
 
@@ -439,23 +441,22 @@ export function useCronTask(options: UseCronTaskOptions) {
           console.error('[useCronTask] Fallback refresh failed:', error);
         }
       }
+      console.log('[useCronTask] handleExecutionComplete: no matching task, returning early');
       return;
     }
 
     // Refresh task state from server to get updated lastExecutedAt and executionCount
     try {
       const task = await getCronTask(payload.taskId);
+      console.log('[useCronTask] Task refreshed from server:', task.id, 'count:', task.executionCount);
       // Check if component is still mounted before updating state
       if (!mountedRef.current) return;
-
-      if (isDebugMode()) {
-        console.log('[useCronTask] Task refreshed:', task.id, 'count:', task.executionCount);
-      }
 
       // Update state and sync stateRef atomically within setState callback
       setState(prev => {
         const newState = { ...prev, task };
         stateRef.current = newState;
+        console.log('[useCronTask] State updated with refreshed task, count:', task.executionCount);
         return newState;
       });
 

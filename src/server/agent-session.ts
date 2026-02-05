@@ -2264,22 +2264,34 @@ export function isSessionActive(): boolean {
  * @param timeoutMs Maximum time to wait in milliseconds (default: 10 minutes)
  * @param pollIntervalMs How often to check status (default: 500ms)
  */
+// Helper function to check if session is idle (avoids TypeScript type narrowing issues)
+function isSessionIdle(): boolean {
+  return sessionState === 'idle';
+}
+
 export async function waitForSessionIdle(
   timeoutMs: number = 600000,
   pollIntervalMs: number = 500
 ): Promise<boolean> {
   const startTime = Date.now();
+  console.log(`[agent] waitForSessionIdle: starting, sessionState=${sessionState}`);
 
   // Brief wait to allow async operations to start (prevents false early return)
-  if (sessionState === 'idle' && !isProcessing && !querySession) {
+  // Note: Only check sessionState === 'idle' because isProcessing and querySession
+  // remain set until the entire session ends (for await loop in startStreamingSession).
+  // The sessionState is set to 'idle' by handleMessageComplete() after each message,
+  // which correctly indicates "no message is being processed" for cron sync execution.
+  if (isSessionIdle()) {
     await new Promise(resolve => setTimeout(resolve, 100));
-    if (sessionState === 'idle' && !isProcessing && !querySession) {
+    if (isSessionIdle()) {
+      console.log('[agent] waitForSessionIdle: already idle, returning true');
       return true;
     }
   }
 
   while (Date.now() - startTime < timeoutMs) {
-    if (sessionState === 'idle' && !isProcessing && !querySession) {
+    if (isSessionIdle()) {
+      console.log(`[agent] waitForSessionIdle: became idle after ${Date.now() - startTime}ms`);
       return true;
     }
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs));

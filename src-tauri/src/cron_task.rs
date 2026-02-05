@@ -605,6 +605,7 @@ impl CronTaskManager {
 
                         // Emit event for frontend UI update
                         // Use updated_execution_count from tasks RwLock (not the stale task snapshot)
+                        log::info!("[CronTask] Emitting cron:execution-complete for task {} with executionCount={}", task_id_owned, updated_execution_count);
                         let _ = handle.emit("cron:execution-complete", serde_json::json!({
                             "taskId": task_id_owned,
                             "success": success,
@@ -1372,13 +1373,31 @@ pub async fn cmd_start_cron_scheduler(
     log::debug!("[CronTask] Got task: {}, session_id: {}", task_id, task.session_id);
 
     // Ensure Session has a Sidecar with CronTask as owner
+    // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
+    // which cannot be called from within a tokio async runtime (causes deadlock)
     if let Some(sidecar_state) = app_handle.try_state::<ManagedSidecarManager>() {
         log::debug!("[CronTask] Got sidecar state, ensuring session sidecar...");
-        let workspace_path = std::path::Path::new(&task.workspace_path);
-        let owner = SidecarOwner::CronTask(task_id.clone());
 
-        log::info!("[CronTask] Calling ensure_session_sidecar for session: {}", task.session_id);
-        match ensure_session_sidecar(&app_handle, &sidecar_state, &task.session_id, workspace_path, owner) {
+        // Clone data for spawn_blocking (requires 'static lifetime)
+        let app_handle_clone = app_handle.clone();
+        let sidecar_state_clone = sidecar_state.inner().clone();
+        let session_id = task.session_id.clone();
+        let workspace_path = task.workspace_path.clone();
+        let owner = SidecarOwner::CronTask(task_id.clone());
+        let task_id_for_log = task_id.clone();
+        let tab_id = task.tab_id.clone();
+
+        log::info!("[CronTask] Calling ensure_session_sidecar for session: {}", session_id);
+
+        // Run blocking sidecar operations in a dedicated thread pool
+        let result = tokio::task::spawn_blocking(move || {
+            let workspace = std::path::Path::new(&workspace_path);
+            ensure_session_sidecar(&app_handle_clone, &sidecar_state_clone, &session_id, workspace, owner)
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {}", e))?;
+
+        match result {
             Ok(result) => {
                 log::info!(
                     "[CronTask] Ensured Sidecar for session {} (port={}, is_new={})",
@@ -1389,8 +1408,8 @@ pub async fn cmd_start_cron_scheduler(
                 if let Ok(mut sidecar_manager) = sidecar_state.lock() {
                     sidecar_manager.activate_session(
                         task.session_id.clone(),
-                        task.tab_id.clone(),
-                        Some(task_id.clone()),
+                        tab_id,
+                        Some(task_id_for_log),
                         result.port,
                         task.workspace_path.clone(),
                         true, // is_cron_task = true
@@ -1534,19 +1553,27 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
     );
 
     // Step 1: Ensure Session has a Sidecar with CronTask as owner
+    // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
+    // which cannot be called from within a tokio async runtime (causes deadlock)
     let sidecar_state = handle.try_state::<ManagedSidecarManager>()
         .ok_or_else(|| "SidecarManager state not available".to_string())?;
 
-    let workspace_path = std::path::Path::new(&task.workspace_path);
-    let owner = SidecarOwner::CronTask(task.id.clone());
+    // Clone data for spawn_blocking (requires 'static lifetime)
+    let handle_clone = handle.clone();
+    let sidecar_state_clone = sidecar_state.inner().clone();
+    let session_id = task.session_id.clone();
+    let workspace_path = task.workspace_path.clone();
+    let task_id = task.id.clone();
+    let tab_id = task.tab_id.clone();
+    let owner = SidecarOwner::CronTask(task_id.clone());
 
-    let result = ensure_session_sidecar(
-        handle,
-        &sidecar_state,
-        &task.session_id,
-        workspace_path,
-        owner,
-    )?;
+    // Run blocking sidecar operations in a dedicated thread pool
+    let result = tokio::task::spawn_blocking(move || {
+        let workspace = std::path::Path::new(&workspace_path);
+        ensure_session_sidecar(&handle_clone, &sidecar_state_clone, &session_id, workspace, owner)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))??;
 
     log::info!(
         "[CronTask] Session {} Sidecar ensured: port={}, is_new={}",
@@ -1560,8 +1587,8 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
 
         manager.activate_session(
             task.session_id.clone(),
-            task.tab_id.clone(),
-            Some(task.id.clone()),
+            tab_id,
+            Some(task_id),
             result.port,
             task.workspace_path.clone(),
             true, // is_cron_task = true

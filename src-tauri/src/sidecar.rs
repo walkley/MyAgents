@@ -1459,6 +1459,20 @@ pub struct EnsureSidecarResult {
 /// If no Sidecar exists, creates a new one with the owner.
 ///
 /// Returns (port, is_new) where is_new is true if a new Sidecar was started.
+///
+/// # WARNING: Blocking Function
+/// This function uses `reqwest::blocking::Client` internally (via `check_sidecar_http_health`)
+/// which uses `block_on()`. Calling this function from within an async context (tokio runtime)
+/// will cause a deadlock or panic.
+///
+/// When calling from async code, wrap in `tokio::task::spawn_blocking`:
+/// ```ignore
+/// let result = tokio::task::spawn_blocking(move || {
+///     ensure_session_sidecar(&app_handle, &manager, &session_id, workspace_path, owner)
+/// })
+/// .await
+/// .map_err(|e| format!("spawn_blocking failed: {}", e))?;
+/// ```
 pub fn ensure_session_sidecar<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
@@ -2173,18 +2187,30 @@ pub async fn execute_cron_task<R: Runtime>(
     }));
 
     // Ensure Sidecar is running for this session with CronTask as owner
-    let workspace = PathBuf::from(workspace_path);
-    let owner = SidecarOwner::CronTask(payload.task_id.clone());
-    let result = ensure_session_sidecar(app_handle, manager, &session_id, &workspace, owner)
-        .map_err(|e| {
-            log::error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
-            let _ = app_handle.emit("cron:debug", serde_json::json!({
-                "taskId": payload.task_id,
-                "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
-                "error": true
-            }));
-            e
-        })?;
+    // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
+    // which cannot be called from within a tokio async runtime (causes deadlock)
+    let app_handle_clone = app_handle.clone();
+    let manager_clone = manager.clone();
+    let session_id_clone = session_id.clone();
+    let workspace_clone = workspace_path.to_string();
+    let task_id_clone = payload.task_id.clone();
+    let owner = SidecarOwner::CronTask(task_id_clone.clone());
+
+    let result = tokio::task::spawn_blocking(move || {
+        let workspace = PathBuf::from(&workspace_clone);
+        ensure_session_sidecar(&app_handle_clone, &manager_clone, &session_id_clone, &workspace, owner)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+    .map_err(|e| {
+        log::error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
+        let _ = app_handle.emit("cron:debug", serde_json::json!({
+            "taskId": payload.task_id,
+            "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
+            "error": true
+        }));
+        e
+    })?;
 
     let port = result.port;
 
