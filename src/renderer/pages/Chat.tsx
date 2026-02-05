@@ -16,7 +16,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
-import { getSessionCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
+import { getSessionCronTask, updateCronTaskTab, isTaskExecuting } from '@/api/cronTaskClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -145,6 +145,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     },
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
+    },
+    onExecutionComplete: async (task) => {
+      // Called when a single execution completes (task may still be running)
+      // Refresh the session to show the latest messages
+      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount);
+      setIsLoading(false);
+      if (sessionId) {
+        await loadSession(sessionId);
+      }
     },
     // Register for SSE cron:task-exit-requested events via TabContext
     onCronTaskExitRequestedRef: onCronTaskExitRequested,
@@ -282,6 +291,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           // Restore UI state only - Scheduler is managed by Rust layer (方案 A)
           // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
           restoreCronTask(task);
+
+          // Check if task is currently executing (e.g., execution started before app restart)
+          // This check runs after restoreFromTask to ensure cron state is ready
+          const executing = await isTaskExecuting(task.id);
+          if (executing) {
+            console.log('[Chat] Cron task is currently executing, will set loading state');
+            // Use setTimeout to ensure this runs AFTER session loading completes
+            // (loadSession resets isLoading to false, we need to override that)
+            setTimeout(() => {
+              console.log('[Chat] Setting loading state for cron execution');
+              setIsLoading(true);
+            }, 100);
+          }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
           // This happens when user switches from a cron-task session to a regular session
@@ -311,7 +333,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     };
 
     void loadCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task]);
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {

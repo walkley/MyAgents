@@ -54,8 +54,10 @@ export interface UseCronTaskOptions {
   tabId: string;
   /** Callback to execute cron task (send message via sidecar /cron/execute endpoint) */
   onExecute?: (taskId: string, prompt: string, isFirstExecution: boolean, aiCanExit: boolean) => Promise<void>;
-  /** Callback when task completes */
+  /** Callback when task completes (stops) */
   onComplete?: (task: CronTask, reason?: string) => void;
+  /** Callback when a single execution completes (task may continue running) */
+  onExecutionComplete?: (task: CronTask) => void;
   /** Ref to register the cron task exit handler (provided by TabContext) */
   onCronTaskExitRequestedRef?: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
@@ -446,6 +448,11 @@ export function useCronTask(options: UseCronTaskOptions) {
       stateRef.current = newState;
 
       console.log('[useCronTask] State updated with new executionCount:', task.executionCount);
+
+      // Notify caller that execution completed (for UI refresh, loading state reset, etc.)
+      if (optionsRef.current.onExecutionComplete) {
+        optionsRef.current.onExecutionComplete(task);
+      }
 
       // Check if task stopped (end conditions met or AI exit)
       if (task.status === 'stopped') {
