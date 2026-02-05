@@ -1,10 +1,30 @@
 import { Loader2 } from 'lucide-react';
-import { useMemo, type CSSProperties, type RefObject } from 'react';
+import { useMemo, useState, useEffect, useRef, type CSSProperties, type RefObject } from 'react';
 
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
 import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components/AskUserQuestionPrompt';
 import type { Message as MessageType } from '@/types/chat';
+
+/**
+ * Format elapsed seconds to human-readable string
+ * - < 60s: "30秒"
+ * - < 1h: "1分钟3秒"
+ * - >= 1h: "1小时50分钟10秒"
+ */
+function formatElapsedTime(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}小时${minutes}分钟${seconds}秒`;
+  } else if (minutes > 0) {
+    return `${minutes}分钟${seconds}秒`;
+  } else {
+    return `${seconds}秒`;
+  }
+}
 
 interface MessageListProps {
   messages: MessageType[];
@@ -90,6 +110,34 @@ export default function MessageList({
     ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
     : streamingMessage;
 
+  // Elapsed time counter for loading state
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const loadingStartTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (showStatus) {
+      // Start timing when loading begins
+      if (loadingStartTimeRef.current === null) {
+        loadingStartTimeRef.current = Date.now();
+        setElapsedSeconds(0);
+      }
+
+      // Update every second
+      const intervalId = setInterval(() => {
+        if (loadingStartTimeRef.current !== null) {
+          const elapsed = Math.floor((Date.now() - loadingStartTimeRef.current) / 1000);
+          setElapsedSeconds(elapsed);
+        }
+      }, 1000);
+
+      return () => clearInterval(intervalId);
+    } else {
+      // Reset when loading ends
+      loadingStartTimeRef.current = null;
+      setElapsedSeconds(0);
+    }
+  }, [showStatus]);
+
   return (
     <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle}>
       <div className="mx-auto max-w-3xl space-y-2">
@@ -123,7 +171,14 @@ export default function MessageList({
         {showStatus && (
           <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
             <Loader2 className="h-3 w-3 animate-spin" />
-            <span>{statusMessage}</span>
+            <span>
+              {statusMessage}
+              {elapsedSeconds > 0 && (
+                <span className="ml-1 text-[var(--ink-faint)]">
+                  ({formatElapsedTime(elapsedSeconds)})
+                </span>
+              )}
+            </span>
           </div>
         )}
       </div>
