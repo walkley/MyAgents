@@ -1212,6 +1212,11 @@ export default function TabProvider({
     // - skipLoadingReset: If true, don't reset isLoading to false. Useful when caller
     //   knows an operation is in progress (e.g., cron task execution) and will manage
     //   the loading state separately.
+    //
+    // Note: This option is currently available for future use cases but not actively used.
+    // Chat.tsx manages loading state through pendingCronLoadingRef pattern instead of
+    // calling loadSession directly, to avoid duplicate loadSession calls with TabProvider's
+    // session loading effect.
     const loadSession = useCallback(async (
         targetSessionId: string,
         options?: { skipLoadingReset?: boolean }

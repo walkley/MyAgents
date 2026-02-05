@@ -267,8 +267,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   // This is used when restoring a cron task that is currently executing
   const pendingCronLoadingRef = useRef(false);
 
-  // Track previous messages length to detect when loadSession completes
-  const prevMessagesLengthRef = useRef(messages.length);
+  // Track previous messages reference to detect when loadSession completes
+  // Using reference comparison instead of length to handle edge case where
+  // message count stays the same after loadSession
+  const prevMessagesRef = useRef(messages);
 
   // Restore or clear cron task state when session changes
   // 方案 A: Rust 统一恢复 - Scheduler 由 Rust 层 initialize_cron_manager 自动恢复
@@ -340,16 +342,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
 
   // Set loading state after TabProvider's loadSession completes (for cron task executing scenario)
-  // This effect watches for messages changes, which indicates loadSession has completed
+  // This effect watches for messages reference changes, which indicates loadSession has completed
+  // Using reference comparison (not length) to handle edge case where message count stays the same
   useEffect(() => {
-    // Only proceed if we have pending cron loading and messages have changed
-    if (pendingCronLoadingRef.current && messages.length !== prevMessagesLengthRef.current) {
+    // Only proceed if we have pending cron loading and messages array has changed
+    if (pendingCronLoadingRef.current && messages !== prevMessagesRef.current) {
       console.log('[Chat] loadSession completed, setting loading state for cron execution');
       setIsLoading(true);
       pendingCronLoadingRef.current = false;
     }
-    prevMessagesLengthRef.current = messages.length;
-  }, [messages.length, setIsLoading]);
+    prevMessagesRef.current = messages;
+  }, [messages, setIsLoading]);
 
   // Load MCP config on mount and sync to backend
   useEffect(() => {

@@ -303,7 +303,12 @@ export function useCronTask(options: UseCronTaskOptions) {
         execution_count: stoppedTask.executionCount ?? currentTask.executionCount ?? 0,
         duration_minutes: getTaskDurationMinutes(currentTask),
       });
-      setState(prev => ({ ...prev, task: stoppedTask }));
+      // Update task state before calling onComplete
+      setState(prev => {
+        const newState = { ...prev, task: stoppedTask };
+        stateRef.current = newState;
+        return newState;
+      });
 
       if (optionsRef.current.onComplete) {
         optionsRef.current.onComplete(stoppedTask, reason);
@@ -359,9 +364,13 @@ export function useCronTask(options: UseCronTaskOptions) {
         );
       }
 
-      // Record execution
+      // Record execution and sync stateRef
       const updatedTask = await recordCronExecution(payload.taskId);
-      setState(prev => ({ ...prev, task: updatedTask }));
+      setState(prev => {
+        const newState = { ...prev, task: updatedTask };
+        stateRef.current = newState;
+        return newState;
+      });
 
       // Check if task stopped (end conditions met)
       if (updatedTask.status === 'stopped') {
@@ -466,8 +475,11 @@ export function useCronTask(options: UseCronTaskOptions) {
         if (optionsRef.current.onComplete) {
           optionsRef.current.onComplete(task, task.exitReason ?? undefined);
         }
-        setState(initialState);
-        stateRef.current = initialState;
+        // Reset state - sync stateRef atomically
+        setState(() => {
+          stateRef.current = initialState;
+          return initialState;
+        });
       }
     } catch (error) {
       console.error('[useCronTask] Failed to refresh task after execution:', error);
@@ -483,7 +495,12 @@ export function useCronTask(options: UseCronTaskOptions) {
     // Task will continue to next interval, just log the error
     // Optionally refresh to get updated lastError
     getCronTask(payload.taskId).then(task => {
-      setState(prev => ({ ...prev, task }));
+      if (!mountedRef.current) return;
+      setState(prev => {
+        const newState = { ...prev, task };
+        stateRef.current = newState;
+        return newState;
+      });
     }).catch(() => {
       // Ignore refresh errors
     });
