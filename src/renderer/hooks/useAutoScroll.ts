@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
 import type { Message } from '@/types/chat';
+import { isDebugMode } from '@/utils/debug';
 
 const BOTTOM_SNAP_THRESHOLD_PX = 32;
 
@@ -32,7 +33,8 @@ export interface AutoScrollControls {
 
 export function useAutoScroll(
   isLoading: boolean,
-  messages: Message[]
+  messages: Message[],
+  sessionId?: string | null
 ): AutoScrollControls {
   const containerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollEnabledRef = useRef(true);
@@ -54,8 +56,9 @@ export function useAutoScroll(
   // Track scroll position to detect user scroll direction
   const lastScrollTopRef = useRef(0);
 
-  // Track first message ID to detect session switch (messages completely replaced)
-  const firstMessageIdRef = useRef<string | null>(null);
+  // Track session ID to detect session switch
+  // Initialize as undefined so first render triggers isInitialLoad
+  const lastSessionIdRef = useRef<string | null | undefined>(undefined);
 
   // Store animation function in ref for recursive RAF calls (avoids lint warning about self-reference)
   const animateSmoothScrollRef = useRef<(() => void) | null>(null);
@@ -172,7 +175,12 @@ export function useAutoScroll(
    */
   const scrollToBottomInstant = useCallback(() => {
     const element = containerRef.current;
-    if (!element) return;
+    if (!element) {
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] scrollToBottomInstant: no container element');
+      }
+      return;
+    }
 
     // Cancel any ongoing smooth scroll animation
     cancelAnimation();
@@ -181,8 +189,21 @@ export function useAutoScroll(
     isAutoScrollEnabledRef.current = true;
     isPausedRef.current = false;
 
+    const beforeScrollTop = element.scrollTop;
+    const scrollHeight = element.scrollHeight;
+    const clientHeight = element.clientHeight;
+
     // Instant scroll without animation
-    element.scrollTop = element.scrollHeight;
+    element.scrollTop = scrollHeight;
+
+    if (isDebugMode()) {
+      console.log('[useAutoScroll] scrollToBottomInstant:', {
+        beforeScrollTop,
+        scrollHeight,
+        clientHeight,
+        afterScrollTop: element.scrollTop,
+      });
+    }
   }, [cancelAnimation]);
 
   /**
@@ -214,33 +235,46 @@ export function useAutoScroll(
     };
   }, [cancelAnimation]);
 
-  // Handle messages change - detect session switch vs. new messages
+  // Handle session switch - use sessionId for reliable detection
   useEffect(() => {
-    const currentFirstId = messages.length > 0 ? messages[0].id : null;
-    const previousFirstId = firstMessageIdRef.current;
+    const previousSessionId = lastSessionIdRef.current;
+    const isSessionSwitch = previousSessionId !== undefined && sessionId !== previousSessionId;
+    const isInitialLoad = previousSessionId === undefined && sessionId !== undefined;
 
-    // Update tracked first message ID
-    firstMessageIdRef.current = currentFirstId;
+    // Update tracked session ID
+    lastSessionIdRef.current = sessionId;
 
-    // Detect session switch: first message ID changed (or messages went from empty to non-empty)
-    // This means the entire message list was replaced, not just appended
-    const isSessionSwitch = previousFirstId !== null && currentFirstId !== previousFirstId;
-    const isInitialLoad = previousFirstId === null && currentFirstId !== null;
+    if (isDebugMode()) {
+      console.log('[useAutoScroll] sessionId changed:', {
+        previousSessionId,
+        currentSessionId: sessionId,
+        isSessionSwitch,
+        isInitialLoad,
+        isAutoScrollEnabled: isAutoScrollEnabledRef.current,
+      });
+    }
 
     if (isSessionSwitch || isInitialLoad) {
       // Session switch or initial load - ALWAYS scroll to bottom regardless of auto-scroll state
       // This ensures user sees the latest messages when switching sessions
       // Use double requestAnimationFrame to ensure DOM has fully updated
+      if (isDebugMode()) {
+        console.log('[useAutoScroll] Session switch detected, scheduling scrollToBottomInstant');
+      }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToBottomInstant();
         });
       });
-    } else if (messages.length > 0 && isAutoScrollEnabledRef.current) {
-      // Normal message append - use smooth scroll (only if auto-scroll is enabled)
+    }
+  }, [sessionId, scrollToBottomInstant]);
+
+  // Handle messages change - only for smooth scroll during normal operation
+  useEffect(() => {
+    if (messages.length > 0 && isAutoScrollEnabledRef.current) {
       startSmoothScroll();
     }
-  }, [messages, startSmoothScroll, scrollToBottomInstant]);
+  }, [messages, startSmoothScroll]);
 
   // Start smooth scroll when loading starts, stop when loading ends
   useEffect(() => {

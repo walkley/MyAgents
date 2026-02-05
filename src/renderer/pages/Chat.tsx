@@ -429,7 +429,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     }
   }, [currentProvider?.id, currentProvider?.primaryModel]);
 
-  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages);
+  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
