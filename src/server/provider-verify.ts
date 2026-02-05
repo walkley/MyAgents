@@ -180,6 +180,9 @@ export function checkAnthropicSubscription(): SubscriptionStatus {
 export async function verifySubscription(): Promise<{ success: boolean; error?: string }> {
   const TIMEOUT_MS = 30000; // 30 second timeout
 
+  // Capture stderr messages for better error diagnosis
+  const stderrMessages: string[] = [];
+
   try {
     console.log('[subscription/verify] Starting SDK verification...');
 
@@ -203,21 +206,36 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
 
     // Use SDK query function with full configuration
     // Same settings as agent-session.ts for consistency
+    // Use home directory as cwd (safe default for verification)
+    const cwd = homedir();
+    console.log('[subscription/verify] cwd:', cwd);
+
     const testQuery = query({
       prompt: simplePrompt(),
       options: {
         maxTurns: 1,
+        cwd, // Explicitly set working directory (important for Windows)
         settingSources: ['user'], // Only user settings (no project dir for verification)
         pathToClaudeCodeExecutable: cliPath,
         executable: 'bun',
         env,
+        // Capture stderr for error diagnosis (same as agent-session.ts)
+        stderr: (message: string) => {
+          console.error('[subscription/verify] stderr:', message);
+          stderrMessages.push(message);
+        },
       },
     });
 
     // Wrap in timeout with cleanup
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<{ success: false; error: string }>((resolve) => {
-      timeoutId = setTimeout(() => resolve({ success: false, error: '验证超时，请检查网络连接' }), TIMEOUT_MS);
+      timeoutId = setTimeout(() => {
+        const stderrHint = stderrMessages.length > 0
+          ? ` (stderr: ${stderrMessages.join('; ').slice(0, 200)})`
+          : '';
+        resolve({ success: false, error: `验证超时，请检查网络连接${stderrHint}` });
+      }, TIMEOUT_MS);
     });
 
     const verifyPromise = (async (): Promise<{ success: boolean; error?: string }> => {
@@ -226,13 +244,29 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
         console.log(`[subscription/verify] SDK message type: ${message.type}`);
 
         // Check for error in any message type
-        const msgAny = message as { error?: string; is_error?: boolean };
+        const msgAny = message as {
+          error?: string;
+          is_error?: boolean;
+          subtype?: string;
+          message?: string;
+        };
+
+        // Handle system messages (check for error subtypes)
+        if (message.type === 'system') {
+          console.log(`[subscription/verify] SDK system message subtype: ${msgAny.subtype}`);
+          // Continue processing - system messages are informational
+          continue;
+        }
 
         if (message.type === 'result') {
           if (msgAny.is_error || msgAny.error) {
-            const errorText = msgAny.error || '验证失败';
+            const errorText = msgAny.error || msgAny.message || '验证失败';
             console.log(`[subscription/verify] SDK error result: ${errorText}`);
-            return { success: false, error: parseSubscriptionError(errorText) };
+            // Include stderr if available for better diagnosis
+            const stderrHint = stderrMessages.length > 0
+              ? ` (详情: ${stderrMessages.join('; ').slice(0, 100)})`
+              : '';
+            return { success: false, error: parseSubscriptionError(errorText) + stderrHint };
           }
 
           // Success - got a valid response
@@ -248,7 +282,11 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
       }
 
       // If we get here without a result, something went wrong
-      return { success: false, error: '验证未返回结果' };
+      // Include stderr messages for diagnosis
+      const stderrHint = stderrMessages.length > 0
+        ? `: ${stderrMessages.join('; ').slice(0, 200)}`
+        : '';
+      return { success: false, error: `验证未返回结果${stderrHint}` };
     })();
 
     try {
@@ -260,7 +298,11 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
   } catch (error) {
     console.error('[subscription/verify] SDK error:', error);
     const errorMsg = error instanceof Error ? error.message : '验证失败';
-    return { success: false, error: parseSubscriptionError(errorMsg) };
+    // Include stderr if available
+    const stderrHint = stderrMessages.length > 0
+      ? ` (stderr: ${stderrMessages.join('; ').slice(0, 100)})`
+      : '';
+    return { success: false, error: parseSubscriptionError(errorMsg) + stderrHint };
   }
 }
 
