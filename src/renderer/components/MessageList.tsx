@@ -173,11 +173,7 @@ export default function MessageList({
             <Loader2 className="h-3 w-3 animate-spin" />
             <span>
               {statusMessage}
-              {elapsedSeconds > 0 && (
-                <span className="ml-1 text-[var(--ink-faint)]">
-                  ({formatElapsedTime(elapsedSeconds)})
-                </span>
-              )}
+              {elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}
             </span>
           </div>
         )}
