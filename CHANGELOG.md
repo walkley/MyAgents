@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.11] - 2026-02-06
+
+### Changed
+- **统一 Session ID 架构**：新 session 使用 `crypto.randomUUID()` 生成 UUID，通过 SDK 0.2.33 的 `sessionId` 参数让 SDK 直接使用我们的 ID，消除双 ID 映射
+- 升级 Claude Agent SDK 到 0.2.33
+
+### Technical
+- `SessionMetadata` 新增 `unifiedSession` 标记，区分新旧 session
+- `sessionId` 和 `resume` 参数互斥传递（SDK 约束）
+- 旧 session 完全兼容，通过 `sdkSessionId` 字段回退
+- 新增技术文档：[Session ID 架构](./specs/tech_docs/session_id_architecture.md)
+
+---
+
 ## [0.1.10] - 2026-02-05
 
 ### Added

@@ -34,12 +34,13 @@ MyAgents 使用基于文件系统的会话存储方案，采用 JSONL 格式存�
 
 ```typescript
 interface SessionMetadata {
-    id: string;              // 会话 ID
+    id: string;              // 会话 ID（v0.1.11+ 为 UUID）
     agentDir: string;        // 关联的 Agent 目录
     title: string;           // 会话标题
     createdAt: string;       // 创建时间
     lastActiveAt: string;    // 最后活跃时间
-    sdkSessionId?: string;   // SDK 内部会话 ID（用于 resume）
+    sdkSessionId?: string;   // SDK session_id（v0.1.11+ 统一后 === id）
+    unifiedSession?: boolean;// 统一 Session ID 标记（v0.1.11+）
     stats?: SessionStats;    // 统计信息
 }
 

@@ -323,6 +323,7 @@ if (isDebugMode()) console.log('[module] debug message');
 | **SDK 自定义工具** | [sdk_custom_tools_guide.md](./specs/tech_docs/sdk_custom_tools_guide.md) |
 | SSE 状态同步 | [session_state_sync.md](./specs/tech_docs/session_state_sync.md) |
 | Session 存储架构 | [session_storage.md](./specs/tech_docs/session_storage.md) |
+| **Session ID 架构** | [session_id_architecture.md](./specs/tech_docs/session_id_architecture.md) |
 | 日志系统 | [unified_logging.md](./specs/tech_docs/unified_logging.md) |
 | **代理配置** | [proxy_config.md](./specs/tech_docs/proxy_config.md) |
 | **Windows 平台适配** | [windows_platform_guide.md](./specs/tech_docs/windows_platform_guide.md) |
