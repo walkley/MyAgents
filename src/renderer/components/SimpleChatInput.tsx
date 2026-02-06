@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardR
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabStateOptional } from '@/context/TabContext';
-import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, type ModelEntity } from '@/config/types';
+import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, type ModelEntity, PRESET_PROVIDERS } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
@@ -1581,11 +1581,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                       )}
                     </div>
                     {/* Dynamic models from provider.models */}
-                    {(provider?.models ?? [
-                      { model: 'claude-sonnet-4-5-20250929', modelName: 'Claude Sonnet 4.5', modelSeries: 'claude' },
-                      { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
-                      { model: 'claude-opus-4-5-20251101', modelName: 'Claude Opus 4.5', modelSeries: 'claude' },
-                    ] as ModelEntity[]).map((model) => (
+                    {(provider?.models ?? PRESET_PROVIDERS[0].models).map((model) => (
                       <button
                         key={model.model}
                         type="button"
