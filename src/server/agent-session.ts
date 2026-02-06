@@ -2001,14 +2001,18 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   }
 
   // Set SDK session ID for resume (if available)
-  if (sessionMeta.sdkSessionId) {
+  if (sessionMeta.unifiedSession && sessionMeta.sdkSessionId) {
+    // 统一后的 session：sdkSessionId === id，直接用 id
+    resumeSessionId = sessionMeta.id;
+    console.log(`[agent] switchToSession: will resume unified session ${resumeSessionId}`);
+  } else if (sessionMeta.sdkSessionId) {
+    // 统一前的旧 session：用存储的 SDK ID
     resumeSessionId = sessionMeta.sdkSessionId;
-    console.log(`[agent] switchToSession: will resume SDK session ${resumeSessionId}`);
+    console.log(`[agent] switchToSession: will resume pre-unified SDK session ${resumeSessionId}`);
   } else {
-    // No SDK session_id means this is an old session without resume support
-    // The conversation will start fresh, but messages will be saved to the same session
+    // 无 SDK ID 的老旧 session 或从未 query 过的 session
     resumeSessionId = undefined;
-    console.warn(`[agent] switchToSession: no SDK session_id available (old session), will start fresh conversation`);
+    console.warn(`[agent] switchToSession: no SDK session_id available, will start fresh`);
   }
 
   // Update agentDir from session
@@ -2368,12 +2372,18 @@ async function startStreamingSession(): Promise<void> {
     resumeSessionId = undefined; // Clear after use
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}${resumeFrom ? `, resume: ${resumeFrom}` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
 
     querySession = query({
       prompt: messageGenerator(),
       options: {
-        resume: resumeFrom, // Resume from previous SDK session if set
+        // sessionId 和 resume 互斥（SDK 约束）
+        // 新 session：传 sessionId 让 SDK 使用我们的 UUID
+        // Resume：传 resume 恢复对话上下文
+        ...(resumeFrom
+          ? { resume: resumeFrom }
+          : { sessionId: sessionId }
+        ),
         maxThinkingTokens: 32_000,
         // Only use project-level settings from .claude/ directory
         // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
@@ -2489,10 +2499,18 @@ async function startStreamingSession(): Promise<void> {
         // Frontend needs our sessionId to match against history records
         broadcast('chat:system-init', { info: systemInitInfo, sessionId });
 
-        // Save SDK session_id for future resume functionality
+        // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
-          updateSessionMetadata(sessionId, { sdkSessionId: nextSystemInit.session_id });
-          console.log(`[agent] SDK session_id saved: ${nextSystemInit.session_id}`);
+          const isUnified = nextSystemInit.session_id === sessionId;
+          updateSessionMetadata(sessionId, {
+            sdkSessionId: nextSystemInit.session_id,
+            unifiedSession: isUnified,
+          });
+          if (isUnified) {
+            console.log(`[agent] SDK session_id confirmed unified: ${nextSystemInit.session_id}`);
+          } else {
+            console.log(`[agent] SDK session_id saved (pre-unified): ${nextSystemInit.session_id} (our: ${sessionId})`);
+          }
         }
       }
 

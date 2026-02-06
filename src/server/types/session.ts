@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 /**
  * Session statistics for tracking usage
  */
@@ -18,8 +20,10 @@ export interface SessionMetadata {
     title: string;
     createdAt: string;
     lastActiveAt: string;
-    /** SDK's internal session_id for resume functionality */
+    /** @deprecated 统一后新 session 的 sdkSessionId === id，保留用于旧 session 兼容 */
     sdkSessionId?: string;
+    /** 统一后创建的 session 标记。为 true 时 id 即 SDK session ID */
+    unifiedSession?: boolean;
     /** Session statistics */
     stats?: SessionStats;
     /** Associated cron task ID (if this session is used by a scheduled task) */
@@ -112,10 +116,11 @@ export function generateSessionTitle(message: string): string {
 export function createSessionMetadata(agentDir: string): SessionMetadata {
     const now = new Date().toISOString();
     return {
-        id: generateSessionId(),
+        id: randomUUID(),
         agentDir,
         title: 'New Chat',
         createdAt: now,
         lastActiveAt: now,
+        unifiedSession: true,
     };
 }
