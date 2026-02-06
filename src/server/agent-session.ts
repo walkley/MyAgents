@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
-import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
@@ -280,6 +280,10 @@ type SdkMcpServerConfig = {
 // null = never set (use config file fallback), [] = explicitly set to none
 let currentMcpServers: McpServerDefinition[] | null = null;
 
+// Current sub-agent definitions (set per-query via /api/agents/set)
+// null = no agents configured, {} = explicitly set to none
+let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
+
 // Preset MCP servers (same as renderer/config/types.ts)
 const PRESET_MCP_SERVERS: McpServerDefinition[] = [
   {
@@ -382,6 +386,38 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
  */
 export function getMcpServers(): McpServerDefinition[] | null {
   return currentMcpServers;
+}
+
+/**
+ * Set the sub-agent definitions for subsequent queries
+ * If agents changed and a session is running, it will be restarted with resume
+ */
+export function setAgents(agents: Record<string, AgentDefinition>): void {
+  const currentNames = currentAgentDefinitions ? Object.keys(currentAgentDefinitions).sort().join(',') : '';
+  const newNames = Object.keys(agents).sort().join(',');
+  const agentsChanged = currentNames !== newNames;
+
+  currentAgentDefinitions = agents;
+  if (isDebugMode) {
+    console.log(`[agent] Sub-agents set: ${newNames || 'none'}`);
+  }
+
+  // If agents changed and session is running, restart with resume
+  if (agentsChanged && querySession) {
+    if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
+    if (systemInitInfo?.session_id) {
+      resumeSessionId = systemInitInfo.session_id;
+      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
+    }
+    shouldAbortSession = true;
+  }
+}
+
+/**
+ * Get current sub-agent definitions
+ */
+export function getAgents(): Record<string, AgentDefinition> | null {
+  return currentAgentDefinitions;
 }
 
 /**
@@ -775,6 +811,12 @@ async function checkToolPermission(
   // 1. Check if tool is always allowed for this mode
   if (isToolInList(toolName, rules.allowedTools)) {
     console.debug(`[permission] ${toolName}: auto-allowed by mode rules`);
+    return 'allow';
+  }
+
+  // 1.5. Auto-allow Task tool when sub-agents are configured (needed for delegation)
+  if (toolName === 'Task' && currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0) {
+    console.debug(`[permission] ${toolName}: auto-allowed for sub-agent delegation`);
     return 'allow';
   }
 
@@ -1866,6 +1908,9 @@ export async function resetSession(): Promise<void> {
   resumeSessionId = undefined;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
+  // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
+  currentAgentDefinitions = null;
+
   // 5. Clear SDK ready signal state (same as switchToSession)
   _sdkReadyResolve = null;
   _sdkReadyPromise = null;
@@ -2410,6 +2455,10 @@ async function startStreamingSession(): Promise<void> {
         cwd: agentDir,
         includePartialMessages: true,
         mcpServers: buildSdkMcpServers(),
+        // Sub-agents: inject custom agent definitions if configured
+        // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
+        ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
+          ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
         // Custom permission handling - check rules and prompt user for unknown tools
         // Only effective when permissionMode is 'default'
         canUseTool: async (toolName, input, options) => {

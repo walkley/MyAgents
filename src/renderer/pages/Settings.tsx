@@ -8,6 +8,7 @@ import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
+import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import {
     getModelsDisplay,
@@ -43,7 +44,7 @@ import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -91,7 +92,7 @@ interface SettingsProps {
     onSectionChange?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -1192,6 +1193,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                         技能 Skills
                     </button>
                     <button
+                        onClick={() => setActiveSection('agents')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'agents'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        Agent 能力
+                    </button>
+                    <button
                         onClick={() => setActiveSection('mcp')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'mcp'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1230,8 +1240,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                     </div>
                 )}
 
+                {/* Agents section uses wider layout */}
+                {activeSection === 'agents' && (
+                    <div className="px-8 py-8">
+                        <GlobalAgentsPanel />
+                    </div>
+                )}
+
                 {/* Other sections use narrower layout */}
-                <div className={`mx-auto max-w-xl px-8 py-8 ${activeSection === 'skills' ? 'hidden' : ''}`}>
+                <div className={`mx-auto max-w-xl px-8 py-8 ${activeSection === 'skills' || activeSection === 'agents' ? 'hidden' : ''}`}>
 
                     {activeSection === 'general' && (
                         <div className="space-y-6">

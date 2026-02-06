@@ -32,6 +32,7 @@ import { isDebugMode } from '@/utils/debug';
 import ConfirmDialog from './ConfirmDialog';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import RenameDialog from './RenameDialog';
+import AgentCapabilitiesPanel from './AgentCapabilitiesPanel';
 
 // Lazy load FilePreviewModal - it includes heavy SyntaxHighlighter
 const FilePreviewModal = lazy(() => import('./FilePreviewModal'));
@@ -60,6 +61,10 @@ interface DirectoryPanelProps {
   isTauriDragActive?: boolean;
   /** Called when user clicks "引用" to insert @path reference into chat input */
   onInsertReference?: (paths: string[]) => void;
+  /** Enabled sub-agent definitions (from Chat.tsx) */
+  enabledAgents?: Record<string, { description: string; prompt?: string; model?: string }>;
+  enabledSkills?: Array<{ name: string; description: string }>;
+  enabledCommands?: Array<{ name: string; description: string }>;
 }
 
 type FilePreview = {
@@ -142,6 +147,9 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
   refreshTrigger,
   isTauriDragActive = false,
   onInsertReference,
+  enabledAgents,
+  enabledSkills,
+  enabledCommands,
 }, ref) {
   const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1239,6 +1247,9 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
               </Tree>
             )}
           </div>
+
+          {/* Agent Capabilities Panel */}
+          <AgentCapabilitiesPanel enabledAgents={enabledAgents} enabledSkills={enabledSkills} enabledCommands={enabledCommands} />
         </>
       )}
 

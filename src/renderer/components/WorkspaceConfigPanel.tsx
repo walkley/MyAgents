@@ -2,7 +2,7 @@
  * WorkspaceConfigPanel - Full-screen configuration overlay for workspace
  * Manages CLAUDE.md, Skills, and Commands for the current project
  */
-import { X, Settings, FileText, Sparkles, ChevronLeft } from 'lucide-react';
+import { X, Settings, FileText, Sparkles, Bot, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -15,6 +15,9 @@ import SkillDetailPanel from './SkillDetailPanel';
 import type { SkillDetailPanelRef } from './SkillDetailPanel';
 import CommandDetailPanel from './CommandDetailPanel';
 import type { CommandDetailPanelRef } from './CommandDetailPanel';
+import WorkspaceAgentsList from './WorkspaceAgentsList';
+import AgentDetailPanel from './AgentDetailPanel';
+import type { AgentDetailPanelRef } from './AgentDetailPanel';
 
 interface WorkspaceConfigPanelProps {
     agentDir: string;
@@ -23,11 +26,12 @@ interface WorkspaceConfigPanelProps {
     refreshKey?: number;
 }
 
-type Tab = 'claude-md' | 'skills-commands';
+type Tab = 'claude-md' | 'skills-commands' | 'agents';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
-    | { type: 'command'; name: string; scope: 'user' | 'project' };
+    | { type: 'command'; name: string; scope: 'user' | 'project' }
+    | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
 
 export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0 }: WorkspaceConfigPanelProps) {
     const toast = useToast();
@@ -50,6 +54,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     const claudeMdRef = useRef<ClaudeMdEditorRef>(null);
     const skillDetailRef = useRef<SkillDetailPanelRef>(null);
     const commandDetailRef = useRef<CommandDetailPanelRef>(null);
+    const agentDetailRef = useRef<AgentDetailPanelRef>(null);
 
     // Check if any component is in editing mode
     const isAnyEditing = useCallback(() => {
@@ -60,6 +65,9 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
             return true;
         }
         if (detailView.type === 'command' && commandDetailRef.current?.isEditing()) {
+            return true;
+        }
+        if (detailView.type === 'agent' && agentDetailRef.current?.isEditing()) {
             return true;
         }
         return false;
@@ -121,6 +129,10 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
 
     const handleSelectCommand = useCallback((name: string, scope: 'user' | 'project') => {
         setDetailView({ type: 'command', name, scope });
+    }, []);
+
+    const handleSelectAgent = useCallback((name: string, scope: 'user' | 'project', isNewAgent?: boolean) => {
+        setDetailView({ type: 'agent', name, scope, isNewAgent });
     }, []);
 
     const handleItemSaved = useCallback((autoClose?: boolean) => {
@@ -204,6 +216,17 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             <Sparkles className="h-4 w-4" />
                             Skills & Commands
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('agents')}
+                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'agents'
+                                ? 'border-b-2 border-[var(--accent-warm)] text-[var(--accent-warm)]'
+                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                }`}
+                        >
+                            <Bot className="h-4 w-4" />
+                            Agents
+                        </button>
                     </div>
                 )}
 
@@ -224,6 +247,15 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                     onClose={onClose}
                                 />
                             )}
+                            {activeTab === 'agents' && (
+                                <WorkspaceAgentsList
+                                    scope="project"
+                                    agentDir={agentDir}
+                                    onSelectAgent={handleSelectAgent}
+                                    refreshKey={refreshKey}
+                                    onClose={onClose}
+                                />
+                            )}
                         </>
                     ) : detailView.type === 'skill' ? (
                         <SkillDetailPanel
@@ -236,7 +268,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             startInEditMode={detailView.isNewSkill}
                             agentDir={agentDir}
                         />
-                    ) : (
+                    ) : detailView.type === 'command' ? (
                         <CommandDetailPanel
                             ref={commandDetailRef}
                             name={detailView.name}
@@ -246,7 +278,18 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                             onDeleted={handleItemDeleted}
                             agentDir={agentDir}
                         />
-                    )}
+                    ) : detailView.type === 'agent' ? (
+                        <AgentDetailPanel
+                            ref={agentDetailRef}
+                            name={detailView.name}
+                            scope={detailView.scope}
+                            onBack={handleBackFromDetail}
+                            onSaved={handleItemSaved}
+                            onDeleted={handleItemDeleted}
+                            startInEditMode={detailView.isNewAgent}
+                            agentDir={agentDir}
+                        />
+                    ) : null}
                 </div>
 
                 {/* Footer hint */}
