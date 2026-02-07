@@ -5,7 +5,7 @@
  * Uses Tab-scoped API when in Tab context (WorkspaceConfigPanel),
  * falls back to global API when not in Tab context (GlobalAgentsPanel).
  */
-import { Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Check } from 'lucide-react';
+import { Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Check, Plus } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
 
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
@@ -15,8 +15,181 @@ import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
-import type { AgentFrontmatter, AgentDetail, AgentMeta } from '../../shared/agentTypes';
+import type { AgentFrontmatter, AgentDetail } from '../../shared/agentTypes';
 import { sanitizeFolderName } from '../../shared/utils';
+import { PERMISSION_MODES } from '@/config/types';
+
+// Common SDK tools available for sub-agents
+const COMMON_TOOLS = [
+    'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'Task',
+    'WebSearch', 'WebFetch', 'NotebookEdit',
+];
+
+/** Tag input component for tools/skills with keyboard navigation */
+function TagInput({
+    tags,
+    onChange,
+    suggestions,
+    placeholder,
+    emptyHint,
+}: {
+    tags: string[];
+    onChange: (tags: string[]) => void;
+    suggestions?: string[];
+    placeholder: string;
+    emptyHint: string;
+}) {
+    const [inputValue, setInputValue] = useState('');
+    const [showSuggestions, setShowSuggestions] = useState(false);
+    const [highlightIndex, setHighlightIndex] = useState(-1);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const listRef = useRef<HTMLDivElement>(null);
+
+    const filteredSuggestions = useMemo(() => {
+        if (!suggestions) return [];
+        const lower = inputValue.toLowerCase();
+        return suggestions.filter(s =>
+            !tags.includes(s) && (lower === '' || s.toLowerCase().includes(lower))
+        );
+    }, [suggestions, tags, inputValue]);
+
+    const addTag = useCallback((tag: string) => {
+        const trimmed = tag.trim();
+        if (trimmed && !tags.includes(trimmed)) {
+            onChange([...tags, trimmed]);
+        }
+        setInputValue('');
+        setShowSuggestions(false);
+        setHighlightIndex(-1);
+        inputRef.current?.focus();
+    }, [tags, onChange]);
+
+    const removeTag = useCallback((tag: string) => {
+        onChange(tags.filter(t => t !== tag));
+    }, [tags, onChange]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+        const suggestionsVisible = showSuggestions && filteredSuggestions.length > 0;
+
+        if (e.key === 'ArrowDown' && suggestionsVisible) {
+            e.preventDefault();
+            setHighlightIndex(prev =>
+                prev < filteredSuggestions.length - 1 ? prev + 1 : 0
+            );
+        } else if (e.key === 'ArrowUp' && suggestionsVisible) {
+            e.preventDefault();
+            setHighlightIndex(prev =>
+                prev > 0 ? prev - 1 : filteredSuggestions.length - 1
+            );
+        } else if (e.key === 'Escape' && suggestionsVisible) {
+            e.preventDefault();
+            setShowSuggestions(false);
+            setHighlightIndex(-1);
+        } else if (e.key === 'Enter' || e.key === ',') {
+            e.preventDefault();
+            if (highlightIndex >= 0 && highlightIndex < filteredSuggestions.length) {
+                addTag(filteredSuggestions[highlightIndex]);
+            } else if (inputValue.trim()) {
+                addTag(inputValue);
+            }
+        } else if (e.key === 'Backspace' && !inputValue && tags.length > 0) {
+            onChange(tags.slice(0, -1));
+        }
+    }, [inputValue, tags, addTag, onChange, showSuggestions, filteredSuggestions, highlightIndex]);
+
+    // Scroll highlighted item into view
+    useEffect(() => {
+        if (highlightIndex < 0 || !listRef.current) return;
+        const item = listRef.current.children[highlightIndex] as HTMLElement | undefined;
+        item?.scrollIntoView({ block: 'nearest' });
+    }, [highlightIndex]);
+
+    return (
+        <div className="space-y-1.5">
+            {/* Tags display */}
+            {tags.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                    {tags.map(tag => (
+                        <span
+                            key={tag}
+                            className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-contrast)] px-2 py-1 text-xs text-[var(--ink)]"
+                        >
+                            {tag}
+                            <button
+                                onClick={() => removeTag(tag)}
+                                className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--line)] hover:text-[var(--ink)]"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </span>
+                    ))}
+                </div>
+            ) : (
+                <p className="text-xs text-[var(--ink-muted)]">{emptyHint}</p>
+            )}
+
+            {/* Input row */}
+            <div className="relative flex items-center gap-1.5">
+                <input
+                    ref={inputRef}
+                    type="text"
+                    value={inputValue}
+                    onChange={e => {
+                        setInputValue(e.target.value);
+                        setShowSuggestions(true);
+                        setHighlightIndex(-1);
+                    }}
+                    onFocus={() => setShowSuggestions(true)}
+                    onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                    onKeyDown={handleKeyDown}
+                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
+                    placeholder={placeholder}
+                    role="combobox"
+                    aria-expanded={showSuggestions && filteredSuggestions.length > 0}
+                    aria-activedescendant={highlightIndex >= 0 ? `tag-suggestion-${highlightIndex}` : undefined}
+                />
+                <button
+                    onClick={() => { if (inputValue.trim()) addTag(inputValue); }}
+                    disabled={!inputValue.trim()}
+                    className="shrink-0 rounded-lg border border-[var(--line)] p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-30"
+                >
+                    <Plus className="h-3.5 w-3.5" />
+                </button>
+
+                {/* Dropdown suggestions */}
+                {showSuggestions && filteredSuggestions.length > 0 && (
+                    <div
+                        ref={listRef}
+                        role="listbox"
+                        className="absolute left-0 top-full z-10 mt-1 max-h-40 w-full overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-lg"
+                    >
+                        {filteredSuggestions.map((s, i) => (
+                            <button
+                                key={s}
+                                id={`tag-suggestion-${i}`}
+                                role="option"
+                                aria-selected={i === highlightIndex}
+                                onMouseDown={e => { e.preventDefault(); addTag(s); }}
+                                onMouseEnter={() => setHighlightIndex(i)}
+                                className={`block w-full px-3 py-1.5 text-left text-xs text-[var(--ink)] ${
+                                    i === highlightIndex
+                                        ? 'bg-[var(--paper-contrast)]'
+                                        : 'hover:bg-[var(--paper-contrast)]'
+                                }`}
+                            >
+                                {s}
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+/** Parse comma-separated string to tag array (pure, module-level) */
+const parseToTags = (s: string): string[] =>
+    s ? s.split(',').map(t => t.trim()).filter(Boolean) : [];
 
 interface AgentDetailPanelProps {
     name: string;
@@ -26,6 +199,8 @@ interface AgentDetailPanelProps {
     onDeleted: () => void;
     startInEditMode?: boolean;
     agentDir?: string;
+    /** When false, model selection is hidden (non-Anthropic providers) */
+    isAnthropicProvider?: boolean;
 }
 
 export interface AgentDetailPanelRef {
@@ -33,10 +208,10 @@ export interface AgentDetailPanelRef {
 }
 
 const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
-    function AgentDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, startInEditMode = false, agentDir }, ref) {
+    function AgentDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, startInEditMode = false, agentDir, isAnthropicProvider = true }, ref) {
         const toast = useToast();
         const toastRef = useRef(toast);
-        toastRef.current = toast;
+        useEffect(() => { toastRef.current = toast; }, [toast]);
 
         const tabState = useTabStateOptional();
         const apiGet = tabState?.apiGet;
@@ -61,37 +236,31 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
         const [isEditing, setIsEditing] = useState(false);
         const [isNewAgent, setIsNewAgent] = useState(startInEditMode);
 
-        // Original values for comparison
+        // Original values for cancel/restore
         const [originalAgentName, setOriginalAgentName] = useState('');
         const [originalDescription, setOriginalDescription] = useState('');
         const [originalBody, setOriginalBody] = useState('');
         const [originalModel, setOriginalModel] = useState('');
-        const [originalTools, setOriginalTools] = useState('');
-        const [originalDisallowedTools, setOriginalDisallowedTools] = useState('');
+        const [originalTools, setOriginalTools] = useState<string[]>([]);
+        const [originalDisallowedTools, setOriginalDisallowedTools] = useState<string[]>([]);
         const [originalMaxTurns, setOriginalMaxTurns] = useState('');
         const [originalPermissionMode, setOriginalPermissionMode] = useState('');
         const [originalMemory, setOriginalMemory] = useState('');
-        const [originalSkills, setOriginalSkills] = useState('');
+        const [originalSkills, setOriginalSkills] = useState<string[]>([]);
         const [originalHooksYaml, setOriginalHooksYaml] = useState('');
-        const [originalDisplayName, setOriginalDisplayName] = useState('');
-        const [originalIcon, setOriginalIcon] = useState('');
-        const [originalColor, setOriginalColor] = useState('');
 
         // Editable fields
         const [agentName, setAgentName] = useState('');
         const [description, setDescription] = useState('');
         const [body, setBody] = useState('');
         const [model, setModel] = useState('');
-        const [tools, setTools] = useState('');
-        const [disallowedTools, setDisallowedTools] = useState('');
+        const [toolsTags, setToolsTags] = useState<string[]>([]);
+        const [disallowedToolsTags, setDisallowedToolsTags] = useState<string[]>([]);
         const [maxTurns, setMaxTurns] = useState('');
         const [permissionMode, setPermissionMode] = useState('');
         const [memory, setMemory] = useState('');
-        const [skills, setSkills] = useState('');
+        const [skillsTags, setSkillsTags] = useState<string[]>([]);
         const [hooksYaml, setHooksYaml] = useState('');
-        const [displayName, setDisplayName] = useState('');
-        const [icon, setIcon] = useState('');
-        const [color, setColor] = useState('');
 
         const nameInputRef = useRef<HTMLInputElement>(null);
         const [focusField, setFocusField] = useState<'name' | 'description' | 'body' | null>(null);
@@ -116,31 +285,25 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         const desc = fm.description || '';
                         const bd = response.agent.body || '';
                         const mdl = fm.model || '';
-                        const tls = fm.tools || '';
-                        const dtls = fm.disallowedTools || '';
+                        const tls = parseToTags(fm.tools || '');
+                        const dtls = parseToTags(fm.disallowedTools || '');
                         const mt = fm.maxTurns !== undefined ? String(fm.maxTurns) : '';
                         const pm = fm.permissionMode || '';
                         const mem = fm.memory || '';
-                        const sk = fm.skills ? fm.skills.join(', ') : '';
+                        const sk = fm.skills || [];
                         const hk = fm.hooks ? yamlDump(fm.hooks, { lineWidth: -1 }).trim() : '';
-                        const dn = response.agent.meta?.displayName || '';
-                        const ic = response.agent.meta?.icon || '';
-                        const cl = response.agent.meta?.color || '';
 
                         setAgentName(nameVal); setOriginalAgentName(nameVal);
                         setDescription(desc); setOriginalDescription(desc);
                         setBody(bd); setOriginalBody(bd);
                         setModel(mdl); setOriginalModel(mdl);
-                        setTools(tls); setOriginalTools(tls);
-                        setDisallowedTools(dtls); setOriginalDisallowedTools(dtls);
+                        setToolsTags(tls); setOriginalTools(tls);
+                        setDisallowedToolsTags(dtls); setOriginalDisallowedTools(dtls);
                         setMaxTurns(mt); setOriginalMaxTurns(mt);
                         setPermissionMode(pm); setOriginalPermissionMode(pm);
                         setMemory(mem); setOriginalMemory(mem);
-                        setSkills(sk); setOriginalSkills(sk);
+                        setSkillsTags(sk); setOriginalSkills(sk);
                         setHooksYaml(hk); setOriginalHooksYaml(hk);
-                        setDisplayName(dn); setOriginalDisplayName(dn);
-                        setIcon(ic); setOriginalIcon(ic);
-                        setColor(cl); setOriginalColor(cl);
 
                         if (startInEditMode) setIsEditing(true);
                     } else {
@@ -182,19 +345,16 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 setDescription(originalDescription);
                 setBody(originalBody);
                 setModel(originalModel);
-                setTools(originalTools);
-                setDisallowedTools(originalDisallowedTools);
+                setToolsTags(originalTools);
+                setDisallowedToolsTags(originalDisallowedTools);
                 setMaxTurns(originalMaxTurns);
                 setPermissionMode(originalPermissionMode);
                 setMemory(originalMemory);
-                setSkills(originalSkills);
+                setSkillsTags(originalSkills);
                 setHooksYaml(originalHooksYaml);
-                setDisplayName(originalDisplayName);
-                setIcon(originalIcon);
-                setColor(originalColor);
                 setIsEditing(false);
             }
-        }, [isNewAgent, name, scope, agentDir, originalAgentName, originalDescription, originalBody, originalModel, originalTools, originalDisallowedTools, originalMaxTurns, originalPermissionMode, originalMemory, originalSkills, originalHooksYaml, originalDisplayName, originalIcon, originalColor, onDeleted, api, isInTabContext]);
+        }, [isNewAgent, name, scope, agentDir, originalAgentName, originalDescription, originalBody, originalModel, originalTools, originalDisallowedTools, originalMaxTurns, originalPermissionMode, originalMemory, originalSkills, originalHooksYaml, onDeleted, api, isInTabContext]);
 
         const expectedFolderName = agentName.trim() ? sanitizeFolderName(agentName.trim()) : '';
 
@@ -212,14 +372,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 };
 
                 if (model) frontmatter.model = model as AgentFrontmatter['model'];
-                if (tools) frontmatter.tools = tools;
-                if (disallowedTools) frontmatter.disallowedTools = disallowedTools;
+                if (toolsTags.length > 0) frontmatter.tools = toolsTags.join(', ');
+                if (disallowedToolsTags.length > 0) frontmatter.disallowedTools = disallowedToolsTags.join(', ');
                 if (maxTurns) frontmatter.maxTurns = parseInt(maxTurns, 10) || undefined;
                 if (permissionMode) frontmatter.permissionMode = permissionMode;
                 if (memory) frontmatter.memory = memory;
-                if (skills.trim()) {
-                    frontmatter.skills = skills.split(',').map(s => s.trim()).filter(Boolean);
-                }
+                if (skillsTags.length > 0) frontmatter.skills = skillsTags;
                 if (hooksYaml.trim()) {
                     try {
                         frontmatter.hooks = yamlLoad(hooksYaml) as Record<string, unknown>;
@@ -234,16 +392,9 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 const nameWasModified = agentName.trim() !== originalAgentName;
                 const shouldRename = nameWasModified && newFolderName && newFolderName !== agent.folderName;
 
-                // Build meta if any meta fields are set
-                const meta: AgentMeta = {};
-                if (displayName.trim()) meta.displayName = displayName.trim();
-                if (icon.trim()) meta.icon = icon.trim();
-                if (color.trim()) meta.color = color.trim();
-                const hasMeta = Object.keys(meta).length > 0;
-
                 const payload = isInTabContext
-                    ? { scope, frontmatter, body, ...(shouldRename ? { newFolderName } : {}), ...(hasMeta ? { meta } : {}) }
-                    : { scope, frontmatter, body, ...(shouldRename ? { newFolderName } : {}), ...(scope === 'project' && agentDir ? { agentDir } : {}), ...(hasMeta ? { meta } : {}) };
+                    ? { scope, frontmatter, body, ...(shouldRename ? { newFolderName } : {}) }
+                    : { scope, frontmatter, body, ...(shouldRename ? { newFolderName } : {}), ...(scope === 'project' && agentDir ? { agentDir } : {}) };
 
                 const response = await api.put<{
                     success: boolean;
@@ -259,16 +410,13 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                     setOriginalDescription(description);
                     setOriginalBody(body);
                     setOriginalModel(model);
-                    setOriginalTools(tools);
-                    setOriginalDisallowedTools(disallowedTools);
+                    setOriginalTools(toolsTags);
+                    setOriginalDisallowedTools(disallowedToolsTags);
                     setOriginalMaxTurns(maxTurns);
                     setOriginalPermissionMode(permissionMode);
                     setOriginalMemory(memory);
-                    setOriginalSkills(skills);
+                    setOriginalSkills(skillsTags);
                     setOriginalHooksYaml(hooksYaml);
-                    setOriginalDisplayName(displayName);
-                    setOriginalIcon(icon);
-                    setOriginalColor(color);
 
                     if (shouldRename && response.folderName) {
                         onSaved(true);
@@ -283,7 +431,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
             } finally {
                 setSaving(false);
             }
-        }, [agent, agentName, description, body, model, tools, disallowedTools, maxTurns, permissionMode, memory, skills, hooksYaml, displayName, icon, color, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext]);
+        }, [agent, agentName, description, body, model, toolsTags, disallowedToolsTags, maxTurns, permissionMode, memory, skillsTags, hooksYaml, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext]);
 
         const handleDelete = useCallback(async () => {
             if (!agent) return;
@@ -354,24 +502,24 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         </div>
                         {/* Badges */}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
-                            {model && (
+                            {model && isAnthropicProvider && (
                                 <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    模型: {model || 'inherit'}
+                                    模型: {model}
                                 </span>
                             )}
                             {permissionMode && (
                                 <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    权限: {permissionMode}
+                                    权限: {PERMISSION_MODES.find(m => m.sdkValue === permissionMode)?.label ?? permissionMode}
                                 </span>
                             )}
-                            {memory && (
+                            {toolsTags.length > 0 && (
                                 <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    记忆: {memory}
+                                    工具: {toolsTags.length}
                                 </span>
                             )}
-                            {tools && (
+                            {skillsTags.length > 0 && (
                                 <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    工具: {tools}
+                                    Skills: {skillsTags.length}
                                 </span>
                             )}
                         </div>
@@ -453,18 +601,6 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         )}
                     </div>
 
-                    {/* Display Name */}
-                    <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">显示名称</label>
-                        <input
-                            type="text"
-                            value={displayName}
-                            onChange={e => setDisplayName(e.target.value)}
-                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                            placeholder="在 UI 中显示的名称（留空使用 name）"
-                        />
-                    </div>
-
                     {/* Description */}
                     <div>
                         <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">描述</label>
@@ -477,56 +613,26 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         />
                     </div>
 
-                    {/* Icon & Color */}
-                    <div className="grid grid-cols-2 gap-3">
+                    {/* Model - only show for Anthropic providers */}
+                    {isAnthropicProvider && (
                         <div>
-                            <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">图标 (lucide)</label>
-                            <input
-                                type="text"
-                                value={icon}
-                                onChange={e => setIcon(e.target.value)}
+                            <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">模型</label>
+                            <select
+                                value={model}
+                                onChange={e => setModel(e.target.value)}
                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                placeholder="shield-check"
-                            />
+                            >
+                                <option value="">继承主模型 (inherit)</option>
+                                <option value="sonnet">Sonnet</option>
+                                <option value="opus">Opus</option>
+                                <option value="haiku">Haiku</option>
+                            </select>
                         </div>
-                        <div>
-                            <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">主题色</label>
-                            <div className="flex items-center gap-2">
-                                <input
-                                    type="text"
-                                    value={color}
-                                    onChange={e => setColor(e.target.value)}
-                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                    placeholder="#4CAF50"
-                                />
-                                {color && (
-                                    <div
-                                        className="h-8 w-8 shrink-0 rounded-md border border-[var(--line)]"
-                                        style={{ backgroundColor: color }}
-                                    />
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Model */}
-                    <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">模型</label>
-                        <select
-                            value={model}
-                            onChange={e => setModel(e.target.value)}
-                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                        >
-                            <option value="">继承主模型 (inherit)</option>
-                            <option value="sonnet">Sonnet</option>
-                            <option value="opus">Opus</option>
-                            <option value="haiku">Haiku</option>
-                        </select>
-                    </div>
+                    )}
 
                     {/* System Prompt */}
                     <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">System Prompt</label>
+                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">系统提示词 (System Prompt)</label>
                         <div className="overflow-hidden rounded-lg border border-[var(--line)]" style={{ height: '300px' }}>
                             <MonacoEditor
                                 value={body}
@@ -549,30 +655,38 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
                         {showAdvanced && (
                             <div className="mt-4 space-y-4">
-                                {/* Tools */}
+                                {/* Allowed Tools - Tag input */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">允许的工具 (逗号分隔)</label>
-                                    <input
-                                        type="text"
-                                        value={tools}
-                                        onChange={e => setTools(e.target.value)}
-                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                        placeholder="Read, Grep, Glob, Bash"
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">允许的工具</label>
+                                    <TagInput
+                                        tags={toolsTags}
+                                        onChange={setToolsTags}
+                                        suggestions={COMMON_TOOLS}
+                                        placeholder="输入工具名或从列表选择"
+                                        emptyHint="留空则继承主 Agent 的所有工具"
                                     />
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        留空则继承主 Agent 的所有工具
-                                    </p>
                                 </div>
 
-                                {/* Disallowed Tools */}
+                                {/* Disallowed Tools - Tag input */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">禁用的工具 (逗号分隔)</label>
-                                    <input
-                                        type="text"
-                                        value={disallowedTools}
-                                        onChange={e => setDisallowedTools(e.target.value)}
-                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                        placeholder="Edit, Write"
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">禁用的工具</label>
+                                    <TagInput
+                                        tags={disallowedToolsTags}
+                                        onChange={setDisallowedToolsTags}
+                                        suggestions={COMMON_TOOLS}
+                                        placeholder="输入要禁用的工具名"
+                                        emptyHint="留空则不禁用任何工具"
+                                    />
+                                </div>
+
+                                {/* Skills - Tag input */}
+                                <div>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">预加载 Skills</label>
+                                    <TagInput
+                                        tags={skillsTags}
+                                        onChange={setSkillsTags}
+                                        placeholder="输入 Skill 名称"
+                                        emptyHint="留空则不预加载 Skill。添加后 Skill 完整内容将注入 Agent 上下文"
                                     />
                                 </div>
 
@@ -584,11 +698,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                         onChange={e => setPermissionMode(e.target.value)}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
                                     >
-                                        <option value="">默认 (default)</option>
-                                        <option value="default">default</option>
-                                        <option value="acceptEdits">acceptEdits</option>
-                                        <option value="bypassPermissions">bypassPermissions</option>
-                                        <option value="plan">plan</option>
+                                        <option value="">默认</option>
+                                        {PERMISSION_MODES.map(m => (
+                                            <option key={m.sdkValue} value={m.sdkValue}>
+                                                {m.icon} {m.label} ({m.sdkValue})
+                                            </option>
+                                        ))}
                                     </select>
                                 </div>
 
@@ -603,51 +718,6 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                         placeholder="留空使用默认值"
                                         min={1}
                                     />
-                                </div>
-
-                                {/* Memory */}
-                                <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">持久记忆</label>
-                                    <select
-                                        value={memory}
-                                        onChange={e => setMemory(e.target.value)}
-                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                    >
-                                        <option value="">无</option>
-                                        <option value="user">user (用户级)</option>
-                                        <option value="project">project (项目级)</option>
-                                        <option value="local">local (本地)</option>
-                                    </select>
-                                </div>
-
-                                {/* Skills */}
-                                <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">预加载 Skills (逗号分隔)</label>
-                                    <input
-                                        type="text"
-                                        value={skills}
-                                        onChange={e => setSkills(e.target.value)}
-                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                        placeholder="api-conventions, error-handling"
-                                    />
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        Skill 名称列表，完整内容注入 Agent 上下文
-                                    </p>
-                                </div>
-
-                                {/* Hooks */}
-                                <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">Hooks (YAML)</label>
-                                    <div className="overflow-hidden rounded-lg border border-[var(--line)]" style={{ height: '150px' }}>
-                                        <MonacoEditor
-                                            value={hooksYaml}
-                                            onChange={setHooksYaml}
-                                            language="yaml"
-                                        />
-                                    </div>
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        生命周期钩子: PreToolUse, PostToolUse, Stop
-                                    </p>
                                 </div>
                             </div>
                         )}
