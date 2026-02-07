@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **统一 Session ID 架构**：通过 SDK 0.2.33 新特性消除双 ID 映射，新 session 在产品层和 SDK 层使用同一 ID
 - 升级 Claude Agent SDK 到 0.2.34
+- **SDK 预热机制**：打开 Tab 时提前启动 SDK 子进程和 MCP 服务器，消除首次发送消息的冷启动延迟
+  - 500ms 防抖批量处理快速配置变更
+  - 预热失败自动重试（最多 3 次），配置变更时重置
+  - 预热会话对前端不可见，首条消息时无缝切换为活跃状态
+- **MCP 版本锁定**：预设 MCP 服务（Playwright）锁定到具体版本号，避免每次启动的 npm 注册表查询延迟（2-5s）
+- **网络代理设置移至「通用」**：从「关于 - 开发者模式」移至「通用设置」，普通用户可直接使用
 - Settings 页面新增 Agents 分区，与 Skills 平级
 - WorkspaceConfigPanel 新增 Agents Tab
 
