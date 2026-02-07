@@ -33,6 +33,7 @@ import ConfirmDialog from './ConfirmDialog';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import RenameDialog from './RenameDialog';
 import AgentCapabilitiesPanel from './AgentCapabilitiesPanel';
+import type { Tab as WorkspaceTab } from './WorkspaceConfigPanel';
 
 // Lazy load FilePreviewModal - it includes heavy SyntaxHighlighter
 const FilePreviewModal = lazy(() => import('./FilePreviewModal'));
@@ -62,9 +63,13 @@ interface DirectoryPanelProps {
   /** Called when user clicks "引用" to insert @path reference into chat input */
   onInsertReference?: (paths: string[]) => void;
   /** Enabled sub-agent definitions (from Chat.tsx) */
-  enabledAgents?: Record<string, { description: string; prompt?: string; model?: string }>;
-  enabledSkills?: Array<{ name: string; description: string }>;
-  enabledCommands?: Array<{ name: string; description: string }>;
+  enabledAgents?: Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project' }>;
+  enabledSkills?: Array<{ name: string; description: string; scope?: 'user' | 'project' }>;
+  enabledCommands?: Array<{ name: string; description: string; scope?: 'user' | 'project' }>;
+  /** Insert /command into chat input */
+  onInsertSlashCommand?: (command: string) => void;
+  /** Open settings panel to a specific tab */
+  onOpenSettings?: (tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => void;
 }
 
 type FilePreview = {
@@ -150,6 +155,8 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
   enabledAgents,
   enabledSkills,
   enabledCommands,
+  onInsertSlashCommand,
+  onOpenSettings,
 }, ref) {
   const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -346,6 +353,8 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
     updateTreeHeight();
   }, [directoryInfo]);
 
+  // Re-run when directoryInfo changes because the tree container is conditionally rendered
+  // and may not exist on initial mount (the ref would be null with [] deps)
   useEffect(() => {
     const element = treeContainerRef.current;
     if (!element) {
@@ -362,7 +371,8 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
       observer.disconnect();
       window.removeEventListener('resize', updateTreeHeight);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Re-attach observer when tree container first appears
+  }, [!!directoryInfo]);
 
   const treeData = useMemo(() => {
     return directoryInfo?.tree.children ?? [];
@@ -1044,46 +1054,46 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
             />
           </div>
 
-          {/* Tree container */}
-          <div
-            ref={treeContainerRef}
-            className={`min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
-            onContextMenu={handleTreeContainerContextMenu}
-            onDragEnter={handleTreeDragEnter}
-            onDragOver={handleTreeDragOver}
-            onDragLeave={handleTreeDragLeave}
-            onDrop={handleTreeDrop}
-            onClick={(e) => {
-              // Clear selection when clicking empty area in tree container
-              // Check if clicked on a tree row (has data-tree-row attribute) or its children
-              const target = e.target as HTMLElement;
-              const isTreeRow = target.closest('[data-tree-row]');
-              if (!isTreeRow) {
-                // Clicked on empty area, clear selection
-                setSelectedNodes([]);
-                lastClickedNodeRef.current = null;
-              }
-            }}
-            data-tree-root
-          >
-            {error && <div className="px-4 py-3 text-xs text-[var(--error)]">{error}</div>}
-            {!error && !directoryInfo && (
-              <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">Loading...</div>
-            )}
-            {directoryInfo && (
-              <Tree
-                data={treeData}
-                openByDefault={false}
-                disableDrag
-                disableDrop
-                disableMultiSelection
-                disableEdit
-                rowHeight={26}
-                indent={16}
-                height={treeHeight}
-                width="100%"
-                className="overscroll-none"
-              >
+          {/* Tree + Capabilities container (60/40 split) */}
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Tree container */}
+            <div
+              ref={treeContainerRef}
+              className={`min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
+              onContextMenu={handleTreeContainerContextMenu}
+              onDragEnter={handleTreeDragEnter}
+              onDragOver={handleTreeDragOver}
+              onDragLeave={handleTreeDragLeave}
+              onDrop={handleTreeDrop}
+              onClick={(e) => {
+                // Clear selection when clicking empty area in tree container
+                const target = e.target as HTMLElement;
+                const isTreeRow = target.closest('[data-tree-row]');
+                if (!isTreeRow) {
+                  setSelectedNodes([]);
+                  lastClickedNodeRef.current = null;
+                }
+              }}
+              data-tree-root
+            >
+              {error && <div className="px-4 py-3 text-xs text-[var(--error)]">{error}</div>}
+              {!error && !directoryInfo && (
+                <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">Loading...</div>
+              )}
+              {directoryInfo && (
+                <Tree
+                  data={treeData}
+                  openByDefault={false}
+                  disableDrag
+                  disableDrop
+                  disableMultiSelection
+                  disableEdit
+                  rowHeight={26}
+                  indent={16}
+                  height={treeHeight}
+                  width="100%"
+                  className="overscroll-none"
+                >
                 {({ node, style }) => {
                   const data = node.data as DirectoryTreeNode;
                   const isDir = data.type === 'dir';
@@ -1244,12 +1254,20 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                     </div>
                   );
                 }}
-              </Tree>
-            )}
-          </div>
+                </Tree>
+              )}
+            </div>
 
-          {/* Agent Capabilities Panel */}
-          <AgentCapabilitiesPanel enabledAgents={enabledAgents} enabledSkills={enabledSkills} enabledCommands={enabledCommands} />
+            {/* Agent Capabilities Panel */}
+            <AgentCapabilitiesPanel
+              enabledAgents={enabledAgents}
+              enabledSkills={enabledSkills}
+              enabledCommands={enabledCommands}
+              onInsertSlashCommand={onInsertSlashCommand}
+              onOpenSettings={onOpenSettings}
+              onExpandChange={updateTreeHeight}
+            />
+          </div>
         </>
       )}
 

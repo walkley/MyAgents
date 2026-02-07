@@ -4,6 +4,8 @@
 
 MyAgents 使用基于文件系统的会话存储方案，采用 JSONL 格式存储消息数据，实现高效的追加写入和崩溃恢复。
 
+> **注意**：由于 Claude Agent SDK 内置了独立的 session 持久化机制（默认开启），运行时实际存在**双重存储**——MyAgents 在 `~/.myagents/sessions/` 写入精简业务数据，SDK 在 `~/.claude/projects/` 写入完整消息树。两者各司其职，详见本文档末尾「[双重存储](#双重存储myagents-与-sdk)」章节。
+
 ## 存储结构
 
 ```
@@ -231,6 +233,84 @@ function isValidSessionId(sessionId: string): boolean {
 - 新消息开始积累统计数据
 - 支持从旧版 JSON 格式自动迁移到 JSONL
 
+## 双重存储：MyAgents 与 SDK
+
+### 背景
+
+Claude Agent SDK 内置了独立的 session 持久化机制（`persistSession` 选项，默认 `true`）。MyAgents 调用 SDK 时，**两端各自独立写入会话数据**，形成双重存储。
+
+### 存储位置对比
+
+```
+~/.myagents/sessions/                        ← MyAgents 写入
+├── {session-id}.jsonl                       ← 精简消息格式
+
+~/.claude/projects/{project-slug}/           ← SDK 自动写入
+├── {sdk-session-id}.jsonl                   ← SDK 内部完整格式
+```
+
+其中 `{project-slug}` 由 `agentDir` 路径转换而来（例如 `/Users/zhihu/Documents/project/ai-max` → `-Users-zhihu-Documents-project-ai-max`）。
+
+### 数据格式差异
+
+**SDK JSONL**（每行包含完整元数据）：
+```jsonc
+// 消息链路：parentUuid 构建消息树，isSidechain 标记分支对话
+{ "type": "user",      "parentUuid": "...", "isSidechain": false, "cwd": "...", "sessionId": "...", "version": "...", "gitBranch": "...", "message": {...}, "uuid": "...", "timestamp": "...", "permissionMode": "..." }
+{ "type": "assistant",  "parentUuid": "...", "isSidechain": false, "cwd": "...", "sessionId": "...", "version": "...", "gitBranch": "...", "message": {...}, "requestId": "...", "uuid": "...", "timestamp": "..." }
+// 操作记录
+{ "type": "queue-operation", "operation": "...", "timestamp": "...", "sessionId": "..." }
+```
+
+**MyAgents JSONL**（精简业务数据）：
+```jsonc
+{ "id": "...", "role": "user",      "content": "...", "timestamp": "..." }
+{ "id": "...", "role": "assistant",  "content": "...", "timestamp": "...", "usage": {...}, "toolCount": 3, "durationMs": 4200 }
+```
+
+### 数据量对比（截至 2026-02）
+
+| 指标 | 数值 |
+|------|------|
+| 同时存在于两处的 session 数 | 198 / 198 |
+| SDK 存储总量 | 36.4 MB |
+| MyAgents 存储总量 | 21.1 MB |
+| SDK / MyAgents 体积比 | ~1.7x |
+| 合计磁盘占用 | 57.5 MB |
+
+SDK 数据更大是因为每条消息携带完整的上下文元数据（`cwd`、`gitBranch`、`version`、`permissionMode` 等），加上 `queue-operation` 等内部操作记录。
+
+### 为什么不能禁用 SDK 持久化
+
+设置 `persistSession: false` **会导致两个关键功能失效**：
+
+1. **Session Resume**：配置变更（Provider/Model/MCP/Agent）时通过 `resumeSessionId` 恢复对话上下文，SDK resume 机制依赖其自身 JSONL 文件中的消息树（`parentUuid` 链）来重建完整的会话状态。
+2. **`/insights` 报告**：SDK 内置命令，扫描 `~/.claude/projects/` 下的 session 数据生成使用分析报告，禁用后无数据源。
+
+### 为什么不能去掉 MyAgents 存储
+
+MyAgents 自身的存储服务于不同的业务场景：
+
+1. **会话列表与历史浏览**：前端通过 `sessions.json` 索引和 `{id}.jsonl` 加载历史消息
+2. **业务指标**：`usage`（Token 用量）、`toolCount`（工具调用次数）、`durationMs`（响应耗时）等 SDK 不记录的数据
+3. **统一索引**：`sessions.json` 提供全局会话元数据（标题、创建时间、统计摘要），无需遍历文件系统
+
+### 架构决策
+
+**保留双重存储，各司其职**。两份数据的格式、用途、消费者完全不同：
+
+| 维度 | SDK 存储 | MyAgents 存储 |
+|------|----------|---------------|
+| 写入者 | SDK 内部自动写入 | MyAgents `agent-session.ts` |
+| 读取者 | SDK resume / `/insights` | MyAgents 前端 UI |
+| 格式 | 消息树 + 操作记录 | 扁平消息列表 + 业务指标 |
+| 索引 | 无（按文件遍历） | `sessions.json` 全局索引 |
+| 生命周期 | 跟随 SDK 项目目录 | 跟随 MyAgents 数据目录 |
+
+**长期优化方向**（非紧急）：
+- 可定期清理过期的 SDK session 数据（例如 >30 天的已关闭 session）
+- MyAgents 侧可为归档 session 添加压缩（gzip JSONL）
+
 ## 相关文件
 
 | 文件 | 职责 |
@@ -240,3 +320,4 @@ function isValidSessionId(sessionId: string): boolean {
 | `src/server/agent-session.ts` | Session 管理与消息持久化 |
 | `src/renderer/api/sessionClient.ts` | 前端 API 客户端 |
 | `src/renderer/utils/formatTokens.ts` | Token/时长格式化工具 |
+| `specs/tech_docs/session_id_architecture.md` | Session ID 统一架构 |

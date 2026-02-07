@@ -8,7 +8,7 @@ import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
-import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState } from '@/context/TabContext';
 import { useAutoScroll } from '@/hooks/useAutoScroll';
@@ -114,14 +114,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   const [workspaceRefreshTrigger, setWorkspaceRefreshTrigger] = useState(0);
 
   // Enabled sub-agents for sidebar display
-  const [enabledAgents, setEnabledAgents] = useState<Record<string, { description: string; prompt?: string }> | undefined>();
+  const [enabledAgents, setEnabledAgents] = useState<Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project' }> | undefined>();
   // Enabled skills/commands for sidebar display
-  const [enabledSkills, setEnabledSkills] = useState<Array<{ name: string; description: string }>>([]);
-  const [enabledCommands, setEnabledCommands] = useState<Array<{ name: string; description: string }>>([]);
+  const [enabledSkills, setEnabledSkills] = useState<Array<{ name: string; description: string; scope?: 'user' | 'project' }>>([]);
+  const [enabledCommands, setEnabledCommands] = useState<Array<{ name: string; description: string; scope?: 'user' | 'project' }>>([]);
+  // Initial tab for workspace config panel (set when opening from capabilities panel)
+  const [workspaceConfigInitialTab, setWorkspaceConfigInitialTab] = useState<WorkspaceTab | undefined>();
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
+  }, []);
+
+  // Stable callbacks for DirectoryPanel → AgentCapabilitiesPanel
+  const handleInsertReference = useCallback((paths: string[]) => {
+    chatInputRef.current?.insertReferences(paths);
+  }, []);
+
+  const handleInsertSlashCommand = useCallback((command: string) => {
+    chatInputRef.current?.insertSlashCommand(command);
+  }, []);
+
+  const handleOpenSettings = useCallback((tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => {
+    setWorkspaceConfigInitialTab(tab);
+    setShowWorkspaceConfig(true);
   }, []);
 
   // Cron task management hook
@@ -395,43 +411,41 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reload when project MCP config changes
   }, [currentProject?.mcpEnabledServers]);
 
-  // Load enabled agents on mount and sync to backend
-  useEffect(() => {
-    const loadAndSyncAgents = async () => {
-      try {
-        const response = await apiGet<{ success: boolean; agents: Record<string, { description: string; prompt: string }> }>('/api/agents/enabled');
-        if (response.success && response.agents) {
-          setEnabledAgents(response.agents);
-          // Sync to backend for SDK injection
-          await apiPost('/api/agents/set', { agents: response.agents });
-          if (isDebugMode()) {
-            console.log('[Chat] Agents synced:', Object.keys(response.agents).join(', ') || 'none');
-          }
+  // Load enabled agents and sync to backend
+  const loadAndSyncAgents = useCallback(async () => {
+    try {
+      const response = await apiGet<{ success: boolean; agents: Record<string, { description: string; prompt: string; model?: string; scope?: 'user' | 'project' }> }>('/api/agents/enabled');
+      if (response.success && response.agents) {
+        setEnabledAgents(response.agents);
+        // Sync to backend for SDK injection
+        await apiPost('/api/agents/set', { agents: response.agents });
+        if (isDebugMode()) {
+          console.log('[Chat] Agents synced:', Object.keys(response.agents).join(', ') || 'none');
         }
-      } catch (err) {
-        console.error('[Chat] Failed to load agents:', err);
       }
-    };
-    loadAndSyncAgents();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only load once on mount
-  }, []);
+    } catch (err) {
+      console.error('[Chat] Failed to load agents:', err);
+    }
+  }, [apiGet, apiPost]);
 
   // Load skills/commands for sidebar display
-  useEffect(() => {
-    const loadSkillsAndCommands = async () => {
-      try {
-        const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string }> }>('/api/commands');
-        if (response.success && response.commands) {
-          setEnabledSkills(response.commands.filter(c => c.source === 'skill').map(c => ({ name: c.name, description: c.description })));
-          setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description })));
-        }
-      } catch (err) {
-        console.error('[Chat] Failed to load skills/commands:', err);
+  const loadSkillsAndCommands = useCallback(async () => {
+    try {
+      const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string; scope?: 'user' | 'project' }> }>('/api/commands');
+      if (response.success && response.commands) {
+        setEnabledSkills(response.commands.filter(c => c.source === 'skill').map(c => ({ name: c.name, description: c.description, scope: c.scope })));
+        setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description, scope: c.scope })));
       }
-    };
+    } catch (err) {
+      console.error('[Chat] Failed to load skills/commands:', err);
+    }
+  }, [apiGet]);
+
+  // Load capabilities on mount and when workspace config changes (e.g. skill copied, settings saved)
+  useEffect(() => {
+    loadAndSyncAgents();
     loadSkillsAndCommands();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only load once on mount
-  }, []);
+  }, [loadAndSyncAgents, loadSkillsAndCommands, workspaceRefreshTrigger]);
 
   // Sync workspace MCP to project config when it changes
   useEffect(() => {
@@ -888,10 +902,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             onOpenConfig={() => setShowWorkspaceConfig(true)}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
             isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
-            onInsertReference={(paths) => chatInputRef.current?.insertReferences(paths)}
+            onInsertReference={handleInsertReference}
             enabledAgents={enabledAgents}
             enabledSkills={enabledSkills}
             enabledCommands={enabledCommands}
+            onInsertSlashCommand={handleInsertSlashCommand}
+            onOpenSettings={handleOpenSettings}
           />
         </div>
       )}
@@ -900,8 +916,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
       {showWorkspaceConfig && (
         <WorkspaceConfigPanel
           agentDir={agentDir}
-          onClose={() => setShowWorkspaceConfig(false)}
+          onClose={() => {
+            setShowWorkspaceConfig(false);
+            setWorkspaceConfigInitialTab(undefined);
+            // Refresh capabilities data in case settings were changed
+            setWorkspaceRefreshTrigger(prev => prev + 1);
+          }}
           refreshKey={workspaceRefreshKey}
+          initialTab={workspaceConfigInitialTab}
         />
       )}
 

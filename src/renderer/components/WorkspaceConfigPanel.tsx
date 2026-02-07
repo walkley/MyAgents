@@ -24,16 +24,18 @@ interface WorkspaceConfigPanelProps {
     onClose: () => void;
     /** External refresh key from parent - when changed, triggers list refresh */
     refreshKey?: number;
+    /** Initial tab to show when opening */
+    initialTab?: Tab;
 }
 
-type Tab = 'claude-md' | 'skills-commands' | 'agents';
+export type Tab = 'claude-md' | 'skills-commands' | 'agents';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
     | { type: 'command'; name: string; scope: 'user' | 'project' }
     | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
 
-export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0 }: WorkspaceConfigPanelProps) {
+export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab }: WorkspaceConfigPanelProps) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
@@ -43,7 +45,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         toastRef.current = toast;
     }, [toast]);
 
-    const [activeTab, setActiveTab] = useState<Tab>('claude-md');
+    const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? 'claude-md');
     const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
     const [internalRefreshKey, setInternalRefreshKey] = useState(0);
 

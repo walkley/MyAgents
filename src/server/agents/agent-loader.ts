@@ -114,16 +114,19 @@ export function writeWorkspaceConfig(agentDir: string, config: AgentWorkspaceCon
  * 4. Filter disabled agents, merge (local takes priority)
  * 5. Convert to SDK AgentDefinition format
  */
+type SdkAgentDef = ReturnType<typeof toSdkAgentDefinition>;
+type EnabledAgentDef = SdkAgentDef & { scope: 'user' | 'project' };
+
 export function loadEnabledAgents(
     projectAgentsDir: string,
     userAgentsDir: string,
-): Record<string, { description: string; prompt: string; tools?: string[]; disallowedTools?: string[]; model?: 'sonnet' | 'opus' | 'haiku' | 'inherit'; skills?: string[]; maxTurns?: number }> {
+): Record<string, EnabledAgentDef> {
     // Read workspace config for enable/disable state
     // Use the project root (parent of .claude/) as the config base
     const projectRoot = projectAgentsDir ? projectAgentsDir.replace(/[/\\]\.claude[/\\]agents\/?$/, '') : '';
     const wsConfig = projectRoot ? readWorkspaceConfig(projectRoot) : { local: {}, global_refs: {} };
 
-    const result: Record<string, ReturnType<typeof toSdkAgentDefinition>> = {};
+    const result: Record<string, EnabledAgentDef> = {};
 
     // Scan local agents
     if (projectAgentsDir && existsSync(projectAgentsDir)) {
@@ -135,7 +138,7 @@ export function loadEnabledAgents(
             const content = readFileSync(agent.path, 'utf-8');
             const { frontmatter, body } = parseFullAgentContent(content);
             const agentName = frontmatter.name || agent.folderName;
-            result[agentName] = toSdkAgentDefinition(frontmatter, body);
+            result[agentName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'project' };
         }
     }
 
@@ -155,7 +158,7 @@ export function loadEnabledAgents(
             const resolvedName = frontmatter.name || agent.folderName;
             // Double check local priority with resolved name
             if (result[resolvedName]) continue;
-            result[resolvedName] = toSdkAgentDefinition(frontmatter, body);
+            result[resolvedName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'user' };
         }
     }
 

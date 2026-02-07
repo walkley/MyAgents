@@ -174,6 +174,7 @@ export default function MonacoEditor({
         },
         bracketPairColorization: { enabled: false },
         contextmenu: false,
+        dragAndDrop: false,
         quickSuggestions: false,
         suggestOnTriggerCharacters: false,
         acceptSuggestionOnEnter: 'off' as const,
