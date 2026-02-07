@@ -5,7 +5,7 @@
 //! 2. Bun Sidecar → Claude Agent SDK → Anthropic API
 //!
 //! Configuration is read from `~/.myagents/config.json` and can be enabled/disabled
-//! via Settings > About > Developer Mode > Proxy Settings.
+//! via Settings > General > Network Proxy.
 //!
 //! Note: Localhost connections always bypass proxy (NO_PROXY is automatically set).
 

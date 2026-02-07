@@ -188,7 +188,7 @@ export function isValidProxyHost(host: string): boolean {
 }
 
 /**
- * Network proxy settings (developer feature)
+ * Network proxy settings (General settings)
  */
 export interface ProxySettings {
   enabled: boolean;
@@ -231,7 +231,7 @@ export interface AppConfig {
   // Environment variables for MCP servers that require config (e.g., API keys)
   mcpServerEnv?: Record<string, Record<string, string>>;
 
-  // ===== Network Proxy (Developer) =====
+  // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
   proxySettings?: ProxySettings;
 }
