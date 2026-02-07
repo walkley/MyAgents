@@ -9,15 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.11] - 2026-02-06
 
-### Changed
-- **统一 Session ID 架构**：新 session 使用 `crypto.randomUUID()` 生成 UUID，通过 SDK 0.2.33 的 `sessionId` 参数让 SDK 直接使用我们的 ID，消除双 ID 映射
-- 升级 Claude Agent SDK 到 0.2.33
+### Added
+- **Sub-Agent 能力管理**：为 AI 配备多种"专家角色"，模型自主判断何时委派
+  - 支持全局 Agent（`~/.myagents/agents/`）和项目 Agent（`.claude/agents/`）双层管理
+  - Agent 定义文件与 Claude Code 格式完全兼容（Markdown + YAML Frontmatter）
+  - 可配置工具限制、模型选择、权限模式、最大轮次等
+  - 项目工作区支持引入全局 Agent（引用机制，实时同步）
+  - 启用/禁用控制，禁用的 Agent 不注入 SDK
+  - 从 Claude Code 同步全局 Agent
+- **Chat 侧边栏「Agent 能力」面板**：展示当前项目已启用的 Sub-Agents / Skills / Commands
+  - 折叠/展开面板，按类型分组显示
+  - 悬停查看描述，点击 Skill/Command 插入到输入框
+  - 右键菜单快速跳转设置页
+- **预置内置技能**：开箱即用 6 个常用技能
+  - docx（Word 文档）、pdf、pptx（PPT）、xlsx（Excel）、skill-creator（技能创建向导）、summarize（内容摘要）
+  - 首次启动自动种子到 `~/.myagents/skills/`，不覆盖用户已有内容
+- **全局技能启用/禁用**：Settings 技能列表支持 toggle 开关
+  - 禁用的技能不出现在 `/` 斜杠命令和能力面板中
+  - 状态持久化到 `~/.myagents/skills-config.json`
 
-### Technical
-- `SessionMetadata` 新增 `unifiedSession` 标记，区分新旧 session
-- `sessionId` 和 `resume` 参数互斥传递（SDK 约束）
-- 旧 session 完全兼容，通过 `sdkSessionId` 字段回退
-- 新增技术文档：[Session ID 架构](./specs/tech_docs/session_id_architecture.md)
+### Changed
+- **统一 Session ID 架构**：通过 SDK 0.2.33 新特性消除双 ID 映射，新 session 在产品层和 SDK 层使用同一 ID
+- 升级 Claude Agent SDK 到 0.2.34
+- Settings 页面新增 Agents 分区，与 Skills 平级
+- WorkspaceConfigPanel 新增 Agents Tab
 
 ---
 
