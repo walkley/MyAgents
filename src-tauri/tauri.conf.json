@@ -54,7 +54,8 @@
     "resources": {
       "../src-tauri/resources/server-dist.js": "server-dist.js",
       "../src-tauri/resources/claude-agent-sdk": "claude-agent-sdk",
-      "../src/shared": "shared"
+      "../src/shared": "shared",
+      "../bundled-skills": "bundled-skills"
     },
     "externalBin": [
       "binaries/bun"

@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
 import { basename, dirname, join, relative, resolve, extname } from 'path';
 import { tmpdir } from 'os';
@@ -94,6 +94,7 @@ import {
   clearSystemPromptConfig,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
+import { getScriptDir } from './utils/runtime';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -257,6 +258,129 @@ async function ensureAgentDir(dir: string): Promise<string> {
   }
   return resolved;
 }
+
+// ============= SKILLS CONFIG & SEED =============
+
+interface SkillsConfig {
+  seeded: string[];
+  disabled: string[];
+}
+
+function getSkillsConfigPath(): string {
+  const homeDir = getHomeDirOrNull() || '';
+  return join(homeDir, '.myagents', 'skills-config.json');
+}
+
+function readSkillsConfig(): SkillsConfig {
+  const configPath = getSkillsConfigPath();
+  const defaults: SkillsConfig = { seeded: [], disabled: [] };
+  try {
+    if (existsSync(configPath)) {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+      return {
+        seeded: Array.isArray(raw?.seeded) ? raw.seeded : defaults.seeded,
+        disabled: Array.isArray(raw?.disabled) ? raw.disabled : defaults.disabled,
+      };
+    }
+  } catch (err) {
+    console.warn('[skills-config] Error reading config:', err);
+  }
+  return defaults;
+}
+
+function writeSkillsConfig(config: SkillsConfig): void {
+  const configPath = getSkillsConfigPath();
+  try {
+    const dir = dirname(configPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[skills-config] Error writing config:', err);
+  }
+}
+
+/**
+ * Resolve bundled-skills directory.
+ * - Production (macOS): Contents/Resources/bundled-skills/
+ * - Production (Windows): <install-dir>/bundled-skills/
+ * - Development: <project-root>/bundled-skills/
+ */
+function resolveBundledSkillsDir(): string | null {
+  const scriptDir = getScriptDir();
+
+  // Production: bundled-skills is alongside server-dist.js in Resources
+  const prodPath = resolve(scriptDir, 'bundled-skills');
+  if (existsSync(prodPath)) return prodPath;
+
+  // Development: bundled-skills is at project root
+  // In dev, scriptDir is something like <project>/src/server/utils
+  // Walk up to find bundled-skills at project root
+  let dir = scriptDir;
+  for (let i = 0; i < 5; i++) {
+    const devPath = resolve(dir, 'bundled-skills');
+    if (existsSync(devPath)) return devPath;
+    dir = dirname(dir);
+  }
+
+  return null;
+}
+
+/**
+ * Seed bundled skills to ~/.myagents/skills/ on first launch.
+ * Only copies skills that haven't been seeded before (tracked in skills-config.json).
+ */
+function seedBundledSkills(): void {
+  try {
+    const bundledDir = resolveBundledSkillsDir();
+    if (!bundledDir) {
+      console.log('[seed] Bundled skills directory not found, skipping seed');
+      return;
+    }
+
+    const config = readSkillsConfig();
+    const homeDir = getHomeDirOrNull() || '';
+    const userSkillsDir = join(homeDir, '.myagents', 'skills');
+
+    if (!existsSync(userSkillsDir)) mkdirSync(userSkillsDir, { recursive: true });
+
+    const bundledFolders = readdirSync(bundledDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    let changed = false;
+    for (const folder of bundledFolders) {
+      if (config.seeded.includes(folder)) continue;
+
+      const src = join(bundledDir, folder);
+      const dst = join(userSkillsDir, folder);
+      // Skip if destination already exists (don't overwrite user's custom content)
+      if (existsSync(dst)) {
+        config.seeded.push(folder);
+        changed = true;
+        console.log(`[seed] Skipped existing folder: ${folder}`);
+        continue;
+      }
+      try {
+        cpSync(src, dst, { recursive: true });
+        console.log(`[seed] Seeded skill: ${folder}`);
+      } catch (err) {
+        console.warn(`[seed] Failed to seed skill ${folder}:`, err);
+        continue;
+      }
+
+      config.seeded.push(folder);
+      changed = true;
+    }
+
+    if (changed) {
+      writeSkillsConfig(config);
+    }
+  } catch (err) {
+    console.error('[seed] Error seeding bundled skills:', err);
+  }
+}
+
+// ============= END SKILLS CONFIG & SEED =============
 
 /**
  * Validate that the agent directory is safe to access.
@@ -461,6 +585,9 @@ async function main() {
   // Clean up old logs (30+ days)
   cleanupOldLogs();        // Agent session logs
   cleanupOldUnifiedLogs(); // Unified console logs
+
+  // Seed bundled skills to ~/.myagents/skills/ on first launch
+  seedBundledSkills();
 
   initializeAgent(currentAgentDir, initialPrompt);
 
@@ -2436,12 +2563,15 @@ async function main() {
 
           // ===== SKILLS SCANNING =====
           // Helper function to scan skills from a directory
+          const skillsConfig = readSkillsConfig();
           const scanSkillsDir = (skillsDir: string, scope: 'user' | 'project') => {
             if (!existsSync(skillsDir)) return;
             try {
               const skillFolders = readdirSync(skillsDir, { withFileTypes: true });
               for (const folder of skillFolders) {
                 if (!folder.isDirectory()) continue;
+                // Skip disabled user-level skills in slash commands
+                if (scope === 'user' && skillsConfig.disabled.includes(folder.name)) continue;
                 const skillMdPath = join(skillsDir, folder.name, 'SKILL.md');
                 if (!existsSync(skillMdPath)) continue;
 
@@ -2624,6 +2754,7 @@ async function main() {
       if (pathname === '/api/skills' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const skillsConfigForList = readSkillsConfig();
           const skills: Array<{
             name: string;
             description: string;
@@ -2631,6 +2762,7 @@ async function main() {
             path: string;
             folderName: string;
             author?: string;
+            enabled?: boolean;
           }> = [];
 
           const scanSkills = (dir: string, scopeType: 'user' | 'project') => {
@@ -2651,6 +2783,7 @@ async function main() {
                   path: skillMdPath,
                   folderName: folder.name,
                   author,
+                  enabled: scopeType === 'project' ? true : !skillsConfigForList.disabled.includes(folder.name),
                 });
               }
             } catch (scanError) {
@@ -2670,6 +2803,31 @@ async function main() {
           console.error('[api/skills] Error:', error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Failed to list skills' },
+            500
+          );
+        }
+      }
+
+      // POST /api/skill/toggle-enable - Enable/disable a user-level skill
+      // NOTE: This route MUST be before /api/skill/:name to avoid being captured by the wildcard
+      if (pathname === '/api/skill/toggle-enable' && request.method === 'POST') {
+        try {
+          const { folderName, enabled } = await request.json() as { folderName: string; enabled: boolean };
+          if (!folderName || typeof folderName !== 'string') {
+            return jsonResponse({ success: false, error: 'Invalid folderName' }, 400);
+          }
+          const config = readSkillsConfig();
+          if (enabled) {
+            config.disabled = config.disabled.filter(n => n !== folderName);
+          } else {
+            if (!config.disabled.includes(folderName)) config.disabled.push(folderName);
+          }
+          writeSkillsConfig(config);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/skill/toggle-enable] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to toggle skill' },
             500
           );
         }

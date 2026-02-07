@@ -245,6 +245,23 @@ export default function GlobalSkillsPanel() {
         }
     }, [newItemName, newItemDescription]);
 
+    // Toggle skill enable/disable state
+    const handleToggleEnabled = useCallback(async (folderName: string, enabled: boolean) => {
+        try {
+            const res = await apiPostJson<{ success: boolean; error?: string }>('/api/skill/toggle-enable', { folderName, enabled });
+            if (res.success) {
+                // Update local state for responsive UI
+                setSkills(prev => prev.map(s =>
+                    s.folderName === folderName ? { ...s, enabled } : s
+                ));
+            } else {
+                toastRef.current.error(res.error || '操作失败');
+            }
+        } catch {
+            toastRef.current.error('操作失败');
+        }
+    }, []);
+
     const handleItemSaved = useCallback((autoClose?: boolean) => {
         setRefreshKey(k => k + 1);
         if (autoClose) {
@@ -342,6 +359,7 @@ export default function GlobalSkillsPanel() {
                                 key={skill.folderName}
                                 skill={skill}
                                 onClick={() => setViewState({ type: 'skill-detail', name: skill.folderName })}
+                                onToggleEnabled={handleToggleEnabled}
                             />
                         ))}
                     </div>

@@ -42,7 +42,6 @@ export default function SessionHistoryDropdown({
     const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
-    statsSessionRef.current = statsSession;
 
     // Map sessionId to active cron task (running only)
     const sessionCronTaskMap = useMemo(() => {
@@ -54,10 +53,11 @@ export default function SessionHistoryDropdown({
         );
     }, [cronTasks]);
 
-    // Keep onClose ref updated via effect
+    // Keep refs updated via effect (not during render)
     useEffect(() => {
         onCloseRef.current = onClose;
-    }, [onClose]);
+        statsSessionRef.current = statsSession;
+    }, [onClose, statsSession]);
 
     // Load sessions and cron tasks when opened
     useEffect(() => {

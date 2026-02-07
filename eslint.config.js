@@ -13,8 +13,8 @@ const gitignorePath = fileURLToPath(new URL('./.gitignore', import.meta.url));
 export default defineConfig(
   includeIgnoreFile(gitignorePath),
   {
-    // Additional ignore patterns for Electron build output
-    ignores: ['**/out/**', '**/dist/**', '**/.vite/**', '**/coverage/**', '**/.eslintcache']
+    // Additional ignore patterns for build output and bundled resources
+    ignores: ['**/out/**', '**/dist/**', '**/.vite/**', '**/coverage/**', '**/.eslintcache', 'bundled-skills/**']
   },
   js.configs.recommended,
   ...ts.configs.recommended,
