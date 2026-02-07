@@ -65,10 +65,11 @@ export default function SessionStatsModal({
         <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
             style={{ padding: '4vh 4vw' }}
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={handleBackdropClick}
         >
             <div
-                className="glass-panel flex max-h-full w-full max-w-2xl flex-col overflow-hidden"
+                className="glass-panel flex max-h-full w-full max-w-2xl select-text flex-col overflow-hidden"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}

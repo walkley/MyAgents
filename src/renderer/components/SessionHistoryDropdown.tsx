@@ -41,6 +41,7 @@ export default function SessionHistoryDropdown({
 
     const dropdownRef = useRef<HTMLDivElement>(null);
     const onCloseRef = useRef(onClose);
+    const statsSessionRef = useRef(statsSession);
 
     // Map sessionId to active cron task (running only)
     const sessionCronTaskMap = useMemo(() => {
@@ -52,10 +53,11 @@ export default function SessionHistoryDropdown({
         );
     }, [cronTasks]);
 
-    // Keep onClose ref updated via effect
+    // Keep refs updated via effect (not during render)
     useEffect(() => {
         onCloseRef.current = onClose;
-    }, [onClose]);
+        statsSessionRef.current = statsSession;
+    }, [onClose, statsSession]);
 
     // Load sessions and cron tasks when opened
     useEffect(() => {
@@ -105,6 +107,8 @@ export default function SessionHistoryDropdown({
         if (!isOpen) return;
 
         const handleClickOutside = (e: MouseEvent) => {
+            // Don't close dropdown when stats modal is open - modal handles its own close
+            if (statsSessionRef.current) return;
             if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
                 onCloseRef.current();
             }
@@ -269,13 +273,13 @@ export default function SessionHistoryDropdown({
                                             <>
                                                 <button
                                                     className="flex h-6 items-center justify-center rounded bg-[var(--error)] px-2 text-xs font-medium text-white transition-colors hover:bg-[var(--error)]/80"
-                                                    onClick={handleConfirmDelete}
+                                                    onClick={(e) => { e.stopPropagation(); handleConfirmDelete(); }}
                                                 >
                                                     确认
                                                 </button>
                                                 <button
                                                     className="flex h-6 items-center justify-center rounded bg-[var(--paper-contrast)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
-                                                    onClick={handleCancelDelete}
+                                                    onClick={(e) => { e.stopPropagation(); handleCancelDelete(); }}
                                                 >
                                                     取消
                                                 </button>

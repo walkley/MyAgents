@@ -1205,7 +1205,7 @@ pub fn start_tab_sidecar<R: Runtime>(
                 // Log as error since user explicitly enabled proxy but config is invalid
                 log::error!(
                     "[sidecar] Invalid proxy configuration: {}. \
-                     Please check Settings > About > Developer Mode > Proxy Settings. \
+                     Please check Settings > General > Network Proxy. \
                      Sidecar will start without proxy.",
                     e
                 );

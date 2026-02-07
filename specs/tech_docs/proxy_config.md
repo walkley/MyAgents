@@ -7,7 +7,7 @@
 
 ## 📋 概述
 
-MyAgents 支持统一的代理配置，用于访问外部服务（Anthropic API、CDN 等）。代理配置存储在 `~/.myagents/config.json` 中，由应用的「设置 - 关于 - 开发者模式」管理。
+MyAgents 支持统一的代理配置，用于访问外部服务（Anthropic API、CDN 等）。代理配置存储在 `~/.myagents/config.json` 中，由应用的「设置 - 通用 - 网络代理」管理。
 
 ---
 

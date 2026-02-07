@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardR
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabStateOptional } from '@/context/TabContext';
-import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, type ModelEntity } from '@/config/types';
+import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
@@ -99,6 +99,8 @@ export interface SimpleChatInputHandle {
   processDroppedFilePaths?: (paths: string[]) => Promise<void>;
   /** Insert @references at cursor position or end of input */
   insertReferences: (paths: string[]) => void;
+  /** Insert a /slash-command at cursor position or end of input */
+  insertSlashCommand: (command: string) => void;
   /** Set the input value directly (used for restoring content after cron stop) */
   setValue: (value: string) => void;
 }
@@ -687,6 +689,25 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     }, 0);
   }, [textareaRef]);
 
+  // Insert /slash-command at cursor position or end of input
+  const insertSlashCommand = useCallback((command: string) => {
+    if (!command.trim()) return;
+    const currentInput = inputValueRef.current;
+    const slashCmd = `/${command}`;
+    const cursorPos = textareaRef.current?.selectionStart ?? currentInput.length;
+    const before = currentInput.slice(0, cursorPos);
+    const after = currentInput.slice(cursorPos);
+    const needsSpaceBefore = before.length > 0 && !/[\s]$/.test(before);
+    const needsSpaceAfter = after.length > 0 && !/^[\s]/.test(after);
+    const newValue = `${before}${needsSpaceBefore ? ' ' : ''}${slashCmd}${needsSpaceAfter ? ' ' : ''}${after}`;
+    setInputValue(newValue);
+    const newCursorPos = cursorPos + (needsSpaceBefore ? 1 : 0) + slashCmd.length + (needsSpaceAfter ? 1 : 0);
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos);
+    }, 0);
+  }, [textareaRef]);
+
   // Set input value directly (for restoring content after cron stop)
   const setValue = useCallback((value: string) => {
     setInputValue(value);
@@ -700,8 +721,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     processDroppedFiles,
     processDroppedFilePaths,
     insertReferences,
+    insertSlashCommand,
     setValue,
-  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, setValue]);
+  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
 
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1581,11 +1603,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                       )}
                     </div>
                     {/* Dynamic models from provider.models */}
-                    {(provider?.models ?? [
-                      { model: 'claude-sonnet-4-5-20250929', modelName: 'Claude Sonnet 4.5', modelSeries: 'claude' },
-                      { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
-                      { model: 'claude-opus-4-5-20251101', modelName: 'Claude Opus 4.5', modelSeries: 'claude' },
-                    ] as ModelEntity[]).map((model) => (
+                    {(provider?.models ?? PRESET_PROVIDERS[0].models).map((model) => (
                       <button
                         key={model.model}
                         type="button"

@@ -16,6 +16,7 @@ export interface SkillItem {
     path: string;
     folderName: string;
     author?: string;
+    enabled?: boolean;  // Global skill enable/disable state (always true for project skills)
 }
 
 /**

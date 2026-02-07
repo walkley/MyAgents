@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
 import { basename, dirname, join, relative, resolve, extname } from 'path';
 import { tmpdir } from 'os';
@@ -16,6 +16,9 @@ import {
   type CommandFrontmatter
 } from '../shared/slashCommands';
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
+import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
+import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
+import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
 import {
   setCronTaskContext,
@@ -84,12 +87,14 @@ import {
   switchToSession,
   setMcpServers,
   getMcpServers,
+  setAgents,
   resetSession,
   waitForSessionIdle,
   setSystemPromptConfig,
   clearSystemPromptConfig,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
+import { getScriptDir } from './utils/runtime';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -253,6 +258,129 @@ async function ensureAgentDir(dir: string): Promise<string> {
   }
   return resolved;
 }
+
+// ============= SKILLS CONFIG & SEED =============
+
+interface SkillsConfig {
+  seeded: string[];
+  disabled: string[];
+}
+
+function getSkillsConfigPath(): string {
+  const homeDir = getHomeDirOrNull() || '';
+  return join(homeDir, '.myagents', 'skills-config.json');
+}
+
+function readSkillsConfig(): SkillsConfig {
+  const configPath = getSkillsConfigPath();
+  const defaults: SkillsConfig = { seeded: [], disabled: [] };
+  try {
+    if (existsSync(configPath)) {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+      return {
+        seeded: Array.isArray(raw?.seeded) ? raw.seeded : defaults.seeded,
+        disabled: Array.isArray(raw?.disabled) ? raw.disabled : defaults.disabled,
+      };
+    }
+  } catch (err) {
+    console.warn('[skills-config] Error reading config:', err);
+  }
+  return defaults;
+}
+
+function writeSkillsConfig(config: SkillsConfig): void {
+  const configPath = getSkillsConfigPath();
+  try {
+    const dir = dirname(configPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[skills-config] Error writing config:', err);
+  }
+}
+
+/**
+ * Resolve bundled-skills directory.
+ * - Production (macOS): Contents/Resources/bundled-skills/
+ * - Production (Windows): <install-dir>/bundled-skills/
+ * - Development: <project-root>/bundled-skills/
+ */
+function resolveBundledSkillsDir(): string | null {
+  const scriptDir = getScriptDir();
+
+  // Production: bundled-skills is alongside server-dist.js in Resources
+  const prodPath = resolve(scriptDir, 'bundled-skills');
+  if (existsSync(prodPath)) return prodPath;
+
+  // Development: bundled-skills is at project root
+  // In dev, scriptDir is something like <project>/src/server/utils
+  // Walk up to find bundled-skills at project root
+  let dir = scriptDir;
+  for (let i = 0; i < 5; i++) {
+    const devPath = resolve(dir, 'bundled-skills');
+    if (existsSync(devPath)) return devPath;
+    dir = dirname(dir);
+  }
+
+  return null;
+}
+
+/**
+ * Seed bundled skills to ~/.myagents/skills/ on first launch.
+ * Only copies skills that haven't been seeded before (tracked in skills-config.json).
+ */
+function seedBundledSkills(): void {
+  try {
+    const bundledDir = resolveBundledSkillsDir();
+    if (!bundledDir) {
+      console.log('[seed] Bundled skills directory not found, skipping seed');
+      return;
+    }
+
+    const config = readSkillsConfig();
+    const homeDir = getHomeDirOrNull() || '';
+    const userSkillsDir = join(homeDir, '.myagents', 'skills');
+
+    if (!existsSync(userSkillsDir)) mkdirSync(userSkillsDir, { recursive: true });
+
+    const bundledFolders = readdirSync(bundledDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+
+    let changed = false;
+    for (const folder of bundledFolders) {
+      if (config.seeded.includes(folder)) continue;
+
+      const src = join(bundledDir, folder);
+      const dst = join(userSkillsDir, folder);
+      // Skip if destination already exists (don't overwrite user's custom content)
+      if (existsSync(dst)) {
+        config.seeded.push(folder);
+        changed = true;
+        console.log(`[seed] Skipped existing folder: ${folder}`);
+        continue;
+      }
+      try {
+        cpSync(src, dst, { recursive: true });
+        console.log(`[seed] Seeded skill: ${folder}`);
+      } catch (err) {
+        console.warn(`[seed] Failed to seed skill ${folder}:`, err);
+        continue;
+      }
+
+      config.seeded.push(folder);
+      changed = true;
+    }
+
+    if (changed) {
+      writeSkillsConfig(config);
+    }
+  } catch (err) {
+    console.error('[seed] Error seeding bundled skills:', err);
+  }
+}
+
+// ============= END SKILLS CONFIG & SEED =============
 
 /**
  * Validate that the agent directory is safe to access.
@@ -457,6 +585,9 @@ async function main() {
   // Clean up old logs (30+ days)
   cleanupOldLogs();        // Agent session logs
   cleanupOldUnifiedLogs(); // Unified console logs
+
+  // Seed bundled skills to ~/.myagents/skills/ on first launch
+  seedBundledSkills();
 
   initializeAgent(currentAgentDir, initialPrompt);
 
@@ -2432,12 +2563,15 @@ async function main() {
 
           // ===== SKILLS SCANNING =====
           // Helper function to scan skills from a directory
+          const skillsConfig = readSkillsConfig();
           const scanSkillsDir = (skillsDir: string, scope: 'user' | 'project') => {
             if (!existsSync(skillsDir)) return;
             try {
               const skillFolders = readdirSync(skillsDir, { withFileTypes: true });
               for (const folder of skillFolders) {
                 if (!folder.isDirectory()) continue;
+                // Skip disabled user-level skills in slash commands
+                if (scope === 'user' && skillsConfig.disabled.includes(folder.name)) continue;
                 const skillMdPath = join(skillsDir, folder.name, 'SKILL.md');
                 if (!existsSync(skillMdPath)) continue;
 
@@ -2620,6 +2754,7 @@ async function main() {
       if (pathname === '/api/skills' && request.method === 'GET') {
         try {
           const scope = url.searchParams.get('scope') || 'all';
+          const skillsConfigForList = readSkillsConfig();
           const skills: Array<{
             name: string;
             description: string;
@@ -2627,6 +2762,7 @@ async function main() {
             path: string;
             folderName: string;
             author?: string;
+            enabled?: boolean;
           }> = [];
 
           const scanSkills = (dir: string, scopeType: 'user' | 'project') => {
@@ -2647,6 +2783,7 @@ async function main() {
                   path: skillMdPath,
                   folderName: folder.name,
                   author,
+                  enabled: scopeType === 'project' ? true : !skillsConfigForList.disabled.includes(folder.name),
                 });
               }
             } catch (scanError) {
@@ -2666,6 +2803,31 @@ async function main() {
           console.error('[api/skills] Error:', error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Failed to list skills' },
+            500
+          );
+        }
+      }
+
+      // POST /api/skill/toggle-enable - Enable/disable a user-level skill
+      // NOTE: This route MUST be before /api/skill/:name to avoid being captured by the wildcard
+      if (pathname === '/api/skill/toggle-enable' && request.method === 'POST') {
+        try {
+          const { folderName, enabled } = await request.json() as { folderName: string; enabled: boolean };
+          if (!folderName || typeof folderName !== 'string') {
+            return jsonResponse({ success: false, error: 'Invalid folderName' }, 400);
+          }
+          const config = readSkillsConfig();
+          if (enabled) {
+            config.disabled = config.disabled.filter(n => n !== folderName);
+          } else {
+            if (!config.disabled.includes(folderName)) config.disabled.push(folderName);
+          }
+          writeSkillsConfig(config);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/skill/toggle-enable] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to toggle skill' },
             500
           );
         }
@@ -3584,6 +3746,425 @@ async function main() {
             { success: false, error: error instanceof Error ? error.message : 'Failed to create command' },
             500
           );
+        }
+      }
+
+      // ============= SUB-AGENTS API =============
+
+      const userAgentsBaseDir = join(homeDir, '.myagents', 'agents');
+
+      // Helper: Get project agents directory (supports explicit agentDir parameter)
+      const getProjectAgentsDir = (queryAgentDir: string | null) => {
+        if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+          queryAgentDir = null;
+        }
+        const effectiveAgentDir = queryAgentDir || currentAgentDir;
+        const hasValidDir = effectiveAgentDir && existsSync(effectiveAgentDir);
+        return hasValidDir ? join(effectiveAgentDir, '.claude', 'agents') : '';
+      };
+
+      // GET /api/agents - List all agents (with scope filter)
+      if (pathname === '/api/agents' && request.method === 'GET') {
+        try {
+          const scope = url.searchParams.get('scope') || 'all';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const projAgentsDir = getProjectAgentsDir(queryAgentDir);
+
+          let agents: Array<{ name: string; description: string; scope: 'user' | 'project'; path: string; folderName: string }> = [];
+
+          if ((scope === 'all' || scope === 'project') && projAgentsDir) {
+            agents = agents.concat(scanAgents(projAgentsDir, 'project'));
+          }
+          if (scope === 'all' || scope === 'user') {
+            agents = agents.concat(scanAgents(userAgentsBaseDir, 'user'));
+          }
+
+          return jsonResponse({ success: true, agents });
+        } catch (error) {
+          console.error('[api/agents] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to list agents' },
+            500
+          );
+        }
+      }
+
+      // GET /api/agent/sync-check - Check if there are agents to sync from Claude Code
+      // NOTE: Must be before /api/agent/:name to avoid wildcard capture
+      if (pathname === '/api/agent/sync-check' && request.method === 'GET') {
+        try {
+          const claudeAgentsDir = join(homeDir, '.claude', 'agents');
+          if (!existsSync(claudeAgentsDir)) {
+            return jsonResponse({ canSync: false, count: 0, folders: [] });
+          }
+
+          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.'))
+            .map(entry => entry.name);
+
+          if (claudeFolders.length === 0) {
+            return jsonResponse({ canSync: false, count: 0, folders: [] });
+          }
+
+          const myagentsFolders = new Set<string>();
+          if (existsSync(userAgentsBaseDir)) {
+            const entries = readdirSync(userAgentsBaseDir, { withFileTypes: true });
+            for (const entry of entries) {
+              if (entry.isDirectory()) myagentsFolders.add(entry.name);
+            }
+          }
+
+          const newFolders = claudeFolders.filter(f => !myagentsFolders.has(f) && isValidFolderName(f));
+          const conflictFolders = claudeFolders.filter(f => myagentsFolders.has(f) && isValidFolderName(f));
+          const allValidFolders = claudeFolders.filter(f => isValidFolderName(f));
+          return jsonResponse({
+            canSync: allValidFolders.length > 0,
+            count: allValidFolders.length,
+            folders: allValidFolders,
+            newFolders,
+            conflictFolders,
+          });
+        } catch (error) {
+          console.error('[api/agent/sync-check] Error:', error);
+          return jsonResponse({ canSync: false, count: 0, folders: [], error: error instanceof Error ? error.message : 'Check failed' }, 500);
+        }
+      }
+
+      // POST /api/agent/sync-from-claude - Sync agents from Claude Code to MyAgents
+      // NOTE: Must be before /api/agent/:name to avoid wildcard capture
+      // Supports conflict handling: mode = 'skip' (default) | 'overwrite'
+      if (pathname === '/api/agent/sync-from-claude' && request.method === 'POST') {
+        try {
+          const payload = await request.json().catch(() => ({})) as { mode?: 'skip' | 'overwrite'; folders?: string[] };
+          const conflictMode = payload.mode || 'skip';
+          const selectedFolders = payload.folders; // Optional: sync only these specific folders
+
+          const claudeAgentsDir = join(homeDir, '.claude', 'agents');
+          if (!existsSync(claudeAgentsDir)) {
+            return jsonResponse({ success: false, synced: 0, failed: 0, skipped: 0, overwritten: 0, error: 'Claude Code agents directory not found' }, 404);
+          }
+
+          const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.') && isValidFolderName(entry.name))
+            .map(entry => entry.name);
+
+          // Filter to selected folders if specified
+          const foldersToSync = selectedFolders
+            ? claudeFolders.filter(f => selectedFolders.includes(f))
+            : claudeFolders;
+
+          if (foldersToSync.length === 0) {
+            return jsonResponse({ success: true, synced: 0, failed: 0, skipped: 0, overwritten: 0, message: 'No agents to sync' });
+          }
+
+          if (!existsSync(userAgentsBaseDir)) {
+            mkdirSync(userAgentsBaseDir, { recursive: true });
+          }
+
+          let synced = 0;
+          let failed = 0;
+          let skipped = 0;
+          let overwritten = 0;
+          const errors: string[] = [];
+          const conflicts: string[] = [];
+
+          for (const folder of foldersToSync) {
+            const srcDir = join(claudeAgentsDir, folder);
+            const destDir = join(userAgentsBaseDir, folder);
+            const alreadyExists = existsSync(destDir);
+
+            if (alreadyExists) {
+              if (conflictMode === 'skip') {
+                skipped++;
+                conflicts.push(folder);
+                continue;
+              }
+              // overwrite: remove existing first
+              rmSync(destDir, { recursive: true, force: true });
+              overwritten++;
+            }
+
+            try {
+              copyDirRecursiveSync(srcDir, destDir, '[api/agent/sync-from-claude]');
+              synced++;
+
+              // Auto-generate _meta.json from frontmatter
+              const mdPath = join(destDir, `${folder}.md`);
+              const metaPath = join(destDir, '_meta.json');
+              if (existsSync(mdPath) && !existsSync(metaPath)) {
+                try {
+                  const content = readFileSync(mdPath, 'utf-8');
+                  const { name: agentName } = parseAgentFrontmatter(content);
+                  const meta = {
+                    displayName: agentName || folder,
+                    author: 'claude-code-sync',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                  };
+                  writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+                } catch { /* _meta.json generation is optional */ }
+              }
+            } catch (copyError) {
+              failed++;
+              errors.push(`${folder}: ${copyError instanceof Error ? copyError.message : 'Unknown error'}`);
+              console.error(`[api/agent/sync-from-claude] Failed to copy "${folder}":`, copyError);
+            }
+          }
+
+          return jsonResponse({
+            success: true,
+            synced,
+            failed,
+            skipped,
+            overwritten,
+            conflicts,
+            errors: errors.length > 0 ? errors : undefined,
+          });
+        } catch (error) {
+          console.error('[api/agent/sync-from-claude] Error:', error);
+          return jsonResponse({ success: false, synced: 0, failed: 0, error: error instanceof Error ? error.message : 'Sync failed' }, 500);
+        }
+      }
+
+      // POST /api/agent/create - Create new agent
+      // NOTE: Must be before /api/agent/:name to avoid wildcard capture
+      if (pathname === '/api/agent/create' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            name: string;
+            scope: 'user' | 'project';
+            description?: string;
+            agentDir?: string;
+          };
+
+          if (!payload.name) {
+            return jsonResponse({ success: false, error: 'Name is required' }, 400);
+          }
+
+          const folderName = sanitizeFolderName(payload.name);
+          const agentsDir = getProjectAgentsDir(payload.agentDir || null);
+          const baseDir = payload.scope === 'user' ? userAgentsBaseDir : agentsDir;
+
+          if (!baseDir) {
+            return jsonResponse({ success: false, error: '请先设置工作目录' }, 400);
+          }
+
+          const agentFolderDir = join(baseDir, folderName);
+          if (existsSync(agentFolderDir)) {
+            return jsonResponse({ success: false, error: 'Agent already exists' }, 409);
+          }
+
+          mkdirSync(agentFolderDir, { recursive: true });
+
+          const frontmatter: Partial<AgentFrontmatter> = {
+            name: payload.name,
+            description: payload.description || `Description for ${payload.name}`,
+          };
+          const body = `# ${payload.name}\n\nDescribe your agent instructions here.`;
+          const content = serializeAgentContent(frontmatter, body);
+
+          const agentPath = join(agentFolderDir, `${folderName}.md`);
+          writeFileSync(agentPath, content, 'utf-8');
+
+          // Create default _meta.json
+          writeAgentMeta(agentFolderDir, {
+            displayName: payload.name,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+
+          return jsonResponse({ success: true, path: agentPath, folderName });
+        } catch (error) {
+          console.error('[api/agent/create] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to create agent' }, 500);
+        }
+      }
+
+      // GET /api/agents/workspace-config - Read workspace agent config
+      if (pathname === '/api/agents/workspace-config' && request.method === 'GET') {
+        try {
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const effectiveDir = (queryAgentDir && isValidAgentDir(queryAgentDir).valid ? queryAgentDir : currentAgentDir) || '';
+          if (!effectiveDir) {
+            return jsonResponse({ success: true, config: { local: {}, global_refs: {} } });
+          }
+          const config = readWorkspaceConfig(effectiveDir);
+          return jsonResponse({ success: true, config });
+        } catch (error) {
+          console.error('[api/agents/workspace-config] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to read config' }, 500);
+        }
+      }
+
+      // PUT /api/agents/workspace-config - Update workspace agent config
+      if (pathname === '/api/agents/workspace-config' && request.method === 'PUT') {
+        try {
+          const payload = await request.json() as { config: AgentWorkspaceConfig; agentDir?: string };
+          const effectiveDir = (payload.agentDir && isValidAgentDir(payload.agentDir).valid ? payload.agentDir : currentAgentDir) || '';
+          if (!effectiveDir) {
+            return jsonResponse({ success: false, error: '请先设置工作目录' }, 400);
+          }
+          writeWorkspaceConfig(effectiveDir, payload.config);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/agents/workspace-config] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to update config' }, 500);
+        }
+      }
+
+      // GET /api/agents/enabled - Get enabled agents as SDK definitions
+      if (pathname === '/api/agents/enabled' && request.method === 'GET') {
+        try {
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const effectiveDir = (queryAgentDir && isValidAgentDir(queryAgentDir).valid ? queryAgentDir : currentAgentDir) || '';
+          const projAgentsDir = effectiveDir ? join(effectiveDir, '.claude', 'agents') : '';
+          const agents = loadEnabledAgents(projAgentsDir, userAgentsBaseDir);
+          return jsonResponse({ success: true, agents });
+        } catch (error) {
+          console.error('[api/agents/enabled] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to load agents' }, 500);
+        }
+      }
+
+      // POST /api/agents/set - Set agents and trigger session resume
+      if (pathname === '/api/agents/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { agents: Record<string, unknown> };
+          // The payload.agents is already in SDK AgentDefinition format
+          setAgents(payload.agents as Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/agents/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set agents' }, 500);
+        }
+      }
+
+      // GET /api/agent/:name - Get agent detail
+      if (pathname.startsWith('/api/agent/') && request.method === 'GET') {
+        try {
+          const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
+          if (!isValidItemName(agentName)) {
+            return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
+          }
+          const scope = url.searchParams.get('scope') || 'project';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const agentsDir = getProjectAgentsDir(queryAgentDir);
+          const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
+          const agentPath = join(baseDir, agentName, `${agentName}.md`);
+
+          if (!existsSync(agentPath)) {
+            return jsonResponse({ success: false, error: 'Agent not found' }, 404);
+          }
+
+          const content = readFileSync(agentPath, 'utf-8');
+          const { frontmatter, body } = parseFullAgentContent(content);
+          const meta = readAgentMeta(join(baseDir, agentName));
+
+          return jsonResponse({
+            success: true,
+            agent: {
+              name: frontmatter.name || agentName,
+              folderName: agentName,
+              path: agentPath,
+              scope,
+              frontmatter,
+              body,
+              ...(meta ? { meta } : {}),
+            }
+          });
+        } catch (error) {
+          console.error('[api/agent] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to get agent' }, 500);
+        }
+      }
+
+      // PUT /api/agent/:name - Update agent (with optional folder rename)
+      if (pathname.startsWith('/api/agent/') && request.method === 'PUT') {
+        try {
+          const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
+          if (!isValidItemName(agentName)) {
+            return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
+          }
+          const payload = await request.json() as {
+            scope: 'user' | 'project';
+            frontmatter: Partial<AgentFrontmatter>;
+            body: string;
+            newFolderName?: string;
+            agentDir?: string;
+            meta?: AgentMeta;
+          };
+
+          const agentsDir = getProjectAgentsDir(payload.agentDir || null);
+          const baseDir = payload.scope === 'user' ? userAgentsBaseDir : agentsDir;
+          let currentFolderName = agentName;
+          let agentFolderDir = join(baseDir, currentFolderName);
+          let agentPath = join(agentFolderDir, `${currentFolderName}.md`);
+
+          if (!existsSync(agentPath)) {
+            return jsonResponse({ success: false, error: 'Agent not found' }, 404);
+          }
+
+          // Handle folder rename if newFolderName is provided and different
+          if (payload.newFolderName && payload.newFolderName !== currentFolderName) {
+            const newFolderName = payload.newFolderName;
+            if (!isValidItemName(newFolderName)) {
+              return jsonResponse({ success: false, error: 'Invalid new folder name' }, 400);
+            }
+            const newAgentDir = join(baseDir, newFolderName);
+            if (existsSync(newAgentDir)) {
+              return jsonResponse({ success: false, error: `Agent 文件夹 "${newFolderName}" 已存在，请使用其他名称` }, 409);
+            }
+
+            const content = serializeAgentContent(payload.frontmatter, payload.body);
+            renameSync(agentFolderDir, newAgentDir);
+            agentFolderDir = newAgentDir;
+            currentFolderName = newFolderName;
+
+            // Rename the .md file inside to match new folder name
+            const oldMdPath = join(agentFolderDir, `${agentName}.md`);
+            agentPath = join(agentFolderDir, `${newFolderName}.md`);
+            if (existsSync(oldMdPath)) {
+              renameSync(oldMdPath, agentPath);
+            }
+
+            writeFileSync(agentPath, content, 'utf-8');
+            if (payload.meta) writeAgentMeta(agentFolderDir, { ...payload.meta, updatedAt: new Date().toISOString() });
+            return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
+          }
+
+          // No rename, just update content
+          const content = serializeAgentContent(payload.frontmatter, payload.body);
+          writeFileSync(agentPath, content, 'utf-8');
+          if (payload.meta) writeAgentMeta(agentFolderDir, { ...payload.meta, updatedAt: new Date().toISOString() });
+          return jsonResponse({ success: true, path: agentPath, folderName: currentFolderName });
+        } catch (error) {
+          console.error('[api/agent] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to update agent' }, 500);
+        }
+      }
+
+      // DELETE /api/agent/:name - Delete agent
+      if (pathname.startsWith('/api/agent/') && request.method === 'DELETE') {
+        try {
+          const agentName = decodeURIComponent(pathname.replace('/api/agent/', ''));
+          if (!isValidItemName(agentName)) {
+            return jsonResponse({ success: false, error: 'Invalid agent name' }, 400);
+          }
+          const scope = url.searchParams.get('scope') || 'project';
+          const queryAgentDir = url.searchParams.get('agentDir');
+          const agentsDir = getProjectAgentsDir(queryAgentDir);
+          const baseDir = scope === 'user' ? userAgentsBaseDir : agentsDir;
+          const agentFolderDir = join(baseDir, agentName);
+
+          if (!existsSync(agentFolderDir)) {
+            return jsonResponse({ success: false, error: 'Agent not found' }, 404);
+          }
+
+          rmSync(agentFolderDir, { recursive: true, force: true });
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/agent] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to delete agent' }, 500);
         }
       }
 

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.11] - 2026-02-06
+
+### Added
+- **Sub-Agent 能力管理**：为 AI 配备多种"专家角色"，模型自主判断何时委派
+  - 支持全局 Agent（`~/.myagents/agents/`）和项目 Agent（`.claude/agents/`）双层管理
+  - Agent 定义文件与 Claude Code 格式完全兼容（Markdown + YAML Frontmatter）
+  - 可配置工具限制、模型选择、权限模式、最大轮次等
+  - 项目工作区支持引入全局 Agent（引用机制，实时同步）
+  - 启用/禁用控制，禁用的 Agent 不注入 SDK
+  - 从 Claude Code 同步全局 Agent
+- **Chat 侧边栏「Agent 能力」面板**：展示当前项目已启用的 Sub-Agents / Skills / Commands
+  - 折叠/展开面板，按类型分组显示
+  - 悬停查看描述，点击 Skill/Command 插入到输入框
+  - 右键菜单快速跳转设置页
+- **预置内置技能**：开箱即用 6 个常用技能
+  - docx（Word 文档）、pdf、pptx（PPT）、xlsx（Excel）、skill-creator（技能创建向导）、summarize（内容摘要）
+  - 首次启动自动种子到 `~/.myagents/skills/`，不覆盖用户已有内容
+- **全局技能启用/禁用**：Settings 技能列表支持 toggle 开关
+  - 禁用的技能不出现在 `/` 斜杠命令和能力面板中
+  - 状态持久化到 `~/.myagents/skills-config.json`
+
+### Changed
+- **统一 Session ID 架构**：通过 SDK 0.2.33 新特性消除双 ID 映射，新 session 在产品层和 SDK 层使用同一 ID
+- 升级 Claude Agent SDK 到 0.2.34
+- **SDK 预热机制**：打开 Tab 时提前启动 SDK 子进程和 MCP 服务器，消除首次发送消息的冷启动延迟
+  - 500ms 防抖批量处理快速配置变更
+  - 预热失败自动重试（最多 3 次），配置变更时重置
+  - 预热会话对前端不可见，首条消息时无缝切换为活跃状态
+- **MCP 版本锁定**：预设 MCP 服务（Playwright）锁定到具体版本号，避免每次启动的 npm 注册表查询延迟（2-5s）
+- **网络代理设置移至「通用」**：从「关于 - 开发者模式」移至「通用设置」，普通用户可直接使用
+- Settings 页面新增 Agents 分区，与 Skills 平级
+- WorkspaceConfigPanel 新增 Agents Tab
+
+---
+
 ## [0.1.10] - 2026-02-05
 
 ### Added

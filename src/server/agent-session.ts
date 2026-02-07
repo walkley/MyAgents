@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
-import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
@@ -131,6 +131,12 @@ const toolResultIndexToId: Map<number, string> = new Map();
 const childToolToParent: Map<string, string> = new Map();
 let messageSequence = 0;
 let sessionId = randomUUID();
+
+// Pre-warm: start SDK subprocess + MCP servers before user sends first message
+let isPreWarming = false;
+let preWarmTimer: ReturnType<typeof setTimeout> | null = null;
+let preWarmFailCount = 0;
+const PRE_WARM_MAX_RETRIES = 3;
 let systemInitInfo: SystemInitInfo | null = null;
 type MessageQueueItem = {
   message: SDKUserMessage['message'];
@@ -280,6 +286,10 @@ type SdkMcpServerConfig = {
 // null = never set (use config file fallback), [] = explicitly set to none
 let currentMcpServers: McpServerDefinition[] | null = null;
 
+// Current sub-agent definitions (set per-query via /api/agents/set)
+// null = no agents configured, {} = explicitly set to none
+let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
+
 // Preset MCP servers (same as renderer/config/types.ts)
 const PRESET_MCP_SERVERS: McpServerDefinition[] = [
   {
@@ -374,6 +384,10 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
     }
     shouldAbortSession = true;
   }
+
+  // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
+  preWarmFailCount = 0; // Config changed — reset retry tracking
+  schedulePreWarm();
 }
 
 /**
@@ -382,6 +396,68 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
  */
 export function getMcpServers(): McpServerDefinition[] | null {
   return currentMcpServers;
+}
+
+/**
+ * Set the sub-agent definitions for subsequent queries
+ * If agents changed and a session is running, it will be restarted with resume
+ */
+export function setAgents(agents: Record<string, AgentDefinition>): void {
+  const currentNames = currentAgentDefinitions ? Object.keys(currentAgentDefinitions).sort().join(',') : '';
+  const newNames = Object.keys(agents).sort().join(',');
+  const agentsChanged = currentNames !== newNames;
+
+  currentAgentDefinitions = agents;
+  if (isDebugMode) {
+    console.log(`[agent] Sub-agents set: ${newNames || 'none'}`);
+  }
+
+  // If agents changed and session is running, restart with resume
+  if (agentsChanged && querySession) {
+    if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
+    if (systemInitInfo?.session_id) {
+      resumeSessionId = systemInitInfo.session_id;
+      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
+    }
+    shouldAbortSession = true;
+  }
+
+  // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
+  preWarmFailCount = 0; // Config changed — reset retry tracking
+  schedulePreWarm();
+}
+
+/**
+ * Schedule a pre-warm of the SDK subprocess and MCP servers.
+ * Uses debounce to batch rapid config changes during tab initialization.
+ * The pre-warmed session is invisible to the frontend until the first user message.
+ */
+function schedulePreWarm(): void {
+  if (preWarmTimer) clearTimeout(preWarmTimer);
+  if (!agentDir) return;
+
+  // Stop retrying after consecutive failures to avoid infinite loop
+  if (preWarmFailCount >= PRE_WARM_MAX_RETRIES) {
+    console.warn(`[agent] pre-warm skipped: ${preWarmFailCount} consecutive failures, giving up`);
+    return;
+  }
+
+  preWarmTimer = setTimeout(() => {
+    preWarmTimer = null;
+    if (!isSessionActive() && agentDir) {
+      console.log('[agent] pre-warming SDK subprocess + MCP servers');
+      startStreamingSession(true).catch((error) => {
+        console.error('[agent] pre-warm failed:', error);
+      });
+    }
+  }, 500);
+}
+
+/**
+ * Get current sub-agent definitions
+ */
+export function getAgents(): Record<string, AgentDefinition> | null {
+  return currentAgentDefinitions;
 }
 
 /**
@@ -459,6 +535,33 @@ function buildSettingSources(): ('user' | 'project')[] {
   return ['project'];
 }
 
+// Known MCP package versions — pin these to avoid npm registry lookups on every startup
+// Update these when upgrading MCP server dependencies
+const PINNED_MCP_VERSIONS: Record<string, string> = {
+  '@playwright/mcp': '0.0.64',
+};
+
+/**
+ * Replace @latest tags with pinned versions for known MCP packages.
+ * This eliminates the npm registry network check that adds 2-5s latency per startup.
+ * Unknown packages keep their original version specifiers.
+ */
+function pinMcpPackageVersions(args: string[]): string[] {
+  return args.map(arg => {
+    // Match patterns like @playwright/mcp@latest or @scope/pkg@latest
+    const latestMatch = arg.match(/^(@?[^@]+)@latest$/);
+    if (latestMatch) {
+      const pkgName = latestMatch[1];
+      const pinned = PINNED_MCP_VERSIONS[pkgName];
+      if (pinned) {
+        console.log(`[agent] MCP version pinned: ${arg} → ${pkgName}@${pinned}`);
+        return `${pkgName}@${pinned}`;
+      }
+    }
+    return arg;
+  });
+}
+
 /**
  * Convert McpServerDefinition to SDK mcpServers format
  *
@@ -515,6 +618,10 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       // For npx commands, try to use bundled bun (bun x is npx-compatible)
       // This ensures the app works without requiring Node.js/npm
       if (command === 'npx') {
+        // Pin @latest to known versions to avoid npm registry check on every startup
+        // This eliminates 2-5s of network latency per MCP server per session
+        args = pinMcpPackageVersions(args);
+
         // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
         const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
         const runtime = getBundledRuntimePath();
@@ -775,6 +882,12 @@ async function checkToolPermission(
   // 1. Check if tool is always allowed for this mode
   if (isToolInList(toolName, rules.allowedTools)) {
     console.debug(`[permission] ${toolName}: auto-allowed by mode rules`);
+    return 'allow';
+  }
+
+  // 1.5. Auto-allow Task tool when sub-agents are configured (needed for delegation)
+  if (toolName === 'Task' && currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0) {
+    console.debug(`[permission] ${toolName}: auto-allowed for sub-agent delegation`);
     return 'allow';
   }
 
@@ -1866,9 +1979,17 @@ export async function resetSession(): Promise<void> {
   resumeSessionId = undefined;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
+  // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
+  currentAgentDefinitions = null;
+
   // 5. Clear SDK ready signal state (same as switchToSession)
   _sdkReadyResolve = null;
   _sdkReadyPromise = null;
+
+  // 6. Clear pre-warm state
+  isPreWarming = false;
+  preWarmFailCount = 0;
+  if (preWarmTimer) { clearTimeout(preWarmTimer); preWarmTimer = null; }
 
   // 7. Reset processing state
   shouldAbortSession = false;
@@ -1882,6 +2003,9 @@ export async function resetSession(): Promise<void> {
   broadcast('chat:init', { agentDir, sessionState: 'idle', hasInitialPrompt: false });
 
   console.log('[agent] resetSession: complete, new sessionId=' + sessionId);
+
+  // Pre-warm with fresh session so next message is fast
+  schedulePreWarm();
 }
 
 /**
@@ -1902,6 +2026,9 @@ export function initializeAgent(nextAgentDir: string, initialPrompt?: string | n
   console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'}`);
   if (hasInitialPrompt) {
     void enqueueUserMessage(initialPrompt!.trim());
+  } else {
+    // Pre-warm subprocess + MCP so first message is fast
+    schedulePreWarm();
   }
 }
 
@@ -1952,6 +2079,11 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   _sdkReadyResolve = null;
   _sdkReadyPromise = null;
 
+  // Clear pre-warm state from old session
+  isPreWarming = false;
+  preWarmFailCount = 0;
+  if (preWarmTimer) { clearTimeout(preWarmTimer); preWarmTimer = null; }
+
   // Preserve target sessionId so new messages are saved to the same session
   sessionId = targetSessionId as `${string}-${string}-${string}-${string}-${string}`;
 
@@ -2001,14 +2133,18 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   }
 
   // Set SDK session ID for resume (if available)
-  if (sessionMeta.sdkSessionId) {
+  if (sessionMeta.unifiedSession && sessionMeta.sdkSessionId) {
+    // 统一后的 session：sdkSessionId === id，直接用 id
+    resumeSessionId = sessionMeta.id;
+    console.log(`[agent] switchToSession: will resume unified session ${resumeSessionId}`);
+  } else if (sessionMeta.sdkSessionId) {
+    // 统一前的旧 session：用存储的 SDK ID
     resumeSessionId = sessionMeta.sdkSessionId;
-    console.log(`[agent] switchToSession: will resume SDK session ${resumeSessionId}`);
+    console.log(`[agent] switchToSession: will resume pre-unified SDK session ${resumeSessionId}`);
   } else {
-    // No SDK session_id means this is an old session without resume support
-    // The conversation will start fresh, but messages will be saved to the same session
+    // 无 SDK ID 的老旧 session 或从未 query 过的 session
     resumeSessionId = undefined;
-    console.warn(`[agent] switchToSession: no SDK session_id available (old session), will start fresh conversation`);
+    console.warn(`[agent] switchToSession: no SDK session_id available, will start fresh`);
   }
 
   // Update agentDir from session
@@ -2023,6 +2159,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   hasInitialPrompt = true;
 
   console.log(`[agent] switchToSession: ready, agentDir=${agentDir}, hasResume=${!!resumeSessionId}`);
+
+  // Pre-warm with resumed session so subprocess + MCP are ready before user types
+  schedulePreWarm();
   return true;
 }
 
@@ -2170,6 +2309,21 @@ export async function enqueueUserMessage(
   }
 
   console.log(`[agent] enqueue user message len=${trimmed.length} images=${images?.length ?? 0} mode=${currentPermissionMode}`);
+
+  // Transition from pre-warm to active session
+  if (isPreWarming) {
+    isPreWarming = false;
+    console.log('[agent] pre-warm → active, first user message');
+    // Replay buffered system_init so frontend gets tools/session info
+    if (systemInitInfo) {
+      broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+    }
+  }
+  // Cancel any pending pre-warm timer (user is sending a message now)
+  if (preWarmTimer) {
+    clearTimeout(preWarmTimer);
+    preWarmTimer = null;
+  }
   setSessionState('running');
 
   // Save images to disk and create attachment records
@@ -2340,7 +2494,7 @@ export async function interruptCurrentResponse(): Promise<boolean> {
   }
 }
 
-async function startStreamingSession(): Promise<void> {
+async function startStreamingSession(preWarm = false): Promise<void> {
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
   }
@@ -2349,13 +2503,17 @@ async function startStreamingSession(): Promise<void> {
     return;
   }
 
+  isPreWarming = preWarm;
   const env = buildClaudeSessionEnv();
-  console.log(`[agent] start session cwd=${agentDir}`);
+  console.log(`[agent] ${preWarm ? 'pre-warm' : 'start'} session cwd=${agentDir}`);
   shouldAbortSession = false;
   resetAbortFlag();
   isProcessing = true;
   streamIndexToToolId.clear();
-  setSessionState('running');
+  // Don't broadcast 'running' during pre-warm — session is invisible to frontend
+  if (!preWarm) {
+    setSessionState('running');
+  }
 
   let resolveTermination: () => void;
   sessionTerminationPromise = new Promise((resolve) => {
@@ -2365,15 +2523,25 @@ async function startStreamingSession(): Promise<void> {
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
     const resumeFrom = resumeSessionId;
-    resumeSessionId = undefined; // Clear after use
+    // Only clear resumeSessionId for non-pre-warm sessions.
+    // During pre-warm, preserve it so a retry after failure can still resume.
+    if (!preWarm) {
+      resumeSessionId = undefined;
+    }
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}${resumeFrom ? `, resume: ${resumeFrom}` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
 
     querySession = query({
       prompt: messageGenerator(),
       options: {
-        resume: resumeFrom, // Resume from previous SDK session if set
+        // sessionId 和 resume 互斥（SDK 约束）
+        // 新 session：传 sessionId 让 SDK 使用我们的 UUID
+        // Resume：传 resume 恢复对话上下文
+        ...(resumeFrom
+          ? { resume: resumeFrom }
+          : { sessionId: sessionId }
+        ),
         maxThinkingTokens: 32_000,
         // Only use project-level settings from .claude/ directory
         // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
@@ -2400,6 +2568,10 @@ async function startStreamingSession(): Promise<void> {
         cwd: agentDir,
         includePartialMessages: true,
         mcpServers: buildSdkMcpServers(),
+        // Sub-agents: inject custom agent definitions if configured
+        // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
+        ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
+          ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
         // Custom permission handling - check rules and prompt user for unknown tools
         // Only effective when permissionMode is 'default'
         canUseTool: async (toolName, input, options) => {
@@ -2485,14 +2657,28 @@ async function startStreamingSession(): Promise<void> {
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {
         systemInitInfo = nextSystemInit;
-        // Include our sessionId (for SessionStore) alongside SDK's system info
-        // Frontend needs our sessionId to match against history records
-        broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+        // Buffer system_init during pre-warm; replay when first user message arrives
+        if (!isPreWarming) {
+          broadcast('chat:system-init', { info: systemInitInfo, sessionId });
+        } else {
+          // Pre-warm succeeded — subprocess + MCP ready
+          preWarmFailCount = 0;
+          resumeSessionId = undefined; // Session started successfully, safe to clear
+          console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
+        }
 
-        // Save SDK session_id for future resume functionality
+        // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
-          updateSessionMetadata(sessionId, { sdkSessionId: nextSystemInit.session_id });
-          console.log(`[agent] SDK session_id saved: ${nextSystemInit.session_id}`);
+          const isUnified = nextSystemInit.session_id === sessionId;
+          updateSessionMetadata(sessionId, {
+            sdkSessionId: nextSystemInit.session_id,
+            unifiedSession: isUnified,
+          });
+          if (isUnified) {
+            console.log(`[agent] SDK session_id confirmed unified: ${nextSystemInit.session_id}`);
+          } else {
+            console.log(`[agent] SDK session_id saved (pre-unified): ${nextSystemInit.session_id} (our: ${sessionId})`);
+          }
         }
       }
 
@@ -3017,18 +3203,33 @@ async function startStreamingSession(): Promise<void> {
       userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
     }
 
-    broadcast('chat:message-error', userFacingError);
-    handleMessageError(errorMessage);
-    setSessionState('error');
+    // Don't broadcast errors to frontend during pre-warm
+    if (!isPreWarming) {
+      broadcast('chat:message-error', userFacingError);
+      handleMessageError(errorMessage);
+      setSessionState('error');
+    } else {
+      preWarmFailCount++;
+    }
   } finally {
+    const wasPreWarming = isPreWarming;
+    isPreWarming = false;
     isProcessing = false;
     querySession = null;
-    if (sessionState !== 'error') {
-      setSessionState('idle');
+    // Don't broadcast state changes from pre-warm sessions
+    if (!wasPreWarming) {
+      if (sessionState !== 'error') {
+        setSessionState('idle');
+      }
     }
     // Clear cron task context after session ends
     clearCronTaskContext();
     resolveTermination!();
+
+    // If pre-warm was aborted (e.g., config change), re-warm with updated config
+    if (wasPreWarming) {
+      schedulePreWarm();
+    }
   }
 }
 

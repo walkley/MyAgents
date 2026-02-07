@@ -188,7 +188,7 @@ export function isValidProxyHost(host: string): boolean {
 }
 
 /**
- * Network proxy settings (developer feature)
+ * Network proxy settings (General settings)
  */
 export interface ProxySettings {
   enabled: boolean;
@@ -231,7 +231,7 @@ export interface AppConfig {
   // Environment variables for MCP servers that require config (e.g., API keys)
   mcpServerEnv?: Record<string, Record<string, string>>;
 
-  // ===== Network Proxy (Developer) =====
+  // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
   proxySettings?: ProxySettings;
 }
@@ -252,6 +252,14 @@ export interface ProjectSettings {
 }
 
 // Preset providers with ModelEntity structure
+/** Anthropic 官方预设模型（订阅和 API 共用） */
+const ANTHROPIC_MODELS: ModelEntity[] = [
+  { model: 'claude-sonnet-4-5-20250929', modelName: 'Claude Sonnet 4.5', modelSeries: 'claude' },
+  { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
+  { model: 'claude-opus-4-5-20251101', modelName: 'Claude Opus 4.5', modelSeries: 'claude' },
+  { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
+];
+
 export const PRESET_PROVIDERS: Provider[] = [
   {
     id: 'anthropic-sub',
@@ -262,11 +270,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'claude-sonnet-4-5-20250929',
     isBuiltin: true,
     config: {},
-    models: [
-      { model: 'claude-sonnet-4-5-20250929', modelName: 'Claude Sonnet 4.5', modelSeries: 'claude' },
-      { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
-      { model: 'claude-opus-4-5-20251101', modelName: 'Claude Opus 4.5', modelSeries: 'claude' },
-    ],
+    models: ANTHROPIC_MODELS,
   },
   {
     id: 'anthropic-api',
@@ -280,11 +284,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.anthropic.com',
     },
-    models: [
-      { model: 'claude-sonnet-4-5-20250929', modelName: 'Claude Sonnet 4.5', modelSeries: 'claude' },
-      { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
-      { model: 'claude-opus-4-5-20251101', modelName: 'Claude Opus 4.5', modelSeries: 'claude' },
-    ],
+    models: ANTHROPIC_MODELS,
   },
   {
     id: 'deepseek',

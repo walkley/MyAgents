@@ -34,6 +34,16 @@ export const API_ENDPOINTS = {
     // CLAUDE.md
     CLAUDE_MD: '/api/claude-md',
 
+    // Sub-Agents
+    AGENTS_LIST: '/api/agents',
+    AGENT_DETAIL: (name: string) => `/api/agent/${encodeURIComponent(name)}`,
+    AGENT_CREATE: '/api/agent/create',
+    AGENT_SYNC_CHECK: '/api/agent/sync-check',
+    AGENT_SYNC_FROM_CLAUDE: '/api/agent/sync-from-claude',
+    AGENTS_WORKSPACE_CONFIG: '/api/agents/workspace-config',
+    AGENTS_ENABLED: '/api/agents/enabled',
+    AGENTS_SET: '/api/agents/set',
+
     // Agent
     OPEN_IN_FINDER: '/agent/open-in-finder',
 } as const;
@@ -46,6 +56,8 @@ export const FS_PATHS = {
     USER_COMMANDS_DIR: '~/.myagents/commands/',
     PROJECT_SKILLS_DIR: '.claude/skills/',
     PROJECT_COMMANDS_DIR: '.claude/commands/',
+    USER_AGENTS_DIR: '~/.myagents/agents/',
+    PROJECT_AGENTS_DIR: '.claude/agents/',
 } as const;
 
 /**

@@ -424,10 +424,15 @@ export default function SkillsCommandsList({
 
 // Skill Card Component - Card style with title badge
 // Exported for reuse in GlobalSkillsPanel
-export function SkillCard({ skill, onClick }: { skill: SkillItem; onClick: () => void }) {
+export function SkillCard({ skill, onClick, onToggleEnabled }: {
+    skill: SkillItem;
+    onClick: () => void;
+    onToggleEnabled?: (folderName: string, enabled: boolean) => void;
+}) {
+    const isDisabled = skill.enabled === false;
     return (
         <div
-            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
+            className={`group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm ${isDisabled ? 'opacity-50' : ''}`}
             onClick={onClick}
         >
             {/* Title with badge */}
@@ -441,9 +446,29 @@ export function SkillCard({ skill, onClick }: { skill: SkillItem; onClick: () =>
             <p className="mb-3 line-clamp-2 flex-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
                 {skill.description || '暂无描述'}
             </p>
-            {/* Footer - only show content when author exists, but maintain height */}
-            <div className="flex h-4 items-center text-xs text-[var(--ink-muted)]/70">
-                {skill.author && <span>{skill.author}</span>}
+            {/* Footer - author + optional enable/disable toggle */}
+            <div className="flex h-5 items-center justify-between text-xs text-[var(--ink-muted)]/70">
+                <span>{skill.author || ''}</span>
+                {onToggleEnabled && (
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={!isDisabled}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleEnabled(skill.folderName, isDisabled);
+                        }}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+                            !isDisabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                        }`}
+                    >
+                        <span
+                            className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform ${
+                                !isDisabled ? 'translate-x-4' : 'translate-x-0.5'
+                            }`}
+                        />
+                    </button>
+                )}
             </div>
         </div>
     );
