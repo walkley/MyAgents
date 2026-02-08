@@ -48,3 +48,21 @@ export const ALLOWED_IMAGE_MIME_TYPES = [
 export function isImageMimeType(mimeType: string): boolean {
   return ALLOWED_IMAGE_MIME_TYPES.includes(mimeType) || mimeType.startsWith('image/');
 }
+
+/** Text-based file extensions that can be previewed in FilePreviewModal */
+export const PREVIEWABLE_EXTENSIONS = new Set([
+  'txt', 'md', 'json', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'scss',
+  'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'log', 'sh', 'bash',
+  'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'kt',
+  // Dotfiles (e.g., .gitignore -> extension is 'gitignore')
+  'gitignore', 'dockerignore', 'editorconfig', 'prettierrc', 'eslintrc',
+  'npmrc', 'nvmrc', 'env', 'local', 'example', 'development', 'production',
+]);
+
+/**
+ * Check if a filename can be previewed as text (code / markdown / plain text)
+ */
+export function isPreviewable(filename: string): boolean {
+  const ext = getFileExtension(filename);
+  return PREVIEWABLE_EXTENSIONS.has(ext);
+}
