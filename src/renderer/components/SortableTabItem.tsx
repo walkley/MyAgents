@@ -48,7 +48,7 @@ export default function SortableTabItem({
             style={style}
             data-tab-id={tab.id}
             className={`
-                group relative flex h-8 min-w-[100px] max-w-[160px] cursor-grab items-center gap-2 
+                group relative flex h-8 min-w-[100px] max-w-[160px] cursor-default items-center gap-2
                 rounded-lg px-3 transition-colors duration-150 flex-shrink-0
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
