@@ -79,6 +79,10 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
   const apiGetRef = useRef(apiGet);
   apiGetRef.current = apiGet;
 
+  // Guard against setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
+
   // ---------- Path cache ----------
   const pathCacheRef = useRef<Map<string, PathInfo>>(new Map());
   const pendingPathsRef = useRef<Set<string>>(new Set());
@@ -96,6 +100,16 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
     setCacheVersion(v => v + 1);
   }, [refreshTrigger]);
 
+  // Clean up batch timer on unmount
+  useEffect(() => {
+    return () => {
+      if (batchTimerRef.current) {
+        clearTimeout(batchTimerRef.current);
+        batchTimerRef.current = null;
+      }
+    };
+  }, []);
+
   // Flush pending paths to the backend
   const flushPendingPaths = useCallback(() => {
     const paths = Array.from(pendingPathsRef.current);
@@ -110,6 +124,7 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
           '/agent/check-paths',
           { paths },
         );
+        if (!isMountedRef.current) return;
         if (resp?.results) {
           for (const [p, info] of Object.entries(resp.results)) {
             pathCacheRef.current.set(p, info);
@@ -185,6 +200,7 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
             reader.onload = () => resolve(reader.result as string);
             reader.readAsDataURL(blob);
           });
+          if (!isMountedRef.current) return;
           openImagePreview(dataUrl, fileName);
         } catch (err) {
           console.error('[FileAction] Failed to load image:', err);
@@ -203,12 +219,14 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
         const resp = await apiGetRef.current<{ content: string; name: string; size: number; error?: string }>(
           `/agent/file?path=${encodeURIComponent(path)}`,
         );
+        if (!isMountedRef.current) return;
         if (resp.error) {
           setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: resp.error ?? 'Unknown error' } : null);
         } else {
           setPreviewFile(prev => prev ? { ...prev, content: resp.content, size: resp.size, name: resp.name, isLoading: false } : null);
         }
       } catch (err) {
+        if (!isMountedRef.current) return;
         setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: err instanceof Error ? err.message : 'Failed to load file' } : null);
       }
     })();

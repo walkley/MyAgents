@@ -5,7 +5,13 @@
  * so that only plausible candidates are sent to the backend for existence checks.
  */
 
-/** Common file extensions that strongly indicate a file path */
+/**
+ * Common file extensions that strongly indicate a file path.
+ *
+ * NOTE: This set is intentionally broader than PREVIEWABLE_EXTENSIONS in shared/fileTypes.ts.
+ * - PATH_EXTENSIONS: used for "does this look like a path?" heuristic (includes images, locks, etc.)
+ * - PREVIEWABLE_EXTENSIONS: used for "can we open this in FilePreviewModal?" (text-based only)
+ */
 const PATH_EXTENSIONS = new Set([
   // Web / JS / TS
   'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'html', 'css', 'scss', 'less', 'vue', 'svelte',
@@ -61,11 +67,17 @@ export function looksLikeFilePath(text: string): boolean {
   // Starts with ./ or ../ — very strong path signal
   if (text.startsWith('./') || text.startsWith('../')) return true;
 
-  // Contains path separator — strong signal
+  // Contains path separator — strong signal, but filter out common non-path patterns
+  // like "true/false", "yes/no", "input/output"
   if (text.includes('/') || text.includes('\\')) {
-    // But filter out things like "true/false" or common non-path patterns
-    // At least one segment should look file-like (has a dot or is a known dir name)
-    return true;
+    const segments = text.split(/[/\\]/).filter(Boolean);
+    // Single segment with separator (e.g., trailing slash) — still plausible
+    if (segments.length < 2) return true;
+    // At least one segment should contain a dot (extension / dotfile) OR
+    // the total path should be long enough to be a real path (> 5 chars)
+    const hasDot = segments.some(s => s.includes('.'));
+    if (hasDot || text.length > 5) return true;
+    return false;
   }
 
   // Has a file extension (e.g., "package.json", "index.ts")
