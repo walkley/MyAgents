@@ -6,9 +6,10 @@ use std::fs;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{MenuBuilder, MenuItemBuilder},
-    image::Image,
     Emitter, Manager, Runtime,
 };
+#[cfg(target_os = "macos")]
+use tauri::image::Image;
 
 /// Menu item IDs for tray right-click menu
 const MENU_OPEN: &str = "open";
@@ -44,7 +45,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
     let tray_icon = app.default_window_icon().unwrap().clone();
 
     // Build the tray icon
-    let mut tray_builder = TrayIconBuilder::new()
+    let tray_builder = TrayIconBuilder::new()
         .icon(tray_icon)
         .menu(&menu)
         .tooltip("MyAgents")
@@ -52,9 +53,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
 
     // On macOS, mark as template image so system can adjust colors for light/dark mode
     #[cfg(target_os = "macos")]
-    {
-        tray_builder = tray_builder.icon_as_template(true);
-    }
+    let tray_builder = tray_builder.icon_as_template(true);
 
     let _tray = tray_builder
         .on_menu_event(move |app, event| {

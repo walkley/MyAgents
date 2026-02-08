@@ -23,7 +23,7 @@ use sidecar::{
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tauri::{Emitter, Listener, Manager};
+use tauri::{Emitter, Listener};
 use tauri_plugin_autostart::MacosLauncher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -225,7 +225,7 @@ pub fn run() {
         .expect("error while building tauri application");
 
     // Run with event handler to catch Cmd+Q, Dock quit, and Dock click
-    app.run(move |app_handle, event| {
+    app.run(move |_app_handle, event| {
         match event {
             // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
             tauri::RunEvent::ExitRequested { .. } => {
@@ -241,7 +241,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 log::info!("[App] Dock icon clicked (Reopen), showing main window");
-                if let Some(window) = app_handle.get_webview_window("main") {
+                use tauri::Manager;
+                if let Some(window) = _app_handle.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.unminimize();
                     let _ = window.set_focus();
