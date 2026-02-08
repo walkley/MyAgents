@@ -6,6 +6,7 @@ import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/Director
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
+import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
@@ -819,18 +820,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           />
 
           {/* Message list with max-width */}
-          <MessageList
-            messages={messages}
-            isLoading={isLoading}
-            containerRef={messagesContainerRef}
-            bottomPadding={140}
-            pendingPermission={pendingPermission}
-            onPermissionDecision={(decision) => void respondPermission(decision)}
-            pendingAskUserQuestion={pendingAskUserQuestion}
-            onAskUserQuestionSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
-            onAskUserQuestionCancel={() => void respondAskUserQuestion(null)}
-            systemStatus={systemStatus}
-          />
+          <FileActionProvider
+            onInsertReference={handleInsertReference}
+            refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+          >
+            <MessageList
+              messages={messages}
+              isLoading={isLoading}
+              containerRef={messagesContainerRef}
+              bottomPadding={140}
+              pendingPermission={pendingPermission}
+              onPermissionDecision={(decision) => void respondPermission(decision)}
+              pendingAskUserQuestion={pendingAskUserQuestion}
+              onAskUserQuestionSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
+              onAskUserQuestionCancel={() => void respondAskUserQuestion(null)}
+              systemStatus={systemStatus}
+            />
+          </FileActionProvider>
 
           {/* Floating input with integrated cron task components */}
           <SimpleChatInput

@@ -1337,6 +1337,44 @@ async function main() {
         }
       }
 
+      // Batch check whether paths exist (for inline code path detection in AI output)
+      if (pathname === '/agent/check-paths' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { paths?: string[] };
+          const paths = payload?.paths;
+          if (!Array.isArray(paths)) {
+            return jsonResponse({ error: 'paths must be an array.' }, 400);
+          }
+          if (paths.length > 200) {
+            return jsonResponse({ error: 'Too many paths (max 200).' }, 400);
+          }
+          const results: Record<string, { exists: boolean; type: 'file' | 'dir' }> = {};
+          for (const p of paths) {
+            if (typeof p !== 'string' || !p) {
+              results[p] = { exists: false, type: 'file' };
+              continue;
+            }
+            const resolved = resolveAgentPath(currentAgentDir, p);
+            if (!resolved) {
+              results[p] = { exists: false, type: 'file' };
+              continue;
+            }
+            try {
+              const s = statSync(resolved);
+              results[p] = { exists: true, type: s.isDirectory() ? 'dir' : 'file' };
+            } catch {
+              results[p] = { exists: false, type: 'file' };
+            }
+          }
+          return jsonResponse({ results });
+        } catch (error) {
+          return jsonResponse(
+            { error: error instanceof Error ? error.message : 'check-paths failed' },
+            500
+          );
+        }
+      }
+
       if (pathname === '/agent/download' && request.method === 'GET') {
         const relativePath = url.searchParams.get('path') ?? '';
         if (!relativePath) {

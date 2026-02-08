@@ -7,7 +7,9 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
@@ -16,7 +18,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::proxy_config;
 
-// Ensure file descriptor limit is increased only once
+// Ensure file descriptor limit is increased only once (unix only)
+#[cfg(unix)]
 static RLIMIT_INIT: Once = Once::new();
 
 /// Increase file descriptor limit to prevent "low max file descriptors" error from Bun

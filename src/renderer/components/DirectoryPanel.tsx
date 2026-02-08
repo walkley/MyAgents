@@ -23,6 +23,7 @@ import { Tree } from 'react-arborist';
 import { useTabState } from '@/context/TabContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import type { DirectoryTreeNode, DirectoryTree, ExpandDirectoryResult } from '../../shared/dir-types';
+import { isImageFile, isPreviewable } from '../../shared/fileTypes';
 
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useToast } from '@/components/Toast';
@@ -92,21 +93,6 @@ type DialogState = {
   nodes?: DirectoryTreeNode[]; // for delete-multi
 } | null;
 
-// Previewable file extensions
-const PREVIEWABLE_EXTENSIONS = new Set([
-  'txt', 'md', 'json', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'scss',
-  'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'log', 'sh', 'bash',
-  'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'swift', 'kt',
-  // Dotfiles (e.g., .gitignore -> extension is 'gitignore')
-  'gitignore', 'dockerignore', 'editorconfig', 'prettierrc', 'eslintrc',
-  'npmrc', 'nvmrc', 'env', 'local', 'example', 'development', 'production'
-]);
-
-// Image file extensions
-const IMAGE_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'
-]);
-
 // Delay for single-click selection to allow double-click detection
 // Without this delay, React re-render from setSelectedNodes breaks onDoubleClick
 const SINGLE_CLICK_DELAY_MS = 250;
@@ -115,24 +101,6 @@ const SINGLE_CLICK_DELAY_MS = 250;
 // We use custom double-click detection because React's onDoubleClick is unreliable
 // when state updates cause re-renders between clicks
 const DOUBLE_CLICK_THRESHOLD_MS = 400;
-
-function getFileExtension(name: string): string {
-  const parts = name.split('.');
-  if (parts.length <= 1) {
-    return '';
-  }
-  return parts.pop() ?? '';
-}
-
-function isPreviewable(name: string): boolean {
-  const ext = getFileExtension(name).toLowerCase();
-  return PREVIEWABLE_EXTENSIONS.has(ext);
-}
-
-function isImageFile(name: string): boolean {
-  const ext = getFileExtension(name).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
-}
 
 function getFolderName(path: string): string {
   if (!path) return 'Workspace';
@@ -416,6 +384,30 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
       setPreviewError(err instanceof Error ? err.message : 'Failed to preview file.');
     } finally {
       setIsPreviewLoading(false);
+    }
+  };
+
+  const handleImagePreview = async (node: DirectoryTreeNode) => {
+    if (node.type !== 'file') return;
+    try {
+      const endpoint = `/agent/download?path=${encodeURIComponent(node.path)}`;
+      let response: Response;
+      if (isTauri()) {
+        const baseUrl = await getTabServerUrl(tabId);
+        response = await proxyFetch(`${baseUrl}${endpoint}`);
+      } else {
+        response = await fetch(endpoint);
+      }
+      const blob = await response.blob();
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+      openPreview(dataUrl, node.name);
+    } catch (err) {
+      console.error('[DirectoryPanel] Failed to load image:', err);
+      toast.error('图片加载失败');
     }
   };
 
@@ -869,7 +861,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
     }
 
     const isDir = node.type === 'dir';
-    const canPreview = !isDir && isPreviewable(node.name);
+    const canPreview = !isDir && (isPreviewable(node.name) || isImageFile(node.name));
 
     if (isDir) {
       return [
@@ -920,7 +912,9 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
           icon: <Eye className="h-4 w-4" />,
           disabled: !canPreview,
           onClick: () => {
-            if (canPreview) {
+            if (isImageFile(node.name)) {
+              void handleImagePreview(node);
+            } else if (isPreviewable(node.name)) {
               void handlePreview(node);
             }
           }
