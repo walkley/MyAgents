@@ -50,10 +50,17 @@ export default function InlineCode({ children }: InlineCodeProps) {
         fileAction.openFileMenu(rect.left, rect.bottom + 4, text, pathInfo.type);
     };
 
+    const handleContextMenu = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fileAction.openFileMenu(e.clientX, e.clientY, text, pathInfo.type);
+    };
+
     return (
         <code
             className={INTERACTIVE_CLASS}
             onClick={handleClick}
+            onContextMenu={handleContextMenu}
             title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
         >
             {children}
