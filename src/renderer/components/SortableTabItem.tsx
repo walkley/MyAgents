@@ -1,6 +1,10 @@
 /**
  * SortableTabItem - Individual sortable tab component
  * Uses @dnd-kit for high-performance drag-and-drop
+ *
+ * Drag listeners are bound to the title span only (not the entire tab div)
+ * to prevent dnd-kit's document-level click capture from swallowing
+ * clicks on the close button.
  */
 
 import { useSortable } from '@dnd-kit/sortable';
@@ -48,7 +52,7 @@ export default function SortableTabItem({
             style={style}
             data-tab-id={tab.id}
             className={`
-                group relative flex h-8 min-w-[100px] max-w-[160px] cursor-default items-center gap-2
+                group relative flex h-8 min-w-[100px] max-w-[160px] cursor-default items-center
                 rounded-lg px-3 transition-colors duration-150 flex-shrink-0
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
@@ -58,17 +62,19 @@ export default function SortableTabItem({
             `}
             onClick={onSelect}
             {...attributes}
-            {...listeners}
         >
-            {/* Tab title */}
-            <span className="flex-1 truncate text-[12px] font-medium pointer-events-none select-none">
+            {/* Tab title — drag handle is bound here, not on the entire tab */}
+            <span
+                className="flex-1 truncate text-[12px] font-medium select-none cursor-grab active:cursor-grabbing"
+                {...listeners}
+            >
                 {displayTitle}
             </span>
 
-            {/* Close button - must stop propagation to work during drag */}
+            {/* Close button — enlarged hit area (24×24) with visual icon (12×12) */}
             <button
                 className={`
-                    flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full 
+                    -mr-1.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full
                     transition-all duration-150
                     ${isActive
                         ? 'opacity-60 hover:bg-[var(--ink)]/10 hover:opacity-100'
@@ -79,7 +85,6 @@ export default function SortableTabItem({
                     e.stopPropagation();
                     onClose();
                 }}
-                onPointerDown={(e) => e.stopPropagation()} // Prevent drag when clicking close
                 title="关闭标签页"
             >
                 <X className="h-3 w-3" />
