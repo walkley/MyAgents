@@ -180,6 +180,8 @@ export default function MonacoEditor({
         acceptSuggestionOnEnter: 'off' as const,
         hover: { enabled: false },
         parameterHints: { enabled: false },
+        // Prevent long lines (e.g., minified JSON/JS) from freezing the tokenizer
+        maxTokenizationLineLength: 10000,
     }), [readOnly]);
 
     return (

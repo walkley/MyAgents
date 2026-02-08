@@ -9,7 +9,7 @@
  * - Unsaved changes confirmation
  */
 import { Edit2, FileText, Loader2, Save, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -18,8 +18,10 @@ import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownF
 
 import ConfirmDialog from './ConfirmDialog';
 import Markdown from './Markdown';
-import MonacoEditor from './MonacoEditor';
 import { useToast } from './Toast';
+
+// Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first clicks "edit"
+const MonacoEditor = lazy(() => import('./MonacoEditor'));
 
 
 interface FilePreviewModalProps {
@@ -40,6 +42,9 @@ interface FilePreviewModalProps {
     /** Callback after file is saved successfully */
     onSaved?: () => void;
 }
+
+// Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
+const LARGE_FILE_TOKENIZATION_THRESHOLD = 100 * 1024; // 100KB
 
 export default function FilePreviewModal({
     name,
@@ -66,6 +71,8 @@ export default function FilePreviewModal({
     const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
     // Track if content is ready to render (avoids blank flash while SyntaxHighlighter computes)
     const [isContentReady, setIsContentReady] = useState(false);
+    // Defer Monaco Editor mounting to avoid blocking the click event's microtask chain
+    const [isEditorReady, setIsEditorReady] = useState(false);
 
     // Sync content when prop changes (e.g., when file is reloaded externally)
     // Use requestAnimationFrame to let loading state render first before heavy SyntaxHighlighter
@@ -86,10 +93,26 @@ export default function FilePreviewModal({
         return isEditing && editContent !== previewContent;
     }, [isEditing, editContent, previewContent]);
 
+    // Defer editor mounting: when isEditing becomes true, wait one frame before rendering Monaco
+    useEffect(() => {
+        if (isEditing && !isEditorReady) {
+            const rafId = requestAnimationFrame(() => {
+                setIsEditorReady(true);
+            });
+            return () => cancelAnimationFrame(rafId);
+        }
+    }, [isEditing, isEditorReady]);
+
     const language = useMemo(() => getPrismLanguage(name), [name]);
     const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
     const showLineNumbers = useMemo(() => shouldShowLineNumbers(name), [name]);
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
+
+    // Large files: force plaintext to skip tokenization
+    const effectiveMonacoLanguage = useMemo(() => {
+        if (size > LARGE_FILE_TOKENIZATION_THRESHOLD) return 'plaintext';
+        return monacoLanguage;
+    }, [size, monacoLanguage]);
 
     // Memoize the syntax highlighted content to avoid re-computation on every render
     // SyntaxHighlighter is expensive - only recompute when content or language changes
@@ -129,6 +152,7 @@ export default function FilePreviewModal({
     // Handlers
     const handleEdit = useCallback(() => {
         setEditContent(previewContent); // Start editing from current preview content
+        setIsEditorReady(false); // Reset so deferred mounting kicks in
         setIsEditing(true);
     }, [previewContent]);
 
@@ -206,15 +230,27 @@ export default function FilePreviewModal({
         }
 
         // Editing mode: use Monaco Editor
+        // - Suspense handles first-time chunk loading (lazy import)
+        // - isEditorReady defers mounting to next frame on every edit (avoids blocking click microtask)
         if (isEditing) {
-            return (
-                <div className="h-full bg-[var(--paper-reading)]">
-                    <MonacoEditor
-                        value={editContent}
-                        onChange={setEditContent}
-                        language={monacoLanguage}
-                    />
+            const editorLoading = (
+                <div className="flex h-full items-center justify-center bg-[var(--paper-reading)] text-[var(--ink-muted)]">
+                    <Loader2 className="h-5 w-5 animate-spin" />
                 </div>
+            );
+            if (!isEditorReady) {
+                return editorLoading;
+            }
+            return (
+                <Suspense fallback={editorLoading}>
+                    <div className="h-full bg-[var(--paper-reading)]">
+                        <MonacoEditor
+                            value={editContent}
+                            onChange={setEditContent}
+                            language={effectiveMonacoLanguage}
+                        />
+                    </div>
+                </Suspense>
             );
         }
 
