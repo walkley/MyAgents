@@ -1178,6 +1178,9 @@ export default function TabProvider({
             stopTimeoutRef.current = null;
         }
 
+        // Immediately show "stopping" state for instant user feedback
+        setSessionState('stopping');
+
         try {
             const response = await postJson<{ success: boolean; error?: string }>('/chat/stop');
             if (response.success) {
@@ -1187,13 +1190,16 @@ export default function TabProvider({
                         console.warn(`[TabProvider ${tabId}] Stop timeout - forcing UI recovery`);
                         isStreamingRef.current = false;
                         setIsLoading(false);
-                        setSessionState('idle');  // Reset session state on timeout
                         setSystemStatus(null);
                     }
+                    // Also recover from 'stopping' state if SSE confirmation never arrived
+                    setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
                     stopTimeoutRef.current = null;
                 }, 5000);
                 return true;
             }
+            // POST failed (success=false), recover UI
+            setSessionState('idle');
             return false;
         } catch (error) {
             console.error(`[TabProvider ${tabId}] Stop response failed:`, error);

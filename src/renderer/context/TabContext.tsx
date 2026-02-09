@@ -21,7 +21,7 @@ import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 
-export type SessionState = 'idle' | 'running' | 'error';
+export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
 
 /**
  * Tab state - all the state that belongs to a single Tab

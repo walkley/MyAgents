@@ -601,7 +601,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   // This avoids re-rendering Chat on every keystroke
   const handleSendMessage = async (text: string, images?: ImageAttachment[]) => {
     // Allow sending if there's text OR images
-    if ((!text && (!images || images.length === 0)) || isLoading || sessionState === 'running') {
+    if ((!text && (!images || images.length === 0)) || isLoading || sessionState === 'running' || sessionState === 'stopping') {
       return;
     }
 
@@ -850,6 +850,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               }
             }}
             isLoading={isLoading || sessionState === 'running'}
+            sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}
             provider={currentProvider}

@@ -2473,10 +2473,10 @@ export async function interruptCurrentResponse(): Promise<boolean> {
 
   isInterruptingResponse = true;
   try {
-    // 使用 Promise.race 添加 10 秒超时
+    // 使用 Promise.race 添加 5 秒超时
     const interruptPromise = querySession.interrupt();
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('Interrupt timeout')), 10000);
+      setTimeout(() => reject(new Error('Interrupt timeout')), 5000);
     });
 
     try {
