@@ -25,8 +25,9 @@ interface SimpleChatInputProps {
   value?: string;
   /** Optional callback when value changes - not recommended for performance reasons */
   onChange?: (value: string) => void;
-  /** Called when user sends message. Text is managed internally for performance. */
-  onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => void;
+  /** Called when user sends message. Text is managed internally for performance.
+   *  Return false to indicate rejection (input will NOT be cleared). */
+  onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => boolean | void | Promise<boolean | void>;
   onStop?: () => void; // Called when stop button is clicked
   isLoading: boolean;
   /** Session state for stop button UI ('stopping' shows disabled spinner) */
@@ -105,6 +106,8 @@ export interface SimpleChatInputHandle {
   insertSlashCommand: (command: string) => void;
   /** Set the input value directly (used for restoring content after cron stop) */
   setValue: (value: string) => void;
+  /** Set image attachments directly (used for restoring queued message images on cancel) */
+  setImages: (images: ImageAttachment[]) => void;
 }
 
 // File search result type
@@ -726,6 +729,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     insertReferences,
     insertSlashCommand,
     setValue,
+    setImages,
   }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
 
   // Handle file input change
@@ -913,8 +917,8 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   }, [cyclePermissionMode]);
 
   // Send message - defined before handleKeyDown to avoid circular dependency
+  // Note: isLoading guard removed to allow queuing messages while AI is responding
   const handleSend = useCallback(async () => {
-    if (isLoading) return;
     const text = inputValue.trim();
     if (!text && images.length === 0) return;
 
@@ -938,10 +942,15 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
       }
     }
 
-    onSend(text, images.length > 0 ? images : undefined);
-    setInputValue(''); // Clear input after send
-    setImages([]);
-  }, [isLoading, onSend, images, inputValue]);
+    const result = onSend(text, images.length > 0 ? images : undefined);
+    // If onSend returns a promise, await it; if sync, use directly
+    const accepted = result instanceof Promise ? await result : result;
+    // Only clear input if not explicitly rejected (false)
+    if (accepted !== false) {
+      setInputValue('');
+      setImages([]);
+    }
+  }, [onSend, images, inputValue]);
 
   // Handle keyboard navigation in file search and slash menu
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1076,12 +1085,12 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      if (!isLoading && (inputValue.trim() || images.length > 0)) {
+      if (inputValue.trim() || images.length > 0) {
         handleSend();
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, isLoading, images.length, handleSend, handleSkillSelect]);
+  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect]);
 
   const toggleExpand = () => setIsExpanded((prev) => !prev);
 

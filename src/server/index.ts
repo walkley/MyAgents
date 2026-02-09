@@ -77,6 +77,9 @@ crashLog('STARTUP', 'Server starting...');
 
 import {
   enqueueUserMessage,
+  cancelQueueItem,
+  forceExecuteQueueItem,
+  getQueueStatus,
   getAgentState,
   getLogLines,
   getMessages,
@@ -665,8 +668,11 @@ async function main() {
 
         try {
           console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerEnv?.baseUrl ?? 'anthropic'}`);
-          await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
-          return jsonResponse({ success: true });
+          const result = await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
+          if (result.error) {
+            return jsonResponse({ success: false, error: result.error }, 429);
+          }
+          return jsonResponse({ success: true, queued: result.queued, queueId: result.queueId });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -689,6 +695,46 @@ async function main() {
             500
           );
         }
+      }
+
+      // Cancel a queued message
+      if (pathname === '/chat/queue/cancel' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const queueId = body?.queueId as string;
+        if (!queueId) {
+          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
+        }
+        const cancelledText = cancelQueueItem(queueId);
+        if (cancelledText === null) {
+          return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
+        }
+        return jsonResponse({ success: true, cancelledText });
+      }
+
+      // Force-execute a queued message (interrupt current + run queued)
+      if (pathname === '/chat/queue/force' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const queueId = body?.queueId as string;
+        if (!queueId) {
+          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
+        }
+        try {
+          const result = await forceExecuteQueueItem(queueId);
+          if (!result) {
+            return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
+          }
+          return jsonResponse({ success: true });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // Get queue status
+      if (pathname === '/chat/queue/status' && request.method === 'GET') {
+        return jsonResponse({ success: true, queue: getQueueStatus() });
       }
 
       // Reset session for "new conversation" - clears all messages and state

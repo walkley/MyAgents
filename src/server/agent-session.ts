@@ -139,7 +139,10 @@ let preWarmFailCount = 0;
 const PRE_WARM_MAX_RETRIES = 3;
 let systemInitInfo: SystemInitInfo | null = null;
 type MessageQueueItem = {
+  id: string;                     // Unique queue item ID
   message: SDKUserMessage['message'];
+  messageText: string;            // Original text for cancel/restore
+  wasQueued: boolean;             // true if added via non-blocking path (AI was busy)
   resolve: () => void;
 };
 const messageQueue: MessageQueueItem[] = [];
@@ -2204,30 +2207,43 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
   }
 }
 
+export type EnqueueResult = {
+  queued: boolean;   // true if message was queued (not immediately processed)
+  queueId?: string;  // queue item ID, present when queued=true
+  error?: string;    // present when queue is full or other rejection
+};
+
 export async function enqueueUserMessage(
   text: string,
   images?: ImagePayload[],
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv
-): Promise<void> {
+): Promise<EnqueueResult> {
   const trimmed = text.trim();
   const hasImages = images && images.length > 0;
 
   if (!trimmed && !hasImages) {
-    return;
+    return { queued: false };
   }
 
-  // Reset turn usage tracking for this new user message
-  resetTurnUsage();
-  currentTurnStartTime = Date.now();
+  // Reset turn usage tracking — only for direct (non-queued) messages.
+  // For queued messages, this is done in messageGenerator when the item is yielded,
+  // to avoid corrupting the in-flight turn's usage counters.
+  if (!isStreamingMessage) {
+    resetTurnUsage();
+    currentTurnStartTime = Date.now();
+  }
 
   // Check if provider has changed (requires session restart since environment vars can't be updated)
   // Also detect switching TO subscription (providerEnv=undefined) FROM an API provider
-  const switchingToSubscription = !providerEnv && currentProviderEnv;
+  // SKIP for queued messages: provider/model changes during streaming would cause a session
+  // restart that wipes the queue and races with the active stream. Queued messages inherit
+  // the current session's provider/model configuration.
+  const switchingToSubscription = !isStreamingMessage && !providerEnv && currentProviderEnv;
   const baseUrlChanged = switchingToSubscription ||
-    (providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (providerEnv && (
+    (!isStreamingMessage && providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
+  const providerChanged = baseUrlChanged || (!isStreamingMessage && providerEnv && (
     providerEnv.apiKey !== currentProviderEnv?.apiKey
   ));
 
@@ -2277,16 +2293,19 @@ export async function enqueueUserMessage(
   }
 
   // Apply runtime config changes if session is active (model/permission changes don't require restart)
-  await applySessionConfig(model, permissionMode);
+  // Skip for queued messages — config is locked to the current session while streaming
+  if (!isStreamingMessage) {
+    await applySessionConfig(model, permissionMode);
 
-  // Update local tracking even if SDK call is skipped (first message)
-  if (permissionMode && permissionMode !== currentPermissionMode) {
-    currentPermissionMode = permissionMode;
-    if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
-  }
-  if (model && model !== currentModel) {
-    currentModel = model;
-    if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    // Update local tracking even if SDK call is skipped (first message)
+    if (permissionMode && permissionMode !== currentPermissionMode) {
+      currentPermissionMode = permissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
+    }
+    if (model && model !== currentModel) {
+      currentModel = model;
+      if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    }
   }
 
   // Persist session to SessionStore on first message
@@ -2393,19 +2412,38 @@ export async function enqueueUserMessage(
     contentBlocks.push({ type: 'text', text: trimmed });
   }
 
-  // Push to message queue and WAIT for it to be processed
-  // This await is CRITICAL - it ensures startStreamingSession() has time to 
-  // complete SDK initialization before messageGenerator yields the message
-  // Without this, the message gets yielded before ProcessTransport is ready
+  const queueId = randomUUID();
+
+  // If session is actively streaming (AI responding), queue non-blocking
+  // so the HTTP response returns immediately and user sees "queued" state
+  if (isStreamingMessage) {
+    // Backend queue limit (defense-in-depth — frontend also enforces limit)
+    const MAX_QUEUE_SIZE = 10;
+    if (messageQueue.length >= MAX_QUEUE_SIZE) {
+      return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
+    }
+    messageQueue.push({
+      id: queueId,
+      message: { role: 'user', content: contentBlocks },
+      messageText: trimmed,
+      wasQueued: true,
+      resolve: () => {},  // No-op: no one is awaiting
+    });
+    broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
+    return { queued: true, queueId };
+  }
+
+  // Session is idle or starting — await processing (ensures SDK ProcessTransport is ready)
   await new Promise<void>((resolve) => {
     messageQueue.push({
-      message: {
-        role: 'user',
-        content: contentBlocks
-      },
-      resolve  // Called by messageGenerator after yield
+      id: queueId,
+      message: { role: 'user', content: contentBlocks },
+      messageText: trimmed,
+      wasQueued: false,
+      resolve,
     });
   });
+  return { queued: false };
 }
 
 export function isSessionActive(): boolean {
@@ -2492,6 +2530,52 @@ export async function interruptCurrentResponse(): Promise<boolean> {
   } finally {
     isInterruptingResponse = false;
   }
+}
+
+/**
+ * Cancel a queued message by its queueId.
+ * Returns the original message text (for restoring to input box) or null if not found.
+ */
+export function cancelQueueItem(queueId: string): string | null {
+  const index = messageQueue.findIndex(item => item.id === queueId);
+  if (index === -1) return null;
+
+  const [item] = messageQueue.splice(index, 1);
+  // Only resolve if this was a non-blocking queued item (wasQueued: true has no-op resolve).
+  // For blocking items (wasQueued: false), resolve would unblock enqueueUserMessage's await,
+  // but the message was removed from the queue — messageGenerator won't find it, which is safe.
+  item.resolve();
+  broadcast('queue:cancelled', { queueId });
+  console.log(`[agent] Queue item ${queueId} cancelled (wasQueued=${item.wasQueued})`);
+  return item.messageText;
+}
+
+/**
+ * Force-execute a queued message: move it to front of queue and interrupt current response.
+ */
+export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
+  const index = messageQueue.findIndex(item => item.id === queueId);
+  if (index === -1) return false;
+
+  // Move to front of queue
+  if (index > 0) {
+    const [item] = messageQueue.splice(index, 1);
+    messageQueue.unshift(item);
+  }
+
+  // Interrupt current AI response — messageGenerator will naturally yield the queue front
+  await interruptCurrentResponse();
+  return true;
+}
+
+/**
+ * Get current queue status — list of queued items with their IDs and preview text.
+ */
+export function getQueueStatus(): Array<{ id: string; messagePreview: string }> {
+  return messageQueue.map(item => ({
+    id: item.id,
+    messagePreview: item.messageText.slice(0, 100),
+  }));
 }
 
 async function startStreamingSession(preWarm = false): Promise<void> {
@@ -3266,6 +3350,13 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
 
     const item = messageQueue.shift();
     if (item) {
+      // For queued items: reset turn usage now (deferred from enqueueUserMessage)
+      // and notify frontend that execution is starting
+      if (item.wasQueued) {
+        resetTurnUsage();
+        currentTurnStartTime = Date.now();
+        broadcast('queue:started', { queueId: item.id });
+      }
       yield {
         type: 'user' as const,
         message: item.message,

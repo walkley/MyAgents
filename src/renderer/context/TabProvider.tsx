@@ -28,6 +28,7 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
+import type { QueuedMessageInfo } from '@/types/queue';
 import {
     notifyMessageComplete,
     notifyPermissionRequest,
@@ -222,6 +223,7 @@ export default function TabProvider({
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
     const [pendingAskUserQuestion, setPendingAskUserQuestion] = useState<AskUserQuestionRequest | null>(null);
     const [toolCompleteCount, setToolCompleteCount] = useState(0);
+    const [queuedMessages, setQueuedMessages] = useState<QueuedMessageInfo[]>([]);
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
@@ -284,6 +286,8 @@ export default function TabProvider({
         // Clear pending prompts to prevent stale UI
         setPendingPermission(null);
         setPendingAskUserQuestion(null);
+        // Clear queued messages
+        setQueuedMessages([]);
         // Clear current session ID - no active session until first message creates one
         // This ensures history dropdown shows no selection for new conversations
         setCurrentSessionId(null);
@@ -1037,6 +1041,36 @@ export default function TabProvider({
                 break;
             }
 
+            // Queue events
+            case 'queue:added': {
+                // Confirmation that a message was queued (backup for sendMessage response)
+                const payload = data as { queueId: string; messageText: string } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:added queueId=${payload.queueId}`);
+                }
+                break;
+            }
+
+            case 'queue:started': {
+                // A queued message started executing — remove from frontend queue
+                const payload = data as { queueId: string } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:started queueId=${payload.queueId}`);
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
+                }
+                break;
+            }
+
+            case 'queue:cancelled': {
+                // A queued message was cancelled — remove from frontend queue
+                const payload = data as { queueId: string } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:cancelled queueId=${payload.queueId}`);
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
+                }
+                break;
+            }
+
             default: {
                 // Log unhandled events for debugging
                 if (!eventName.startsWith('chat:')) {
@@ -1141,7 +1175,7 @@ export default function TabProvider({
                 data: img.preview.split(',')[1],
             }));
 
-            const response = await postJson<{ success: boolean; error?: string }>('/chat/send', {
+            const response = await postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string }>('/chat/send', {
                 text: trimmed,
                 images: imageData,
                 permissionMode: permissionMode ?? 'auto',
@@ -1159,6 +1193,18 @@ export default function TabProvider({
                     has_file: false,
                     is_cron: isCron ?? false,
                 });
+
+                // If queued, add to frontend queue state for UI rendering
+                if (response.queued && response.queueId) {
+                    const queueId = response.queueId;
+                    setQueuedMessages(prev => [...prev, {
+                        queueId,
+                        text: trimmed,
+                        // Store lightweight image info only (no File blob) to avoid memory leaks
+                        images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                        timestamp: Date.now(),
+                    }]);
+                }
             }
 
             return response.success;
@@ -1398,6 +1444,35 @@ export default function TabProvider({
         void loadSession(sessionId);
     }, [sessionId, isConnected, tabId, loadSession]);
 
+    // Cancel a queued message — returns the original text (for restoring to input)
+    const cancelQueuedMessage = useCallback(async (queueId: string): Promise<string | null> => {
+        try {
+            const response = await postJson<{ success: boolean; cancelledText?: string }>('/chat/queue/cancel', { queueId });
+            if (response.success) {
+                setQueuedMessages(prev => prev.filter(q => q.queueId !== queueId));
+                return response.cancelledText ?? null;
+            }
+            return null;
+        } catch (error) {
+            console.error(`[TabProvider ${tabId}] Cancel queue item failed:`, error);
+            return null;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
+    }, [tabId]);
+
+    // Force-execute a queued message (interrupt current + run immediately)
+    // Does NOT optimistically remove from queue — queue:started SSE is the single source of truth
+    const forceExecuteQueuedMessage = useCallback(async (queueId: string): Promise<boolean> => {
+        try {
+            const response = await postJson<{ success: boolean }>('/chat/queue/force', { queueId });
+            return response.success;
+        } catch (error) {
+            console.error(`[TabProvider ${tabId}] Force execute queue item failed:`, error);
+            return false;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
+    }, [tabId]);
+
     // Respond to permission request
     const respondPermission = useCallback(async (decision: 'deny' | 'allow_once' | 'always_allow') => {
         if (!pendingPermission) return;
@@ -1459,6 +1534,7 @@ export default function TabProvider({
         pendingPermission,
         pendingAskUserQuestion,
         toolCompleteCount,
+        queuedMessages,
         isConnected,
         setMessages,
         setIsLoading,
@@ -1481,13 +1557,15 @@ export default function TabProvider({
         apiDelete: apiDeleteJson,
         respondPermission,
         respondAskUserQuestion,
+        cancelQueuedMessage,
+        forceExecuteQueuedMessage,
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, isConnected,
+        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, queuedMessages, isConnected,
         appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
-        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion
+        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
     return (

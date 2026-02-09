@@ -53,6 +53,8 @@ export interface SendMessageResponse {
   success: boolean;
   error?: string;
   attachments?: SavedAttachmentInfo[];
+  queued?: boolean;   // true if message was queued (AI was busy)
+  queueId?: string;   // queue item ID when queued
 }
 
 export interface ShellResponse {

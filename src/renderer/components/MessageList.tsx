@@ -2,9 +2,11 @@ import { Loader2 } from 'lucide-react';
 import { useMemo, useState, useEffect, useRef, type CSSProperties, type RefObject } from 'react';
 
 import Message from '@/components/Message';
+import QueuedMessageBubble from '@/components/QueuedMessageBubble';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
 import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components/AskUserQuestionPrompt';
 import type { Message as MessageType } from '@/types/chat';
+import type { QueuedMessageInfo } from '@/types/queue';
 
 /**
  * Format elapsed seconds to human-readable string
@@ -37,6 +39,9 @@ interface MessageListProps {
   onAskUserQuestionSubmit?: (requestId: string, answers: Record<string, string>) => void;
   onAskUserQuestionCancel?: (requestId: string) => void;
   systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
+  queuedMessages?: QueuedMessageInfo[];
+  onCancelQueued?: (queueId: string) => void;
+  onForceExecuteQueued?: (queueId: string) => void;
 }
 
 // Enable CSS scroll anchoring for smoother streaming experience
@@ -92,6 +97,9 @@ export default function MessageList({
   onAskUserQuestionSubmit,
   onAskUserQuestionCancel,
   systemStatus,
+  queuedMessages,
+  onCancelQueued,
+  onForceExecuteQueued,
 }: MessageListProps) {
   const containerStyle: CSSProperties | undefined =
     bottomPadding ? { paddingBottom: bottomPadding } : undefined;
@@ -165,6 +173,19 @@ export default function MessageList({
               onSubmit={onAskUserQuestionSubmit}
               onCancel={onAskUserQuestionCancel}
             />
+          </div>
+        )}
+        {/* Queued messages */}
+        {queuedMessages && queuedMessages.length > 0 && (
+          <div className="space-y-2 py-2">
+            {queuedMessages.map(qm => (
+              <QueuedMessageBubble
+                key={qm.queueId}
+                info={qm}
+                onCancel={() => onCancelQueued?.(qm.queueId)}
+                onForceExecute={() => onForceExecuteQueued?.(qm.queueId)}
+              />
+            ))}
           </div>
         )}
         {/* Unified status indicator - only render when active */}
