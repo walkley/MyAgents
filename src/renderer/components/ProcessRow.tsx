@@ -200,6 +200,12 @@ export default function ProcessRow({
                         }`}>
                         {mainLabel}
                     </span>
+                    {/* Background task badge */}
+                    {isTaskTool && (block.tool?.parsedInput as unknown as Record<string, unknown>)?.run_in_background === true && (
+                        <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                            后台
+                        </span>
+                    )}
                     {/* Task duration - similar to thinking duration */}
                     {taskDuration && (
                         <span className="text-xs text-[var(--ink-muted)]">

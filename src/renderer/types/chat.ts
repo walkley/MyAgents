@@ -63,6 +63,15 @@ export interface TaskStats {
   outputTokens: number;
 }
 
+// 后台任务轮询统计
+export interface BackgroundTaskStats {
+  toolCount: number;
+  assistantCount: number;
+  userCount: number;
+  progressCount: number;
+  elapsed: number;  // ms, 从首行到末行时间差
+}
+
 export interface ToolUseSimple extends ToolUse {
   // Raw input as it streams in - no parsing, just accumulate the raw string
   inputJson?: string;
