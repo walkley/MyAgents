@@ -2282,11 +2282,19 @@ export async function enqueueUserMessage(
       if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
     } else {
       // systemInitInfo not available — pre-warm was never fully initialized.
-      // Cannot resume because the SDK CLI may not have saved this session.
-      // Start completely fresh to avoid "No conversation found" errors.
+      // Two sub-cases require different handling:
+      //   a) Historical session (messages exist on disk): the session ID is valid and
+      //      exists in the SDK's storage. We MUST use `resume` to continue it.
+      //   b) Brand new session (no messages): the SDK CLI may not have saved this
+      //      session. Use `sessionId` to create fresh, avoiding "No conversation found".
       resumeSessionId = undefined;
-      sessionIdUsedByQuery = false; // Reset so startStreamingSession doesn't use fallback
-      console.log('[agent] Starting fresh session: no system_init available for resume');
+      if (messages.length === 0) {
+        sessionIdUsedByQuery = false;
+        console.log('[agent] Starting fresh session: no system_init, no messages (new session)');
+      } else {
+        // Keep sessionIdUsedByQuery=true so startStreamingSession uses `resume: sessionId`
+        console.log(`[agent] Resuming historical session: no system_init, but ${messages.length} messages exist`);
+      }
     }
 
     // Update provider env BEFORE terminating so the new session picks it up
