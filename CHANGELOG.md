@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.13] - 2026-02-10
+
+### Added
+- **消息队列**：AI 响应中可追加发送消息，排队消息在当前响应完成后自动执行
+  - 排队消息合并为右对齐半透明面板，支持取消和立即发送操作
+  - 采用 Optimistic UI 模式，回车即清空输入框
+  - 与心跳循环兼容：Cron 消息走正常队列，不中断当前 AI 响应
+- **后台任务实时统计**：后台 Agent 运行时显示实时运行时间和工具调用次数
+  - 通过轮询 output_file 获取增量数据，3 秒刷新
+  - 折叠视图显示"后台"徽标和"(后台)"标签后缀
+- **自定义服务商认证方式选择器**：创建/编辑自定义服务商时可选择 AUTH_TOKEN 或 API_KEY
+
+### Changed
+- **停止按钮三态交互**：点击停止按钮立即显示"停止中"视觉反馈（Loader 旋转），后端中断超时从 10s 缩短至 5s
+
+### Fixed
+- 修复 Provider 切换时 pre-warm 未完成导致 resume 无效 session ID 的错误
+- 修复 Cron single_session 模式下误中断当前 AI 响应
+- 修复队列 SSE 事件未注册导致前端排队面板不显示
+
+---
+
 ## [0.1.12] - 2026-02-08
 
 ### Added
