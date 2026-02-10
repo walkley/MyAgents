@@ -14,6 +14,7 @@ import {
     getModelsDisplay,
     PRESET_PROVIDERS,
     type Provider,
+    type ProviderAuthType,
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
@@ -59,6 +60,7 @@ interface CustomProviderForm {
     name: string;
     cloudProvider: string;  // 服务商标签
     baseUrl: string;
+    authType: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
     models: string[];  // 支持多个模型 ID
     newModelInput: string;  // 用于输入新模型的临时值
     apiKey: string;
@@ -68,6 +70,7 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     name: '',
     cloudProvider: '',
     baseUrl: '',
+    authType: 'auth_token',
     models: [],
     newModelInput: '',
     apiKey: '',
@@ -83,6 +86,7 @@ interface ProviderEditForm {
     editName?: string;
     editCloudProvider?: string;
     editBaseUrl?: string;
+    editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
 }
 
 interface SettingsProps {
@@ -865,7 +869,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             type: 'api',
             primaryModel: customForm.models[0],
             isBuiltin: false,
-            authType: 'auth_token',  // 默认使用 auth_token
+            authType: customForm.authType,
             config: {
                 baseUrl: customForm.baseUrl,
             },
@@ -942,6 +946,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 editName: provider.name,
                 editCloudProvider: provider.cloudProvider,
                 editBaseUrl: provider.config.baseUrl || '',
+                editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
             }),
         });
     };
@@ -986,7 +991,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     // Save provider edits
     const saveProviderEdits = async () => {
         if (!editingProvider) return;
-        const { provider, customModels, removedModels, editName, editCloudProvider, editBaseUrl } = editingProvider;
+        const { provider, customModels, removedModels, editName, editCloudProvider, editBaseUrl, editAuthType } = editingProvider;
 
         if (provider.isBuiltin) {
             // For preset providers: save user-added custom models
@@ -1036,6 +1041,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                 ...provider,
                 name: editName.trim(),
                 cloudProvider: editCloudProvider?.trim() || '自定义',
+                authType: editAuthType ?? provider.authType ?? 'auth_token',
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
@@ -2393,6 +2399,37 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             </div>
 
                             <div>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                <div className="flex gap-4">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="radio"
+                                            name="create-authType"
+                                            value="auth_token"
+                                            checked={customForm.authType === 'auth_token'}
+                                            onChange={() => setCustomForm((p) => ({ ...p, authType: 'auth_token' }))}
+                                            className="accent-[var(--ink)]"
+                                        />
+                                        <span className="text-sm text-[var(--ink)]">AUTH_TOKEN</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="radio"
+                                            name="create-authType"
+                                            value="api_key"
+                                            checked={customForm.authType === 'api_key'}
+                                            onChange={() => setCustomForm((p) => ({ ...p, authType: 'api_key' }))}
+                                            className="accent-[var(--ink)]"
+                                        />
+                                        <span className="text-sm text-[var(--ink)]">API_KEY</span>
+                                    </label>
+                                </div>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    请根据供应商认证参数进行选择
+                                </p>
+                            </div>
+
+                            <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     模型 ID <span className="text-[var(--error)]">*</span>
                                 </label>
@@ -2563,6 +2600,40 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                     />
                                 )}
                             </div>
+
+                            {/* Auth Type - only for custom providers */}
+                            {!editingProvider.provider.isBuiltin && (
+                                <div>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <div className="flex gap-4">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="edit-authType"
+                                                value="auth_token"
+                                                checked={editingProvider.editAuthType === 'auth_token'}
+                                                onChange={() => setEditingProvider((p) => p ? { ...p, editAuthType: 'auth_token' } : null)}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">AUTH_TOKEN</span>
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="edit-authType"
+                                                value="api_key"
+                                                checked={editingProvider.editAuthType === 'api_key'}
+                                                onChange={() => setEditingProvider((p) => p ? { ...p, editAuthType: 'api_key' } : null)}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">API_KEY</span>
+                                        </label>
+                                    </div>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        请根据供应商认证参数进行选择
+                                    </p>
+                                </div>
+                            )}
 
                             {/* Existing models */}
                             <div>

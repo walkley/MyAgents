@@ -436,6 +436,7 @@ export function getToolLabel(tool: ToolUseSimple): string {
       const description = getStringProp(tool.parsedInput, 'description');
       const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || 'Task';
       const isTaskRunning = tool.isLoading && !tool.result;
+      const isBackground = isObject(tool.parsedInput) && tool.parsedInput.run_in_background === true;
 
       // When Task is running, show the latest subagent tool (running or most recent)
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
@@ -447,10 +448,12 @@ export function getToolLabel(tool: ToolUseSimple): string {
         }
       }
       // When Task completed or no subagent calls yet, show the Task description
+      const bgSuffix = isBackground && !isTaskRunning ? ' (后台)' : '';
       if (description) {
-        return description.length > 25 ? `${description.substring(0, 22)}...` : description;
+        const desc = description.length > 25 ? `${description.substring(0, 22)}...` : description;
+        return desc + bgSuffix;
       }
-      return subagentType;
+      return subagentType + bgSuffix;
     }
     case 'WebFetch': {
       const urlStr = getStringProp(tool.parsedInput, 'url');

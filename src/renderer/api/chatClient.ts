@@ -12,12 +12,13 @@ import type {
 
 import type { SendMessagePayload, SendMessageResponse } from '../../shared/types/ipc';
 import type { SystemInitInfo } from '../../shared/types/system';
+import type { SessionState } from '@/context/TabContext';
 import { onEvent } from './eventBus';
 import { getServerUrl, proxyFetch } from './tauriClient';
 
 export type ChatInitPayload = {
   agentDir: string;
-  sessionState: 'idle' | 'running' | 'error';
+  sessionState: SessionState;
   hasInitialPrompt: boolean;
 };
 
@@ -41,7 +42,7 @@ export type ChatMessageReplayPayload = {
 };
 
 export type ChatStatusPayload = {
-  sessionState: 'idle' | 'running' | 'error';
+  sessionState: SessionState;
 };
 
 export type ChatAgentErrorPayload = {

@@ -1,15 +1,17 @@
-import { ChevronDown, ChevronUp, Image, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
+import { ChevronDown, ChevronUp, Image, Loader, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabStateOptional, type SessionState } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
+import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 
@@ -25,10 +27,13 @@ interface SimpleChatInputProps {
   value?: string;
   /** Optional callback when value changes - not recommended for performance reasons */
   onChange?: (value: string) => void;
-  /** Called when user sends message. Text is managed internally for performance. */
-  onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => void;
+  /** Called when user sends message. Text is managed internally for performance.
+   *  Return false to indicate rejection (input will NOT be cleared). */
+  onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => boolean | void | Promise<boolean | void>;
   onStop?: () => void; // Called when stop button is clicked
   isLoading: boolean;
+  /** Session state for stop button UI ('stopping' shows disabled spinner) */
+  sessionState?: SessionState;
   /** System status (e.g., 'compacting') - when set, shows disabled send button instead of stop */
   systemStatus?: string | null;
   agentDir?: string; // For @file search
@@ -83,6 +88,10 @@ interface SimpleChatInputProps {
   onCronStop?: () => void;
   /** Callback when input text changes (for cron prompt tracking) */
   onInputChange?: (text: string) => void;
+  // Queued messages props
+  queuedMessages?: QueuedMessageInfo[];
+  onCancelQueued?: (queueId: string) => void;
+  onForceExecuteQueued?: (queueId: string) => void;
 }
 
 const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
@@ -103,6 +112,8 @@ export interface SimpleChatInputHandle {
   insertSlashCommand: (command: string) => void;
   /** Set the input value directly (used for restoring content after cron stop) */
   setValue: (value: string) => void;
+  /** Set image attachments directly (used for restoring queued message images on cancel) */
+  setImages: (images: ImageAttachment[]) => void;
 }
 
 // File search result type
@@ -118,6 +129,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onSend,
   onStop,
   isLoading,
+  sessionState,
   systemStatus,
   agentDir,
   provider,
@@ -145,6 +157,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onCronCancel,
   onCronStop,
   onInputChange,
+  queuedMessages = [],
+  onCancelQueued,
+  onForceExecuteQueued,
 }, ref) {
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -723,6 +738,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     insertReferences,
     insertSlashCommand,
     setValue,
+    setImages,
   }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
 
   // Handle file input change
@@ -910,8 +926,8 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   }, [cyclePermissionMode]);
 
   // Send message - defined before handleKeyDown to avoid circular dependency
+  // Note: isLoading guard removed to allow queuing messages while AI is responding
   const handleSend = useCallback(async () => {
-    if (isLoading) return;
     const text = inputValue.trim();
     if (!text && images.length === 0) return;
 
@@ -935,10 +951,15 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
       }
     }
 
-    onSend(text, images.length > 0 ? images : undefined);
-    setInputValue(''); // Clear input after send
-    setImages([]);
-  }, [isLoading, onSend, images, inputValue]);
+    const result = onSend(text, images.length > 0 ? images : undefined);
+    // If onSend returns a promise, await it; if sync, use directly
+    const accepted = result instanceof Promise ? await result : result;
+    // Only clear input if not explicitly rejected (false)
+    if (accepted !== false) {
+      setInputValue('');
+      setImages([]);
+    }
+  }, [onSend, images, inputValue]);
 
   // Handle keyboard navigation in file search and slash menu
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1073,12 +1094,12 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      if (!isLoading && (inputValue.trim() || images.length > 0)) {
+      if (inputValue.trim() || images.length > 0) {
         handleSend();
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, isLoading, images.length, handleSend, handleSkillSelect]);
+  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect]);
 
   const toggleExpand = () => setIsExpanded((prev) => !prev);
 
@@ -1094,7 +1115,14 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
       {/* Input container */}
       <div className="pointer-events-auto relative w-full max-w-3xl">
-        {/* Cron task status bar - shows when cron mode enabled but task not started */}
+        {/* Queued messages floating above the input */}
+        <QueuedMessagesPanel
+          messages={queuedMessages}
+          onCancel={(queueId) => onCancelQueued?.(queueId)}
+          onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
+        />
+
+        {/* Cron task status bar - shows when cron mode enabled but task not started (always directly above input) */}
         {cronModeEnabled && !cronTask && cronConfig && (
           <CronTaskStatusBar
             intervalMinutes={cronConfig.intervalMinutes}
@@ -1628,7 +1656,7 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                 )}
               </div>
 
-              {/* Button states: system task (disabled send) → AI responding (stop) → normal (send) */}
+              {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
               {systemStatus ? (
                 // System task running (e.g., compacting) - not interruptible
                 <button
@@ -1638,6 +1666,16 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
                   title="正在执行系统任务，请稍等"
                 >
                   <Send className="h-4 w-4" />
+                </button>
+              ) : isLoading && sessionState === 'stopping' ? (
+                // Stop in progress - waiting for confirmation
+                <button
+                  type="button"
+                  disabled
+                  className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]"
+                  title="正在停止..."
+                >
+                  <Loader className="h-4 w-4 animate-spin" />
                 </button>
               ) : isLoading ? (
                 // AI responding - can be stopped

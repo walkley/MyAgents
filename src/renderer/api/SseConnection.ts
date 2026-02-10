@@ -47,6 +47,9 @@ const JSON_EVENTS = new Set([
     'permission:request', // Permission prompt for tool usage
     'ask-user-question:request', // AskUserQuestion tool prompt
     'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
+    'queue:added',     // Message queued (confirmation)
+    'queue:started',   // Queued message started executing
+    'queue:cancelled', // Queued message cancelled
 ]);
 
 // Event types that can be JSON or plain string

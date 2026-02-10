@@ -77,6 +77,9 @@ crashLog('STARTUP', 'Server starting...');
 
 import {
   enqueueUserMessage,
+  cancelQueueItem,
+  forceExecuteQueueItem,
+  getQueueStatus,
   getAgentState,
   getLogLines,
   getMessages,
@@ -665,8 +668,11 @@ async function main() {
 
         try {
           console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerEnv?.baseUrl ?? 'anthropic'}`);
-          await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
-          return jsonResponse({ success: true });
+          const result = await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
+          if (result.error) {
+            return jsonResponse({ success: false, error: result.error }, 429);
+          }
+          return jsonResponse({ success: true, queued: result.queued, queueId: result.queueId });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -683,6 +689,149 @@ async function main() {
             return jsonResponse({ success: false, error: 'No active response to stop.' }, 400);
           }
           return jsonResponse({ success: true });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // Cancel a queued message
+      if (pathname === '/chat/queue/cancel' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const queueId = body?.queueId as string;
+        if (!queueId) {
+          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
+        }
+        const cancelledText = cancelQueueItem(queueId);
+        if (cancelledText === null) {
+          return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
+        }
+        return jsonResponse({ success: true, cancelledText });
+      }
+
+      // Force-execute a queued message (interrupt current + run queued)
+      if (pathname === '/chat/queue/force' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const queueId = body?.queueId as string;
+        if (!queueId) {
+          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
+        }
+        try {
+          const result = await forceExecuteQueueItem(queueId);
+          if (!result) {
+            return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
+          }
+          return jsonResponse({ success: true });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+            500
+          );
+        }
+      }
+
+      // Get queue status
+      if (pathname === '/chat/queue/status' && request.method === 'GET') {
+        return jsonResponse({ success: true, queue: getQueueStatus() });
+      }
+
+      // Poll background task output file for live stats
+      if (pathname === '/api/task/poll-background' && request.method === 'POST') {
+        try {
+          const body = await request.json() as { outputFile?: string; offset?: number };
+          const { outputFile, offset = 0 } = body;
+
+          // Validate outputFile path: resolve to canonical path then verify it falls
+          // under the user's home directory and matches expected suffix.
+          // This prevents path traversal attacks (e.g., "/../../../etc/passwd.output").
+          if (!outputFile || typeof outputFile !== 'string') {
+            return jsonResponse({ success: false, error: 'Invalid outputFile path' }, 400);
+          }
+          const resolvedOutputFile = resolve(outputFile);
+          const homeDir = getHomeDirOrNull() || '';
+          const isUnderHome = homeDir && resolvedOutputFile.startsWith(homeDir + '/');
+          if (!isUnderHome || !resolvedOutputFile.endsWith('.output')) {
+            return jsonResponse({ success: false, error: 'Invalid outputFile path' }, 400);
+          }
+
+          // Check file existence
+          if (!existsSync(resolvedOutputFile)) {
+            return jsonResponse({ success: true, stats: null, newOffset: 0, isComplete: false });
+          }
+
+          const fileStat = statSync(resolvedOutputFile);
+          const fileSize = fileStat.size;
+
+          // No new data
+          if (offset >= fileSize) {
+            return jsonResponse({ success: true, stats: null, newOffset: offset, isComplete: false });
+          }
+
+          // Read incremental data (cap at 1MB)
+          const MAX_READ = 1024 * 1024;
+          const readEnd = Math.min(offset + MAX_READ, fileSize);
+          const file = Bun.file(resolvedOutputFile);
+          const slice = file.slice(offset, readEnd);
+          const text = await slice.text();
+
+          // Parse JSONL lines
+          let toolCount = 0;
+          let assistantCount = 0;
+          let userCount = 0;
+          let progressCount = 0;
+          let firstTimestamp = 0;
+          let lastTimestamp = 0;
+          let lastLineType = '';
+          let lastLineHasToolUse = false;
+
+          const lines = text.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const parsed = JSON.parse(trimmed);
+              const ts = parsed.timestamp ? new Date(parsed.timestamp).getTime() : 0;
+              if (ts && !firstTimestamp) firstTimestamp = ts;
+              if (ts) lastTimestamp = ts;
+
+              if (parsed.type === 'assistant') {
+                assistantCount++;
+                lastLineType = 'assistant';
+                lastLineHasToolUse = false;
+                // Count tool_use blocks in content
+                if (Array.isArray(parsed.message?.content)) {
+                  for (const block of parsed.message.content) {
+                    if (block.type === 'tool_use') {
+                      toolCount++;
+                      lastLineHasToolUse = true;
+                    }
+                  }
+                }
+              } else if (parsed.type === 'user') {
+                userCount++;
+                lastLineType = 'user';
+                lastLineHasToolUse = false;
+              } else if (parsed.type === 'progress') {
+                progressCount++;
+              }
+            } catch {
+              // Skip truncated/invalid lines
+            }
+          }
+
+          const elapsed = firstTimestamp && lastTimestamp ? lastTimestamp - firstTimestamp : 0;
+
+          // Detect completion: last line is assistant with only text (no tool_use)
+          const isComplete = lastLineType === 'assistant' && !lastLineHasToolUse;
+
+          return jsonResponse({
+            success: true,
+            stats: { toolCount, assistantCount, userCount, progressCount, elapsed },
+            newOffset: readEnd,
+            isComplete
+          });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -843,15 +992,22 @@ async function main() {
           console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
         } else if (sessionId) {
           // single_session mode: switch to the task's stored session (keeps context)
-          console.log(`[cron] execute-sync taskId=${taskId} attempting to switch to session ${sessionId}`);
-          const switched = await switchToSession(sessionId);
-          if (!switched) {
-            console.warn(`[cron] execute-sync taskId=${taskId} failed to switch to session ${sessionId}, will use current session instead`);
-            // Log current session state for debugging
-            const currentState = getAgentState();
-            console.log(`[cron] execute-sync taskId=${taskId} current session state: agentDir=${currentState.agentDir}, sessionState=${currentState.sessionState}, hasInitialPrompt=${currentState.hasInitialPrompt}`);
+          // If already in the target session, skip switchToSession to avoid aborting
+          // an active AI response and clearing the message queue.
+          const currentSessionId = getSessionId();
+          if (currentSessionId === sessionId) {
+            console.log(`[cron] execute-sync taskId=${taskId} single_session mode: already in session ${sessionId}, skipping switch`);
           } else {
-            console.log(`[cron] execute-sync taskId=${taskId} single_session mode: switched to session ${sessionId}`);
+            console.log(`[cron] execute-sync taskId=${taskId} attempting to switch to session ${sessionId}`);
+            const switched = await switchToSession(sessionId);
+            if (!switched) {
+              console.warn(`[cron] execute-sync taskId=${taskId} failed to switch to session ${sessionId}, will use current session instead`);
+              // Log current session state for debugging
+              const currentState = getAgentState();
+              console.log(`[cron] execute-sync taskId=${taskId} current session state: agentDir=${currentState.agentDir}, sessionState=${currentState.sessionState}, hasInitialPrompt=${currentState.hasInitialPrompt}`);
+            } else {
+              console.log(`[cron] execute-sync taskId=${taskId} single_session mode: switched to session ${sessionId}`);
+            }
           }
         } else {
           console.log(`[cron] execute-sync taskId=${taskId} no sessionId provided, using current session`);

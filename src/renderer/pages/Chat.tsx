@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowLeft, History, Plus, PanelRightOpen } from 'lucide-
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import { useToast } from '@/components/Toast';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
@@ -69,7 +70,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     apiGet,
     setSessionState,
     onCronTaskExitRequested,
+    queuedMessages,
+    cancelQueuedMessage,
+    forceExecuteQueuedMessage,
   } = useTabState();
+  const toast = useToast();
 
   // Get config to find current project provider
   const { config, projects, providers, updateProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
@@ -598,18 +603,29 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   }, [selectedModel]);
 
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
-  // This avoids re-rendering Chat on every keystroke
-  const handleSendMessage = async (text: string, images?: ImageAttachment[]) => {
-    // Allow sending if there's text OR images
-    if ((!text && (!images || images.length === 0)) || isLoading || sessionState === 'running') {
-      return;
+  // This avoids re-rendering Chat on every keystroke.
+  // Returns false to signal SimpleChatInput NOT to clear the input (e.g., on rejection).
+  const handleSendMessage = useCallback(async (text: string, images?: ImageAttachment[]): Promise<boolean | void> => {
+    // Must have content and not be in stopping state
+    if ((!text && (!images || images.length === 0)) || sessionState === 'stopping') {
+      return false;
+    }
+
+    // Queue limit: max 5 queued messages
+    const isAiBusy = isLoading || sessionState === 'running';
+    if (isAiBusy && queuedMessages.length >= 5) {
+      toast.warning('最多排队 5 条消息');
+      return false;
     }
 
     // Scroll to bottom immediately so user sees their query
     // This also re-enables auto-scroll if user had scrolled up
     scrollToBottom();
 
-    setIsLoading(true);
+    // Only set loading if AI is idle (direct send). For queued sends, don't change loading state.
+    if (!isAiBusy) {
+      setIsLoading(true);
+    }
 
     // Note: User message is added by SSE replay from backend
     // TabProvider.sendMessage passes attachments which will be merged with the replay message
@@ -632,33 +648,51 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
         return; // startCronTask handles the message sending via onExecute callback
       }
 
-      const success = await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
-      if (!success) {
-        const errorMessage = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant' as const,
-          content: 'Error: Failed to send message',
-          timestamp: new Date()
-        };
-        setMessages((prev) => [...prev, errorMessage]);
-        // Reset both isLoading and sessionState to ensure UI recovers
-        // sessionState may be 'running' if SSE received status update before API timeout
-        setIsLoading(false);
-        setSessionState('idle');
-      }
+      // sendMessage is fire-and-forget (returns true immediately for optimistic UI).
+      // Error handling is done inside sendMessage's .then()/.catch() in TabProvider.
+      await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
     } catch (error) {
       const errorMessage = {
-        id: (Date.now() + 1).toString(),
+        id: `error-${crypto.randomUUID()}`,
         role: 'assistant' as const,
         content: `Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
         timestamp: new Date()
       };
       setMessages((prev) => [...prev, errorMessage]);
       // Reset both isLoading and sessionState to ensure UI recovers
-      setIsLoading(false);
-      setSessionState('idle');
+      if (!isAiBusy) {
+        setIsLoading(false);
+        setSessionState('idle');
+      }
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom, setMessages, setIsLoading, setSessionState are stable
+  }, [sessionState, isLoading, queuedMessages.length, toast, currentProvider, apiKeys, cronState, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
+
+  // Cancel a queued message and restore its text (and images if any) to the input box
+  const handleCancelQueued = useCallback(async (queueId: string) => {
+    // Snapshot the queued message info before it's removed (for image restore)
+    const queuedMsg = queuedMessages.find(q => q.queueId === queueId);
+    const cancelledText = await cancelQueuedMessage(queueId);
+    if (cancelledText) {
+      chatInputRef.current?.setValue(cancelledText);
+      // Restore images if the queued message had them
+      // Note: We only have preview data URLs (not File blobs) to avoid memory leaks,
+      // so we reconstruct ImageAttachment with a minimal placeholder File.
+      if (queuedMsg?.images && queuedMsg.images.length > 0) {
+        const restoredImages: ImageAttachment[] = queuedMsg.images.map(img => ({
+          id: img.id,
+          file: new File([], img.name), // Placeholder — original blob is gone
+          preview: img.preview,
+        }));
+        chatInputRef.current?.setImages(restoredImages);
+      }
+    }
+  }, [cancelQueuedMessage, queuedMessages]);
+
+  // Force-execute a queued message (interrupt current AI response)
+  const handleForceExecuteQueued = useCallback(async (queueId: string) => {
+    await forceExecuteQueuedMessage(queueId);
+  }, [forceExecuteQueuedMessage]);
 
   // Internal handler for starting a new session
   // This resets both frontend and backend state
@@ -850,6 +884,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               }
             }}
             isLoading={isLoading || sessionState === 'running'}
+            sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}
             provider={currentProvider}
@@ -888,6 +923,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               // No SSE reconnection or Sidecar restart is needed.
             }}
             onInputChange={(text) => setCronPrompt(text)}
+            queuedMessages={queuedMessages}
+            onCancelQueued={(queueId) => void handleCancelQueued(queueId)}
+            onForceExecuteQueued={(queueId) => void handleForceExecuteQueued(queueId)}
           />
         </div>
       </div>

@@ -1,12 +1,15 @@
 import { useEffect, useRef } from 'react';
 
-export interface ContextMenuItem {
+export type ContextMenuItem = {
     label: string;
     icon?: React.ReactNode;
     disabled?: boolean;
     danger?: boolean;
+    separator?: false;
     onClick: () => void;
-}
+} | {
+    separator: true;
+};
 
 interface ContextMenuProps {
     x: number;
@@ -68,28 +71,32 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
             className="fixed z-50 min-w-[160px] rounded-xl border border-[var(--line)] bg-[var(--paper-strong)] py-1.5 shadow-lg backdrop-blur"
             style={{ left: x, top: y }}
         >
-            {items.map((item, index) => (
-                <button
-                    key={index}
-                    type="button"
-                    disabled={item.disabled}
-                    onClick={() => {
-                        if (!item.disabled) {
-                            item.onClick();
-                            onClose();
-                        }
-                    }}
-                    className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] transition-colors ${item.disabled
-                            ? 'cursor-not-allowed text-[var(--ink-muted)]/50'
-                            : item.danger
-                                ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
-                                : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
-                        }`}
-                >
-                    {item.icon && <span className="h-4 w-4">{item.icon}</span>}
-                    <span>{item.label}</span>
-                </button>
-            ))}
+            {items.map((item, index) =>
+                'separator' in item && item.separator ? (
+                    <div key={index} className="my-1 border-t border-[var(--line)]" />
+                ) : (
+                    <button
+                        key={index}
+                        type="button"
+                        disabled={item.disabled}
+                        onClick={() => {
+                            if (!item.disabled) {
+                                item.onClick();
+                                onClose();
+                            }
+                        }}
+                        className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[12px] transition-colors ${item.disabled
+                                ? 'cursor-not-allowed text-[var(--ink-muted)]/50'
+                                : item.danger
+                                    ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
+                                    : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                            }`}
+                    >
+                        {item.icon && <span className="h-4 w-4">{item.icon}</span>}
+                        <span>{item.label}</span>
+                    </button>
+                )
+            )}
         </div>
     );
 }

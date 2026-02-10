@@ -28,6 +28,7 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
+import type { QueuedMessageInfo } from '@/types/queue';
 import {
     notifyMessageComplete,
     notifyPermissionRequest,
@@ -222,6 +223,9 @@ export default function TabProvider({
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
     const [pendingAskUserQuestion, setPendingAskUserQuestion] = useState<AskUserQuestionRequest | null>(null);
     const [toolCompleteCount, setToolCompleteCount] = useState(0);
+    const [queuedMessages, setQueuedMessages] = useState<QueuedMessageInfo[]>([]);
+    const queuedMessagesRef = useRef<QueuedMessageInfo[]>([]);
+    queuedMessagesRef.current = queuedMessages;
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
@@ -284,6 +288,8 @@ export default function TabProvider({
         // Clear pending prompts to prevent stale UI
         setPendingPermission(null);
         setPendingAskUserQuestion(null);
+        // Clear queued messages
+        setQueuedMessages([]);
         // Clear current session ID - no active session until first message creates one
         // This ensures history dropdown shows no selection for new conversations
         setCurrentSessionId(null);
@@ -1037,6 +1043,93 @@ export default function TabProvider({
                 break;
             }
 
+            // Queue events
+            case 'queue:added': {
+                // A message was queued — add to frontend queue state for UI rendering.
+                // This is the single source of truth for queue additions (works for both
+                // user sendMessage and cron execute-sync paths).
+                // Deduplication: sendMessage's .then() may also add the same queueId.
+                const payload = data as { queueId: string; messageText: string } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:added queueId=${payload.queueId}`);
+                    setQueuedMessages(prev => {
+                        if (prev.some(q => q.queueId === payload.queueId)) return prev;
+                        return [...prev, {
+                            queueId: payload.queueId,
+                            text: payload.messageText,
+                            timestamp: Date.now(),
+                        }];
+                    });
+                }
+                break;
+            }
+
+            case 'queue:started': {
+                // A queued message started executing:
+                // 1. Add user message to chat (backend does NOT broadcast chat:message-replay for queued messages)
+                // 2. Remove from frontend queue
+                const payload = data as {
+                    queueId: string;
+                    userMessage?: {
+                        id: string;
+                        role: 'user';
+                        content: string;
+                        timestamp: string;
+                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; previewUrl?: string; isImage?: boolean }>;
+                    };
+                } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:started queueId=${payload.queueId}`);
+
+                    // Add the user message to the message list
+                    if (payload.userMessage) {
+                        const msgId = payload.userMessage.id;
+                        if (!seenIdsRef.current.has(msgId)) {
+                            seenIdsRef.current.add(msgId);
+
+                            // Prefer backend-provided attachments (authoritative, includes savedPath).
+                            // Fall back to frontend queued message snapshot for preview URLs
+                            // (backend attachments have savedPath but may lack previewUrl).
+                            let attachments = payload.userMessage.attachments;
+                            if (!attachments?.length) {
+                                const queuedMsg = queuedMessagesRef.current?.find(
+                                    q => q.queueId === payload.queueId
+                                );
+                                attachments = queuedMsg?.images?.map(img => ({
+                                    id: img.id,
+                                    name: img.name,
+                                    size: 0,
+                                    mimeType: 'image/png',
+                                    previewUrl: img.preview,
+                                    isImage: true,
+                                }));
+                            }
+
+                            setMessages(prev => [...prev, {
+                                id: msgId,
+                                role: 'user' as const,
+                                content: payload.userMessage!.content,
+                                timestamp: new Date(payload.userMessage!.timestamp),
+                                attachments: attachments && attachments.length > 0 ? attachments : undefined,
+                            }]);
+                        }
+                    }
+
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
+                }
+                break;
+            }
+
+            case 'queue:cancelled': {
+                // A queued message was cancelled — remove from frontend queue
+                const payload = data as { queueId: string } | null;
+                if (payload?.queueId) {
+                    console.log(`[TabProvider] queue:cancelled queueId=${payload.queueId}`);
+                    setQueuedMessages(prev => prev.filter(q => q.queueId !== payload.queueId));
+                }
+                break;
+            }
+
             default: {
                 // Log unhandled events for debugging
                 if (!eventName.startsWith('chat:')) {
@@ -1100,6 +1193,9 @@ export default function TabProvider({
     // when stopping cron tasks because the Sidecar continues running if Tab still owns it.
 
     // Send message with optional images, permission mode, and model
+    // Returns true immediately (optimistic) to clear the input without waiting for HTTP response.
+    // The actual API call runs in the background — backend may take time for provider changes,
+    // session startup, etc. but the user shouldn't be blocked.
     const sendMessage = useCallback(async (
         text: string,
         images?: ImageAttachment[],
@@ -1116,40 +1212,39 @@ export default function TabProvider({
         const skill = skillMatch ? skillMatch[1] : null;
         const hasImages = !!(images && images.length > 0);
 
-        try {
-            // Reset new session flag BEFORE sending - allow message replay to show user's message
-            // This must happen before API call because chat:message-replay arrives during the call
-            isNewSessionRef.current = false;
+        // Reset new session flag BEFORE sending - allow message replay to show user's message
+        isNewSessionRef.current = false;
 
-            // Store attachments for merging with SSE replay
-            if (hasImages) {
-                pendingAttachmentsRef.current = images.map((img) => ({
-                    id: img.id,
-                    name: img.file.name,
-                    size: img.file.size,
-                    mimeType: img.file.type,
-                    previewUrl: img.preview,
-                    isImage: true,
-                }));
-            }
-
-            // Prepare image data for backend
-            const imageData = images?.map((img) => ({
+        // Store attachments for merging with SSE replay
+        if (hasImages) {
+            pendingAttachmentsRef.current = images.map((img) => ({
+                id: img.id,
                 name: img.file.name,
+                size: img.file.size,
                 mimeType: img.file.type,
-                // Extract base64 data from data URL (remove "data:image/xxx;base64," prefix)
-                data: img.preview.split(',')[1],
+                previewUrl: img.preview,
+                isImage: true,
             }));
+        }
 
-            const response = await postJson<{ success: boolean; error?: string }>('/chat/send', {
-                text: trimmed,
-                images: imageData,
-                permissionMode: permissionMode ?? 'auto',
-                model,
-                providerEnv,
-            });
+        // Prepare image data for backend
+        const imageData = images?.map((img) => ({
+            name: img.file.name,
+            mimeType: img.file.type,
+            // Extract base64 data from data URL (remove "data:image/xxx;base64," prefix)
+            data: img.preview.split(',')[1],
+        }));
 
-            // Track message_send event only after successful send
+        // Fire-and-forget: send to backend without blocking the UI.
+        // The HTTP response may be delayed by provider changes or session startup,
+        // but the input should clear immediately for a responsive experience.
+        postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string }>('/chat/send', {
+            text: trimmed,
+            images: imageData,
+            permissionMode: permissionMode ?? 'auto',
+            model,
+            providerEnv,
+        }).then((response) => {
             if (response.success) {
                 track('message_send', {
                     mode: permissionMode ?? 'auto',
@@ -1159,14 +1254,54 @@ export default function TabProvider({
                     has_file: false,
                     is_cron: isCron ?? false,
                 });
-            }
 
-            return response.success;
-        } catch (error) {
+                // If queued, add to frontend queue state with image data (richer than SSE event).
+                // Deduplication: queue:added SSE may have already added this queueId.
+                if (response.queued && response.queueId) {
+                    const queueId = response.queueId;
+                    setQueuedMessages(prev => {
+                        const existing = prev.find(q => q.queueId === queueId);
+                        if (existing) {
+                            // SSE already added it — enrich with image data if available
+                            if (!images?.length) return prev;
+                            return prev.map(q => q.queueId === queueId
+                                ? { ...q, images: images.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
+                                : q
+                            );
+                        }
+                        return [...prev, {
+                            queueId,
+                            text: trimmed,
+                            // Store lightweight image info only (no File blob) to avoid memory leaks
+                            images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                            timestamp: Date.now(),
+                        }];
+                    });
+                }
+            } else {
+                // Backend rejected: queue full, validation error, etc.
+                console.error(`[TabProvider ${tabId}] Send rejected:`, response.error);
+                setMessages(prev => [...prev, {
+                    id: `error-${crypto.randomUUID()}`,
+                    role: 'assistant' as const,
+                    content: `发送失败: ${response.error ?? '未知错误'}`,
+                    timestamp: new Date(),
+                }]);
+                pendingAttachmentsRef.current = null;
+            }
+        }).catch((error) => {
             console.error(`[TabProvider ${tabId}] Send message failed:`, error);
-            pendingAttachmentsRef.current = null; // Clear on error
-            return false;
-        }
+            setMessages(prev => [...prev, {
+                id: `error-${crypto.randomUUID()}`,
+                role: 'assistant' as const,
+                content: `发送失败: ${error instanceof Error ? error.message : '网络错误'}`,
+                timestamp: new Date(),
+            }]);
+            pendingAttachmentsRef.current = null;
+        });
+
+        // Return true immediately — input clears without waiting for HTTP response
+        return true;
         // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
     }, [tabId]);
 
@@ -1178,6 +1313,9 @@ export default function TabProvider({
             stopTimeoutRef.current = null;
         }
 
+        // Immediately show "stopping" state for instant user feedback
+        setSessionState('stopping');
+
         try {
             const response = await postJson<{ success: boolean; error?: string }>('/chat/stop');
             if (response.success) {
@@ -1187,13 +1325,16 @@ export default function TabProvider({
                         console.warn(`[TabProvider ${tabId}] Stop timeout - forcing UI recovery`);
                         isStreamingRef.current = false;
                         setIsLoading(false);
-                        setSessionState('idle');  // Reset session state on timeout
                         setSystemStatus(null);
                     }
+                    // Also recover from 'stopping' state if SSE confirmation never arrived
+                    setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
                     stopTimeoutRef.current = null;
                 }, 5000);
                 return true;
             }
+            // POST failed (success=false), recover UI
+            setSessionState('idle');
             return false;
         } catch (error) {
             console.error(`[TabProvider ${tabId}] Stop response failed:`, error);
@@ -1392,6 +1533,35 @@ export default function TabProvider({
         void loadSession(sessionId);
     }, [sessionId, isConnected, tabId, loadSession]);
 
+    // Cancel a queued message — returns the original text (for restoring to input)
+    const cancelQueuedMessage = useCallback(async (queueId: string): Promise<string | null> => {
+        try {
+            const response = await postJson<{ success: boolean; cancelledText?: string }>('/chat/queue/cancel', { queueId });
+            if (response.success) {
+                setQueuedMessages(prev => prev.filter(q => q.queueId !== queueId));
+                return response.cancelledText ?? null;
+            }
+            return null;
+        } catch (error) {
+            console.error(`[TabProvider ${tabId}] Cancel queue item failed:`, error);
+            return null;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
+    }, [tabId]);
+
+    // Force-execute a queued message (interrupt current + run immediately)
+    // Does NOT optimistically remove from queue — queue:started SSE is the single source of truth
+    const forceExecuteQueuedMessage = useCallback(async (queueId: string): Promise<boolean> => {
+        try {
+            const response = await postJson<{ success: boolean }>('/chat/queue/force', { queueId });
+            return response.success;
+        } catch (error) {
+            console.error(`[TabProvider ${tabId}] Force execute queue item failed:`, error);
+            return false;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- postJson is stable
+    }, [tabId]);
+
     // Respond to permission request
     const respondPermission = useCallback(async (decision: 'deny' | 'allow_once' | 'always_allow') => {
         if (!pendingPermission) return;
@@ -1453,6 +1623,7 @@ export default function TabProvider({
         pendingPermission,
         pendingAskUserQuestion,
         toolCompleteCount,
+        queuedMessages,
         isConnected,
         setMessages,
         setIsLoading,
@@ -1475,13 +1646,15 @@ export default function TabProvider({
         apiDelete: apiDeleteJson,
         respondPermission,
         respondAskUserQuestion,
+        cancelQueuedMessage,
+        forceExecuteQueuedMessage,
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, isConnected,
+        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, queuedMessages, isConnected,
         appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
-        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion
+        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
     return (

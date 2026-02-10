@@ -1,8 +1,10 @@
 
-import type { AgentInput, SubagentToolCall, ToolUseSimple, TaskStats } from '@/types/chat';
+import type { AgentInput, BackgroundTaskStats, SubagentToolCall, ToolUseSimple, TaskStats } from '@/types/chat';
 
 import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
+import { useTabStateOptional } from '@/context/TabContext';
+import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
 import { CheckCircle, ChevronDown, ChevronRight, Clock, Coins, Loader2, Terminal, Wrench, XCircle } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -28,6 +30,7 @@ interface TaskResult {
   totalDurationMs?: number;
   totalTokens?: number;
   totalToolUseCount?: number;
+  output_file?: string;  // 后台任务输出文件路径
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -282,6 +285,83 @@ function TaskCompletedStats({
   );
 }
 
+// 后台任务统计组件
+function TaskBackgroundStats({
+  stats,
+  isComplete,
+  startTime
+}: {
+  stats: BackgroundTaskStats | null;
+  isComplete: boolean;
+  startTime: number;
+}) {
+  const [frontendElapsed, setFrontendElapsed] = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+
+  useEffect(() => {
+    if (isComplete) {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      return;
+    }
+
+    const rafId = requestAnimationFrame(() => {
+      setFrontendElapsed(Date.now() - startTime);
+    });
+
+    intervalRef.current = setInterval(() => {
+      setFrontendElapsed(Date.now() - startTime);
+    }, 1000);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [startTime, isComplete]);
+
+  // Use backend elapsed if available and larger, otherwise frontend timer
+  const elapsed = stats?.elapsed && stats.elapsed > frontendElapsed ? stats.elapsed : frontendElapsed;
+
+  return (
+    <div className="flex w-full items-center justify-between text-xs rounded-lg bg-[var(--accent)]/5 px-3 py-2 cursor-default transition-colors">
+      <div className="flex flex-wrap items-center gap-3 text-[var(--ink-muted)]">
+        {/* "后台" 标签 */}
+        <span className="rounded-full bg-[var(--ink-muted)]/10 px-1.5 py-0.5 text-[10px] font-medium">
+          后台
+        </span>
+
+        {/* 状态 */}
+        {isComplete ? (
+          <div className="flex items-center gap-1.5 text-[var(--success)]">
+            <CheckCircle className="size-3.5" />
+            <span className="font-medium">后台完成</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-[var(--accent)]">
+            <Loader2 className="size-3.5 animate-spin" />
+            <span className="font-medium">后台运行中</span>
+          </div>
+        )}
+
+        {/* 已运行时间 */}
+        {elapsed > 0 && (
+          <div className="flex items-center gap-1">
+            <Clock className="size-3.5" />
+            <span>{formatDuration(elapsed)}</span>
+          </div>
+        )}
+
+        {/* 工具调用次数 */}
+        {stats && stats.toolCount > 0 && (
+          <div className="flex items-center gap-1">
+            <Wrench className="size-3.5" />
+            <span>调用工具 {stats.toolCount} 次</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 渲染单个子工具调用 - memo 化避免不必要的重渲染
 const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: SubagentToolCall }) {
   const description = useMemo(() => {
@@ -361,6 +441,11 @@ export default function TaskTool({ tool }: TaskToolProps) {
   const [traceExpanded, setTraceExpanded] = useState(false);
   const statsBarRef = useRef<HTMLDivElement>(null);
 
+  // Background task detection
+  const isBackgroundTask = !!(input?.run_in_background);
+  // Stable fallback start time for background tasks (lazy initializer avoids Date.now() on re-render)
+  const [bgFallbackStartTime] = useState(() => Date.now());
+
   // Stable callback for toggle - scroll stats bar into view when expanding
   const handleToggleTrace = useCallback(() => {
     setTraceExpanded(prev => {
@@ -382,7 +467,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
     if (!tool.result) return null;
     try {
       const parsed = JSON.parse(tool.result);
-      if (parsed && (parsed.status || parsed.content)) {
+      if (parsed && (parsed.status || parsed.content || parsed.output_file)) {
         return parsed as TaskResult;
       }
       return null;
@@ -390,6 +475,23 @@ export default function TaskTool({ tool }: TaskToolProps) {
       return null;
     }
   }, [tool.result]);
+
+  // Background task polling
+  const outputFile = isBackgroundTask ? parsedResult?.output_file ?? null : null;
+  const tabState = useTabStateOptional();
+  const noopApiPost = useCallback(async <T,>(_path: string, _body?: unknown): Promise<T> => { throw new Error('no apiPost'); }, []);
+  const { stats: bgStats, isComplete: bgComplete } = useBackgroundTaskPolling({
+    outputFile,
+    isActive: isBackgroundTask && !!outputFile && !isRunning,
+    apiPost: tabState?.apiPost ?? noopApiPost
+  });
+
+  // Show background stats when task is background, not running in foreground,
+  // and main Agent hasn't provided a final status yet.
+  // Keep showing even when bgComplete=true so TaskBackgroundStats renders "后台完成".
+  // Only dismiss when parsedResult gets a real completion/error status (e.g. from Phase 4 SSE).
+  const showBackgroundStats = isBackgroundTask && !isRunning
+    && parsedResult?.status !== 'completed' && parsedResult?.status !== 'error';
 
   // Extract text content from result
   const textContent = useMemo(() => {
@@ -417,6 +519,12 @@ export default function TaskTool({ tool }: TaskToolProps) {
             hasTrace={hasTrace}
             traceExpanded={traceExpanded}
             onToggleTrace={handleToggleTrace}
+          />
+        ) : showBackgroundStats ? (
+          <TaskBackgroundStats
+            stats={bgStats}
+            isComplete={bgComplete}
+            startTime={tool.taskStartTime || bgFallbackStartTime}
           />
         ) : parsedResult ? (
           <TaskCompletedStats

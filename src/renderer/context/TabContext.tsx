@@ -16,12 +16,13 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { Message } from '@/types/chat';
 import type { LogEntry } from '@/types/log';
+import type { QueuedMessageInfo } from '@/types/queue';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 
-export type SessionState = 'idle' | 'running' | 'error';
+export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
 
 /**
  * Tab state - all the state that belongs to a single Tab
@@ -54,6 +55,9 @@ export interface TabState {
 
     // File operation tool completion counter (triggers workspace refresh)
     toolCompleteCount: number;
+
+    // Message queue state (messages waiting to be processed while AI is responding)
+    queuedMessages: QueuedMessageInfo[];
 }
 
 /**
@@ -105,6 +109,10 @@ export interface TabContextValue extends TabState {
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
 
+    // Queue actions
+    cancelQueuedMessage: (queueId: string) => Promise<string | null>;
+    forceExecuteQueuedMessage: (queueId: string) => Promise<boolean>;
+
     // Cron task exit event handler (set by useCronTask hook)
     onCronTaskExitRequested: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
@@ -128,6 +136,7 @@ const defaultContextValue: TabContextValue = {
     pendingPermission: null,
     pendingAskUserQuestion: null,
     toolCompleteCount: 0,
+    queuedMessages: [],
     isConnected: false,
     setMessages: () => { },
     setIsLoading: () => { },
@@ -149,6 +158,8 @@ const defaultContextValue: TabContextValue = {
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
+    cancelQueuedMessage: async () => null,
+    forceExecuteQueuedMessage: async () => false,
     onCronTaskExitRequested: { current: null },
 };
 
