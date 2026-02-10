@@ -14,7 +14,10 @@ export default function CronTaskStatusBar({
   onCancel
 }: CronTaskStatusBarProps) {
   return (
-    <div className="flex items-center justify-between rounded-t-lg border border-b-0 border-red-500/20 bg-red-500/5 px-3 py-2">
+    <div
+      className="flex items-center justify-between rounded-t-lg border border-b-0 border-red-500/20 px-3 py-2"
+      style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 92%, rgb(239 68 68))' }}
+    >
       <div className="flex items-center gap-2">
         <HeartPulse className="h-4 w-4 text-red-500" />
         <span className="text-sm font-medium text-red-500">
