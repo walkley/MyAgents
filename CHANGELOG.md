@@ -18,14 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 通过轮询 output_file 获取增量数据，3 秒刷新
   - 折叠视图显示"后台"徽标和"(后台)"标签后缀
 - **自定义服务商认证方式选择器**：创建/编辑自定义服务商时可选择 AUTH_TOKEN 或 API_KEY
+- **工作区文件夹右键刷新**：文件夹右键菜单新增「刷新」按钮，ContextMenu 组件支持分隔线
 
 ### Changed
 - **停止按钮三态交互**：点击停止按钮立即显示"停止中"视觉反馈（Loader 旋转），后端中断超时从 10s 缩短至 5s
 
 ### Fixed
+- 修复历史会话切换供应商时 "Session ID already in use" 错误（区分历史/新会话的 resume 策略）
 - 修复 Provider 切换时 pre-warm 未完成导致 resume 无效 session ID 的错误
 - 修复 Cron single_session 模式下误中断当前 AI 响应
 - 修复队列 SSE 事件未注册导致前端排队面板不显示
+- 修复心跳循环状态栏背景透明导致内容透出
+- 修复排队面板与心跳状态栏层级顺序（心跳始终紧贴输入框）
+
+### Security
+- 修复后台任务轮询端点路径穿越漏洞（resolve + homeDir 校验）
+- 错误消息 ID 改用 crypto.randomUUID() 避免碰撞
+- queue:started 广播携带 attachments，消除前端附件数据源不可靠隐患
 
 ---
 
