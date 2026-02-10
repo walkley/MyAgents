@@ -1115,7 +1115,14 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
 
       {/* Input container */}
       <div className="pointer-events-auto relative w-full max-w-3xl">
-        {/* Cron task status bar - shows when cron mode enabled but task not started */}
+        {/* Queued messages floating above the input */}
+        <QueuedMessagesPanel
+          messages={queuedMessages}
+          onCancel={(queueId) => onCancelQueued?.(queueId)}
+          onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
+        />
+
+        {/* Cron task status bar - shows when cron mode enabled but task not started (always directly above input) */}
         {cronModeEnabled && !cronTask && cronConfig && (
           <CronTaskStatusBar
             intervalMinutes={cronConfig.intervalMinutes}
@@ -1123,13 +1130,6 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
             onCancel={() => onCronCancel?.()}
           />
         )}
-
-        {/* Queued messages floating above the input */}
-        <QueuedMessagesPanel
-          messages={queuedMessages}
-          onCancel={(queueId) => onCancelQueued?.(queueId)}
-          onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
-        />
 
         <div className={`relative border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl ${
           cronModeEnabled && !cronTask && cronConfig

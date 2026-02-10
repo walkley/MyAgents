@@ -743,18 +743,25 @@ async function main() {
           const body = await request.json() as { outputFile?: string; offset?: number };
           const { outputFile, offset = 0 } = body;
 
-          // Validate outputFile path: must contain /tasks/ and end with .output
-          if (!outputFile || typeof outputFile !== 'string'
-            || !outputFile.includes('/tasks/') || !outputFile.endsWith('.output')) {
+          // Validate outputFile path: resolve to canonical path then verify it falls
+          // under the user's home directory and matches expected suffix.
+          // This prevents path traversal attacks (e.g., "/../../../etc/passwd.output").
+          if (!outputFile || typeof outputFile !== 'string') {
+            return jsonResponse({ success: false, error: 'Invalid outputFile path' }, 400);
+          }
+          const resolvedOutputFile = resolve(outputFile);
+          const homeDir = getHomeDirOrNull() || '';
+          const isUnderHome = homeDir && resolvedOutputFile.startsWith(homeDir + '/');
+          if (!isUnderHome || !resolvedOutputFile.endsWith('.output')) {
             return jsonResponse({ success: false, error: 'Invalid outputFile path' }, 400);
           }
 
           // Check file existence
-          if (!existsSync(outputFile)) {
+          if (!existsSync(resolvedOutputFile)) {
             return jsonResponse({ success: true, stats: null, newOffset: 0, isComplete: false });
           }
 
-          const fileStat = statSync(outputFile);
+          const fileStat = statSync(resolvedOutputFile);
           const fileSize = fileStat.size;
 
           // No new data
@@ -765,7 +772,7 @@ async function main() {
           // Read incremental data (cap at 1MB)
           const MAX_READ = 1024 * 1024;
           const readEnd = Math.min(offset + MAX_READ, fileSize);
-          const file = Bun.file(outputFile);
+          const file = Bun.file(resolvedOutputFile);
           const slice = file.slice(offset, readEnd);
           const text = await slice.text();
 

@@ -3420,7 +3420,9 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
 
     resetTurnUsage();
     currentTurnStartTime = Date.now();
-    // Include user message data so the frontend can render it
+    // Include user message data so the frontend can render it.
+    // Attachments are included so the frontend has a reliable source for image rendering
+    // (especially for cron-triggered queued messages where frontend queuedMessages may lack image data).
     broadcast('queue:started', {
       queueId: item.id,
       userMessage: {
@@ -3428,6 +3430,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         role: userMessage.role,
         content: userMessage.content,
         timestamp: userMessage.timestamp,
+        attachments: userMessage.attachments,
       },
     });
   }

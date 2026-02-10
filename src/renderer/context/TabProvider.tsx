@@ -1070,7 +1070,13 @@ export default function TabProvider({
                 // 2. Remove from frontend queue
                 const payload = data as {
                     queueId: string;
-                    userMessage?: { id: string; role: 'user'; content: string; timestamp: string };
+                    userMessage?: {
+                        id: string;
+                        role: 'user';
+                        content: string;
+                        timestamp: string;
+                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; previewUrl?: string; isImage?: boolean }>;
+                    };
                 } | null;
                 if (payload?.queueId) {
                     console.log(`[TabProvider] queue:started queueId=${payload.queueId}`);
@@ -1081,20 +1087,23 @@ export default function TabProvider({
                         if (!seenIdsRef.current.has(msgId)) {
                             seenIdsRef.current.add(msgId);
 
-                            // Find matching queued message for attachment info
-                            const queuedMsg = queuedMessagesRef.current?.find(
-                                q => q.queueId === payload.queueId
-                            );
-
-                            // Build attachments from queued image info
-                            const attachments = queuedMsg?.images?.map(img => ({
-                                id: img.id,
-                                name: img.name,
-                                size: 0,
-                                mimeType: 'image/png',
-                                previewUrl: img.preview,
-                                isImage: true,
-                            }));
+                            // Prefer backend-provided attachments (authoritative, includes savedPath).
+                            // Fall back to frontend queued message snapshot for preview URLs
+                            // (backend attachments have savedPath but may lack previewUrl).
+                            let attachments = payload.userMessage.attachments;
+                            if (!attachments?.length) {
+                                const queuedMsg = queuedMessagesRef.current?.find(
+                                    q => q.queueId === payload.queueId
+                                );
+                                attachments = queuedMsg?.images?.map(img => ({
+                                    id: img.id,
+                                    name: img.name,
+                                    size: 0,
+                                    mimeType: 'image/png',
+                                    previewUrl: img.preview,
+                                    isImage: true,
+                                }));
+                            }
 
                             setMessages(prev => [...prev, {
                                 id: msgId,
@@ -1273,7 +1282,7 @@ export default function TabProvider({
                 // Backend rejected: queue full, validation error, etc.
                 console.error(`[TabProvider ${tabId}] Send rejected:`, response.error);
                 setMessages(prev => [...prev, {
-                    id: `error-${Date.now()}`,
+                    id: `error-${crypto.randomUUID()}`,
                     role: 'assistant' as const,
                     content: `发送失败: ${response.error ?? '未知错误'}`,
                     timestamp: new Date(),
@@ -1283,7 +1292,7 @@ export default function TabProvider({
         }).catch((error) => {
             console.error(`[TabProvider ${tabId}] Send message failed:`, error);
             setMessages(prev => [...prev, {
-                id: `error-${Date.now()}`,
+                id: `error-${crypto.randomUUID()}`,
                 role: 'assistant' as const,
                 content: `发送失败: ${error instanceof Error ? error.message : '网络错误'}`,
                 timestamp: new Date(),

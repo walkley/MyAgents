@@ -653,7 +653,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
       await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
     } catch (error) {
       const errorMessage = {
-        id: (Date.now() + 1).toString(),
+        id: `error-${crypto.randomUUID()}`,
         role: 'assistant' as const,
         content: `Error: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
         timestamp: new Date()
