@@ -903,6 +903,12 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
           icon: <Trash2 className="h-4 w-4" />,
           danger: true,
           onClick: () => setDialog({ type: 'delete', node })
+        },
+        { separator: true },
+        {
+          label: '刷新',
+          icon: <RefreshCw className="h-4 w-4" />,
+          onClick: refresh
         }
       ];
     } else {
