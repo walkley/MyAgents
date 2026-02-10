@@ -648,22 +648,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
         return; // startCronTask handles the message sending via onExecute callback
       }
 
-      const success = await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
-      if (!success) {
-        const errorMessage = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant' as const,
-          content: 'Error: Failed to send message',
-          timestamp: new Date()
-        };
-        setMessages((prev) => [...prev, errorMessage]);
-        // Reset both isLoading and sessionState to ensure UI recovers
-        // sessionState may be 'running' if SSE received status update before API timeout
-        if (!isAiBusy) {
-          setIsLoading(false);
-          setSessionState('idle');
-        }
-      }
+      // sendMessage is fire-and-forget (returns true immediately for optimistic UI).
+      // Error handling is done inside sendMessage's .then()/.catch() in TabProvider.
+      await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
     } catch (error) {
       const errorMessage = {
         id: (Date.now() + 1).toString(),
@@ -882,9 +869,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               onAskUserQuestionSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
               onAskUserQuestionCancel={() => void respondAskUserQuestion(null)}
               systemStatus={systemStatus}
-              queuedMessages={queuedMessages}
-              onCancelQueued={(queueId) => void handleCancelQueued(queueId)}
-              onForceExecuteQueued={(queueId) => void handleForceExecuteQueued(queueId)}
             />
           </FileActionProvider>
 
@@ -939,6 +923,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
               // No SSE reconnection or Sidecar restart is needed.
             }}
             onInputChange={(text) => setCronPrompt(text)}
+            queuedMessages={queuedMessages}
+            onCancelQueued={(queueId) => void handleCancelQueued(queueId)}
+            onForceExecuteQueued={(queueId) => void handleForceExecuteQueued(queueId)}
           />
         </div>
       </div>

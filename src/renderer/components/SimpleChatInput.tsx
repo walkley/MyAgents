@@ -6,10 +6,12 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabStateOptional, type SessionState } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
+import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 
@@ -86,6 +88,10 @@ interface SimpleChatInputProps {
   onCronStop?: () => void;
   /** Callback when input text changes (for cron prompt tracking) */
   onInputChange?: (text: string) => void;
+  // Queued messages props
+  queuedMessages?: QueuedMessageInfo[];
+  onCancelQueued?: (queueId: string) => void;
+  onForceExecuteQueued?: (queueId: string) => void;
 }
 
 const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
@@ -151,6 +157,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   onCronCancel,
   onCronStop,
   onInputChange,
+  queuedMessages = [],
+  onCancelQueued,
+  onForceExecuteQueued,
 }, ref) {
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -1114,6 +1123,13 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
             onCancel={() => onCronCancel?.()}
           />
         )}
+
+        {/* Queued messages floating above the input */}
+        <QueuedMessagesPanel
+          messages={queuedMessages}
+          onCancel={(queueId) => onCancelQueued?.(queueId)}
+          onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
+        />
 
         <div className={`relative border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl ${
           cronModeEnabled && !cronTask && cronConfig

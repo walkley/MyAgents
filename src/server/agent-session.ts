@@ -144,6 +144,7 @@ type MessageQueueItem = {
   messageText: string;            // Original text for cancel/restore
   wasQueued: boolean;             // true if added via non-blocking path (AI was busy)
   resolve: () => void;
+  attachments?: MessageWire['attachments'];  // Saved attachments for deferred user message rendering
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
@@ -161,6 +162,9 @@ export type ProviderEnv = {
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 // SDK session ID to resume from (set by switchToSession)
 let resumeSessionId: string | undefined = undefined;
+// Tracks whether sessionId has been used in a query() call.
+// Once used, all subsequent calls MUST use `resume` (SDK rejects reusing a session ID).
+let sessionIdUsedByQuery = false;
 
 // ===== System Prompt Configuration =====
 // Supports three modes:
@@ -1604,7 +1608,12 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
-  setSessionState('idle');
+  // Only transition to idle if no queued messages waiting.
+  // When queue has messages, the session will restart in the finally block
+  // to process the next one — keep 'running' to avoid UI flicker.
+  if (messageQueue.length === 0) {
+    setSessionState('idle');
+  }
 
   // Calculate duration for this turn
   const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
@@ -1622,7 +1631,10 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
-  setSessionState('idle');
+  // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
+  if (messageQueue.length === 0) {
+    setSessionState('idle');
+  }
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage || lastMessage.role !== 'assistant' || typeof lastMessage.content === 'string') {
     // Persist even if no assistant message
@@ -1980,6 +1992,7 @@ export async function resetSession(): Promise<void> {
 
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   resumeSessionId = undefined;
+  sessionIdUsedByQuery = false; // New session ID, not yet used
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
@@ -2070,6 +2083,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Reset all runtime state
   shouldAbortSession = false;
   isProcessing = false;
+  sessionIdUsedByQuery = false; // New session context
   setSessionState('idle');
   messages.length = 0;
   messageQueue.length = 0;
@@ -2227,10 +2241,14 @@ export async function enqueueUserMessage(
     return { queued: false };
   }
 
+  // Session is "busy" if AI is streaming OR there are pending messages in the queue.
+  // This prevents config changes and turn-usage resets during the brief gap between turns.
+  const isSessionBusy = isStreamingMessage || messageQueue.length > 0;
+
   // Reset turn usage tracking — only for direct (non-queued) messages.
   // For queued messages, this is done in messageGenerator when the item is yielded,
   // to avoid corrupting the in-flight turn's usage counters.
-  if (!isStreamingMessage) {
+  if (!isSessionBusy) {
     resetTurnUsage();
     currentTurnStartTime = Date.now();
   }
@@ -2240,10 +2258,10 @@ export async function enqueueUserMessage(
   // SKIP for queued messages: provider/model changes during streaming would cause a session
   // restart that wipes the queue and races with the active stream. Queued messages inherit
   // the current session's provider/model configuration.
-  const switchingToSubscription = !isStreamingMessage && !providerEnv && currentProviderEnv;
+  const switchingToSubscription = !isSessionBusy && !providerEnv && currentProviderEnv;
   const baseUrlChanged = switchingToSubscription ||
-    (!isStreamingMessage && providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (!isStreamingMessage && providerEnv && (
+    (!isSessionBusy && providerEnv && providerEnv.baseUrl !== currentProviderEnv?.baseUrl);
+  const providerChanged = baseUrlChanged || (!isSessionBusy && providerEnv && (
     providerEnv.apiKey !== currentProviderEnv?.apiKey
   ));
 
@@ -2256,12 +2274,19 @@ export async function enqueueUserMessage(
     // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
     const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
-    if (switchingFromThirdPartyToAnthropic || !systemInitInfo?.session_id) {
+    if (switchingFromThirdPartyToAnthropic) {
       resumeSessionId = undefined;
-      console.log(`[agent] Starting fresh session (no resume): ${switchingFromThirdPartyToAnthropic ? 'third-party → Anthropic official (signature incompatible)' : 'no existing session to resume'}`);
-    } else {
+      console.log('[agent] Starting fresh session (no resume): third-party → Anthropic official (signature incompatible)');
+    } else if (systemInitInfo?.session_id) {
       resumeSessionId = systemInitInfo.session_id;
       if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
+    } else {
+      // systemInitInfo not available — pre-warm was never fully initialized.
+      // Cannot resume because the SDK CLI may not have saved this session.
+      // Start completely fresh to avoid "No conversation found" errors.
+      resumeSessionId = undefined;
+      sessionIdUsedByQuery = false; // Reset so startStreamingSession doesn't use fallback
+      console.log('[agent] Starting fresh session: no system_init available for resume');
     }
 
     // Update provider env BEFORE terminating so the new session picks it up
@@ -2294,7 +2319,7 @@ export async function enqueueUserMessage(
 
   // Apply runtime config changes if session is active (model/permission changes don't require restart)
   // Skip for queued messages — config is locked to the current session while streaming
-  if (!isStreamingMessage) {
+  if (!isSessionBusy) {
     await applySessionConfig(model, permissionMode);
 
     // Update local tracking even if SDK call is skipped (first message)
@@ -2366,26 +2391,6 @@ export async function enqueueUserMessage(
     }
   }
 
-  const userMessage: MessageWire = {
-    id: String(messageSequence++),
-    role: 'user',
-    content: trimmed,
-    timestamp: new Date().toISOString(),
-    attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
-  };
-  messages.push(userMessage);
-  broadcast('chat:message-replay', { message: userMessage });
-
-  // Persist messages to disk after adding user message
-  persistMessagesToStorage();
-
-  if (!isSessionActive()) {
-    console.log('[agent] starting session (idle -> running)');
-    startStreamingSession().catch((error) => {
-      console.error('[agent] failed to start session', error);
-    });
-  }
-
   // Build multimodal content array for Claude API
   // Images are sent as base64-encoded source blocks
   const contentBlocks: Array<
@@ -2414,9 +2419,13 @@ export async function enqueueUserMessage(
 
   const queueId = randomUUID();
 
-  // If session is actively streaming (AI responding), queue non-blocking
-  // so the HTTP response returns immediately and user sees "queued" state
-  if (isStreamingMessage) {
+  // Queue if session is busy: either AI is streaming or there are pending messages
+  // in the queue waiting to be processed. This prevents a race condition where
+  // isStreamingMessage is false briefly between turns (handleMessageComplete resets it)
+  // but the generator hasn't picked up the next queued item yet.
+  // IMPORTANT: Do NOT push to messages[] or broadcast here — queued messages
+  // are rendered in the frontend only when they start executing (see messageGenerator).
+  if (isStreamingMessage || messageQueue.length > 0) {
     // Backend queue limit (defense-in-depth — frontend also enforces limit)
     const MAX_QUEUE_SIZE = 10;
     if (messageQueue.length >= MAX_QUEUE_SIZE) {
@@ -2428,20 +2437,43 @@ export async function enqueueUserMessage(
       messageText: trimmed,
       wasQueued: true,
       resolve: () => {},  // No-op: no one is awaiting
+      attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
     });
+    console.log(`[agent] Message queued (deferred render): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
     return { queued: true, queueId };
   }
 
-  // Session is idle or starting — await processing (ensures SDK ProcessTransport is ready)
-  await new Promise<void>((resolve) => {
-    messageQueue.push({
-      id: queueId,
-      message: { role: 'user', content: contentBlocks },
-      messageText: trimmed,
-      wasQueued: false,
-      resolve,
+  // Direct send path: push user message to messages[] and broadcast immediately
+  const userMessage: MessageWire = {
+    id: String(messageSequence++),
+    role: 'user',
+    content: trimmed,
+    timestamp: new Date().toISOString(),
+    attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+  };
+  messages.push(userMessage);
+  broadcast('chat:message-replay', { message: userMessage });
+
+  // Persist messages to disk after adding user message
+  persistMessagesToStorage();
+
+  if (!isSessionActive()) {
+    console.log('[agent] starting session (idle -> running)');
+    startStreamingSession().catch((error) => {
+      console.error('[agent] failed to start session', error);
     });
+  }
+
+  // Push to queue — generator will pick it up asynchronously.
+  // No need to await: user message is already in messages[], broadcast, and persisted.
+  // This allows the HTTP response to return immediately so the frontend can clear the input.
+  messageQueue.push({
+    id: queueId,
+    message: { role: 'user', content: contentBlocks },
+    messageText: trimmed,
+    wasQueued: false,
+    resolve: () => {},  // No-op: no one is awaiting
   });
   return { queued: false };
 }
@@ -2606,7 +2638,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
-    const resumeFrom = resumeSessionId;
+    // Determine resume: explicit resumeSessionId takes priority, then safety-net flag.
+    // Once a sessionId has been used in any query(), the SDK rejects it for new sessions —
+    // all subsequent calls must use `resume`. This handles: queue restarts, provider changes
+    // before system_init arrives, and restored historical sessions.
+    const resumeFrom = resumeSessionId ?? (sessionIdUsedByQuery ? sessionId : undefined);
     // Only clear resumeSessionId for non-pre-warm sessions.
     // During pre-warm, preserve it so a retry after failure can still resume.
     if (!preWarm) {
@@ -2615,6 +2651,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
     console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
+
+    // Mark that this sessionId has been used in a query — subsequent calls must use `resume`
+    sessionIdUsedByQuery = true;
 
     querySession = query({
       prompt: messageGenerator(),
@@ -3300,9 +3339,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     isPreWarming = false;
     isProcessing = false;
     querySession = null;
+
+    // Each query() call processes ONE user message (single-yield generator pattern).
+    // After successful completion, set resumeSessionId so subsequent query() calls
+    // use `resume` instead of `sessionId` (the SDK rejects reusing a session ID).
+    if (!wasPreWarming && !shouldAbortSession && sessionState !== 'error' && systemInitInfo?.session_id) {
+      resumeSessionId = systemInitInfo.session_id;
+    }
+
+    // Check if there are queued messages to process next.
+    const shouldRestart = !wasPreWarming && !shouldAbortSession
+      && sessionState !== 'error' && messageQueue.length > 0;
+
     // Don't broadcast state changes from pre-warm sessions
     if (!wasPreWarming) {
-      if (sessionState !== 'error') {
+      if (sessionState !== 'error' && !shouldRestart) {
         setSessionState('idle');
       }
     }
@@ -3313,57 +3364,85 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // If pre-warm was aborted (e.g., config change), re-warm with updated config
     if (wasPreWarming) {
       schedulePreWarm();
+    } else if (shouldRestart) {
+      // Process next queued message by starting a new session with resume
+      // (resumeSessionId already set above)
+      console.log(`[agent] Queue has ${messageQueue.length} pending message(s), restarting session with resume=${resumeSessionId}`);
+      startStreamingSession().catch((error) => {
+        console.error('[agent] failed to restart session for queued message:', error);
+        setSessionState('idle');
+      });
     }
   }
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  console.log('[messageGenerator] Started');
+  // Yield exactly ONE message and return.
+  // The SDK's streamInput() iterates the generator with `for await`, writing each value
+  // to the subprocess's stdin. When the generator returns (done), streamInput() calls
+  // endInput() to close stdin (EOF), allowing the subprocess to finish and exit cleanly.
+  // For queued messages, the startStreamingSession() finally block detects remaining items
+  // and restarts the session with `resume` to process the next one sequentially.
+  console.log('[messageGenerator] Started, waiting for message');
 
-  while (true) {
+  // Wait for one message in queue
+  while (messageQueue.length === 0) {
     if (shouldAbortSession) {
-      console.log('[messageGenerator] Abort flag set, returning');
+      console.log('[messageGenerator] Abort flag set while waiting, returning');
       return;
     }
-
-    // Wait for message in queue
-    await new Promise<void>((resolve) => {
-      const checkQueue = () => {
-        if (shouldAbortSession) {
-          resolve();
-          return;
-        }
-
-        if (messageQueue.length > 0) {
-          resolve();
-        } else {
-          setTimeout(checkQueue, 100);
-        }
-      };
-      checkQueue();
-    });
-
-    if (shouldAbortSession) {
-      console.log('[messageGenerator] Abort flag set after wait, returning');
-      return;
-    }
-
-    const item = messageQueue.shift();
-    if (item) {
-      // For queued items: reset turn usage now (deferred from enqueueUserMessage)
-      // and notify frontend that execution is starting
-      if (item.wasQueued) {
-        resetTurnUsage();
-        currentTurnStartTime = Date.now();
-        broadcast('queue:started', { queueId: item.id });
-      }
-      yield {
-        type: 'user' as const,
-        message: item.message,
-        parent_tool_use_id: null,
-        session_id: getSessionId()
-      };
-      item.resolve();
-    }
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
   }
+
+  if (shouldAbortSession) {
+    console.log('[messageGenerator] Abort flag set after wait, returning');
+    return;
+  }
+
+  const item = messageQueue.shift();
+  if (!item) return;
+
+  // For queued items: the user message was NOT added to messages[] at enqueue time.
+  // Now that execution is starting, push it to backend state and persist,
+  // but do NOT broadcast chat:message-replay — instead send message data via queue:started.
+  // This lets the frontend control rendering timing and avoids the user message
+  // appearing in the message list while the previous AI response is still visually streaming.
+  if (item.wasQueued) {
+    const userMessage: MessageWire = {
+      id: String(messageSequence++),
+      role: 'user',
+      content: item.messageText,
+      timestamp: new Date().toISOString(),
+      attachments: item.attachments,
+    };
+    messages.push(userMessage);
+    persistMessagesToStorage();
+
+    resetTurnUsage();
+    currentTurnStartTime = Date.now();
+    // Include user message data so the frontend can render it
+    broadcast('queue:started', {
+      queueId: item.id,
+      userMessage: {
+        id: userMessage.id,
+        role: userMessage.role,
+        content: userMessage.content,
+        timestamp: userMessage.timestamp,
+      },
+    });
+  }
+
+  // Mark as streaming BEFORE yielding to SDK, so any new messages arriving
+  // during SDK processing will be queued.
+  isStreamingMessage = true;
+  console.log(`[messageGenerator] Yielding message to SDK, wasQueued=${item.wasQueued}`);
+  yield {
+    type: 'user' as const,
+    message: item.message,
+    parent_tool_use_id: null,
+    session_id: getSessionId()
+  };
+  item.resolve();
+  console.log('[messageGenerator] Message yielded, generator returning (single-yield pattern)');
+  // Generator returns → SDK's streamInput loop exits → endInput() closes stdin → subprocess processes and exits
 }

@@ -2425,7 +2425,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                     </label>
                                 </div>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    AUTH_TOKEN 设置 ANTHROPIC_AUTH_TOKEN，API_KEY 设置 ANTHROPIC_API_KEY
+                                    请根据供应商认证参数进行选择
                                 </p>
                             </div>
 
@@ -2630,7 +2630,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                         </label>
                                     </div>
                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        AUTH_TOKEN 设置 ANTHROPIC_AUTH_TOKEN，API_KEY 设置 ANTHROPIC_API_KEY
+                                        请根据供应商认证参数进行选择
                                     </p>
                                 </div>
                             )}
