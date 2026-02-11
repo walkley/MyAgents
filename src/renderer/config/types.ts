@@ -109,6 +109,9 @@ export interface Provider {
   // 认证方式 (默认 'both' 以保持向后兼容)
   authType?: ProviderAuthType;
 
+  // 官网链接 (用于"去官网"入口)
+  websiteUrl?: string;
+
   // 模型列表 - 使用新的 ModelEntity 结构
   models: ModelEntity[];
 
@@ -295,6 +298,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'deepseek-chat',
     isBuiltin: true,
     authType: 'auth_token',
+    websiteUrl: 'https://platform.deepseek.com',
     config: {
       baseUrl: 'https://api.deepseek.com/anthropic',
       timeout: 600000,
@@ -314,6 +318,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'kimi-k2.5',
     isBuiltin: true,
     authType: 'auth_token',
+    websiteUrl: 'https://platform.moonshot.cn/console',
     config: {
       baseUrl: 'https://api.moonshot.cn/anthropic',
     },
@@ -332,6 +337,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'glm-4.7',
     isBuiltin: true,
     authType: 'auth_token',
+    websiteUrl: 'https://bigmodel.cn/console/overview',
     config: {
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       timeout: 3000000,
@@ -339,6 +345,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     models: [
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
+      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
       { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
     ],
   },
@@ -351,6 +358,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'MiniMax-M2.1',
     isBuiltin: true,
     authType: 'auth_token',
+    websiteUrl: 'https://platform.minimaxi.com/docs/guides/models-intro',
     config: {
       baseUrl: 'https://api.minimaxi.com/anthropic',
     },
@@ -368,6 +376,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'ark-code-latest',
     isBuiltin: true,
     authType: 'auth_token',
+    websiteUrl: 'https://console.volcengine.com/',
     config: {
       baseUrl: 'https://ark.cn-beijing.volces.com/api/coding',
       disableNonessential: true,
@@ -386,6 +395,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'Pro/deepseek-ai/DeepSeek-V3.2',
     isBuiltin: true,
     authType: 'api_key',
+    websiteUrl: 'https://cloud.siliconflow.cn/me/models',
     config: {
       baseUrl: 'https://api.siliconflow.cn/',
     },
@@ -406,6 +416,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'openai/gpt-5.2-codex',
     isBuiltin: true,
     authType: 'auth_token_clear_api_key',
+    websiteUrl: 'https://openrouter.ai/',
     config: {
       baseUrl: 'https://openrouter.ai/api',
     },

@@ -1332,13 +1332,23 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                                 {getModelsDisplay(provider)}
                                             </p>
                                         </div>
-                                        <button
-                                            onClick={() => openProviderManage(provider)}
-                                            className="shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                                            title="管理"
-                                        >
-                                            <Settings2 className="h-4 w-4" />
-                                        </button>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            {provider.websiteUrl && (
+                                                <ExternalLink
+                                                    href={provider.websiteUrl}
+                                                    className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                >
+                                                    去官网
+                                                </ExternalLink>
+                                            )}
+                                            <button
+                                                onClick={() => openProviderManage(provider)}
+                                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                title="管理"
+                                            >
+                                                <Settings2 className="h-4 w-4" />
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {/* API Key input */}
