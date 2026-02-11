@@ -116,7 +116,7 @@ export default function WorkspaceCard({
                             if (isMenuOpen) onMenuToggle(false);
                             setShowMoreMenu(!showMoreMenu);
                         }}
-                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                         title="更多操作"
                         aria-label="更多操作"
                         aria-expanded={showMoreMenu}
@@ -126,7 +126,7 @@ export default function WorkspaceCard({
                     </button>
                     {showMoreMenu && (
                         <div
-                            className="absolute right-0 top-full z-50 mt-1 w-32 rounded-lg border border-[var(--line)] bg-[var(--paper-strong)] py-1 shadow-lg"
+                            className="absolute right-0 top-full z-50 mt-1 w-32 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg"
                             role="menu"
                             aria-label="工作区操作菜单"
                         >
@@ -138,7 +138,7 @@ export default function WorkspaceCard({
                                     setShowMoreMenu(false);
                                     onRemove(project);
                                 }}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--error)] transition-colors hover:bg-[var(--paper-contrast)]"
                             >
                                 <Trash2 className="h-3.5 w-3.5" />
                                 移除
@@ -165,7 +165,7 @@ export default function WorkspaceCard({
                                 onRefreshProviders();
                             }
                         }}
-                        className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                     >
                         <span className="max-w-[120px] truncate">
                             {effectiveProvider?.name ?? '选择模型'}
@@ -176,7 +176,7 @@ export default function WorkspaceCard({
                     {/* Dropdown Menu */}
                     {isMenuOpen && (
                         <div
-                            className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-strong)] py-1 shadow-lg"
+                            className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg"
                             onClick={(e) => e.stopPropagation()}
                         >
                             {providers.map((p, index) => {
