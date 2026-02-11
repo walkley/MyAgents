@@ -134,6 +134,23 @@ if (configChanged) {
 shouldAbortSession = true;  // 没有 resumeSessionId！
 ```
 
+### 5. Tab 初始化与 Pre-warm
+
+Tab Sidecar 启动后，前端按固定顺序同步配置，最后一步的 MCP/Agents 同步触发 `schedulePreWarm()`（500ms 防抖），在用户发送第一条消息前预热 SDK 子进程和 MCP 服务器：
+
+```
+Tab 创建 → Sidecar 启动 → Model 同步(/api/model/set)
+                          → Provider 同步(/api/mcp/set, /api/agents/set)
+                          → schedulePreWarm() [500ms debounce]
+                          → SDK subprocess + MCP 预热完成
+                          → 用户发消息，直接使用已预热的 session
+```
+
+注意事项：
+- **Model 同步不触发 pre-warm**（模型变更无需重启 session），MCP/Agents 变更才触发
+- **新增配置同步端点时**，确保 `currentXxx` 变量在 pre-warm 前已设置，否则 `applySessionConfig` 会在首消息时执行阻塞操作
+- Pre-warm 失败通过 `preWarmStartedOk` 标志统一管理，abort 不计入失败次数
+
 ---
 
 ## React 稳定性规范
@@ -208,6 +225,36 @@ useEffect(() => {
 
 ---
 
+## Config 持久化规范
+
+> **核心原则**：`AppConfig` 同时存在于磁盘（config.json）和 React 状态（`useConfig` 的 `config` state）中。两者可能不同步，写入时必须以磁盘为准。
+
+### 为什么会不同步
+
+`useConfig` 中部分写入函数（如 `saveApiKey`）通过 `configService` 直接读盘→改→写盘，并更新各自的 React 状态（`setApiKeys`），但**不更新 `config` React 状态**。导致 `config` 中的 `providerApiKeys` 等字段过期。
+
+### 规则：写入前必须从磁盘加载
+
+```typescript
+// ✅ 正确：从磁盘读最新配置再合并
+const savePresetCustomModels = useCallback(async (providerId, models) => {
+    const latestConfig = await loadAppConfig(); // 磁盘最新
+    const newConfig = { ...latestConfig, presetCustomModels: { ... } };
+    setConfig(newConfig);
+    await saveAppConfig(newConfig);
+}, []); // 无需依赖 config
+
+// ❌ 错误：使用 React config 状态（可能已过期，覆盖其他字段）
+const savePresetCustomModels = useCallback(async (providerId, models) => {
+    const newConfig = { ...config, presetCustomModels: { ... } };
+    await saveAppConfig(newConfig); // config.providerApiKeys 可能是旧的！
+}, [config]);
+```
+
+适用范围：`useConfig.ts` 中所有读取 `config` 状态并调用 `saveAppConfig` 的函数。`configService.ts` 层的函数已遵循此模式。
+
+---
+
 ## 禁止事项速查表
 
 | 禁止 | 原因 | 正确做法 |
@@ -220,6 +267,8 @@ useEffect(() => {
 | 不清理定时器 | 内存泄漏 | cleanup 函数 |
 | 依赖 npm/npx/Node.js | 用户可能未安装 | 内置 bun |
 | 配置变更不 resume session | AI 失忆 | 先设 `resumeSessionId` |
+| `useConfig` 写盘用 React `config` 状态 | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 从磁盘读 |
+| 新增配置同步不考虑 pre-warm | 首消息阻塞延迟 | 确保变量在 pre-warm 前设置 |
 | 提交前不 typecheck | CI 失败 | `npm run typecheck` |
 | 提交前不检查分支 | 误提交到错误分支 | `git branch --show-current` |
 | 在 main 分支直接提交 | 破坏主分支稳定性 | 切换到 dev 分支 |
@@ -291,7 +340,7 @@ if (isDebugMode()) console.log('[module] debug message');
 
 1. **提交前**：`npm run typecheck`
 2. **Commit 格式**：Conventional Commits (`feat:`, `fix:`, `refactor:`)
-3. **分支策略**：功能分支 `dev/prd-x.x.x` → 合并到 `main`
+3. **分支策略**：功能分支 `dev/x.x.x` → 合并到 `main`
 4. **版本管理**：`npm version patch/minor/major` 自动同步所有配置
 5. **发布流程**：`npm version` → `./build_macos.sh` → `./publish_release.sh` → push tag
 6. **版本发布**：发布前**先更新 [CHANGELOG.md](./CHANGELOG.md)，再打 tag**，tag message 从 CHANGELOG.md 复制
