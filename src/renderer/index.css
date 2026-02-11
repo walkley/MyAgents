@@ -2,6 +2,11 @@
 
 @plugin '@tailwindcss/typography';
 
+/* Force light mode: override Tailwind's default dark variant (prefers-color-scheme)
+   to class-based strategy. Since we never add .dark class, all dark: utilities are inert.
+   Remove this override when implementing dark mode support. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Custom titlebar styles for frameless window */
 /* NOTE: Do NOT use -webkit-app-region: drag - it conflicts with Tauri's data-tauri-drag-region on macOS */
 .custom-titlebar {
