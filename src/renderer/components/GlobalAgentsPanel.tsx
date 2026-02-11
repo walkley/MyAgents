@@ -201,7 +201,7 @@ export default function GlobalAgentsPanel() {
     // Agent Detail View
     if (viewState.type === 'agent-detail') {
         return (
-            <div className="mx-auto max-w-3xl space-y-4">
+            <div className="space-y-4">
                 <button
                     onClick={handleBackToList}
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
@@ -226,7 +226,7 @@ export default function GlobalAgentsPanel() {
 
     // List View
     return (
-        <div className="mx-auto max-w-3xl space-y-8">
+        <div className="space-y-8">
             {/* Agents Section */}
             <div>
                 <div className="mb-4 flex items-center justify-between">
