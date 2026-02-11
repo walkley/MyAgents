@@ -1983,6 +1983,16 @@ export async function resetSession(): Promise<void> {
     querySession = null;
   }
 
+  // 1b. Persist in-memory messages from the old session before clearing.
+  // If streaming was aborted mid-turn, handleMessageComplete was never called,
+  // so these messages exist only in memory. Persist them to prevent data loss
+  // in the old session (user may revisit it from history).
+  // sessionId still points to the OLD session here (updated in step 3).
+  if (messages.length > 0) {
+    console.log(`[agent] resetSession: persisting ${messages.length} in-memory messages before clearing`);
+    persistMessagesToStorage();
+  }
+
   // 2. Clear all message state (shared with initializeAgent)
   clearMessageState();
 
@@ -2060,6 +2070,13 @@ export function initializeAgent(nextAgentDir: string, initialPrompt?: string | n
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
   console.log(`[agent] switchToSession: ${targetSessionId}`);
 
+  // Skip if already on the target session — prevents aborting an active streaming task
+  // when frontend calls loadSession on the same session (e.g., after cron timeout)
+  if (targetSessionId === sessionId) {
+    console.log(`[agent] switchToSession: already on session ${targetSessionId}, skipping`);
+    return true;
+  }
+
   // Get the target session metadata to find SDK session_id
   const sessionMeta = getSessionMetadata(targetSessionId);
   if (!sessionMeta) {
@@ -2078,6 +2095,13 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
       await sessionTerminationPromise;
     }
     querySession = null;
+  }
+
+  // Persist current in-memory messages before clearing to prevent data loss
+  // (e.g., if an active streaming session accumulated messages not yet saved to disk)
+  if (messages.length > 0) {
+    console.log(`[agent] switchToSession: persisting ${messages.length} in-memory messages before clearing`);
+    persistMessagesToStorage();
   }
 
   // Reset all runtime state

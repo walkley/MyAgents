@@ -554,13 +554,24 @@ impl CronTaskManager {
                     }
                 };
 
-                log::info!("[CronTask] execute_task_directly returned for task {}: {:?}", task_id_owned, execution_result.is_ok());
-
-                // Emit debug event for frontend visibility
-                let _ = handle.emit("cron:debug", serde_json::json!({
-                    "taskId": task_id_owned,
-                    "message": format!("execute_task_directly returned: success={}", execution_result.is_ok())
-                }));
+                // Log the actual execution outcome (not just is_ok which only means "no Rust error")
+                match &execution_result {
+                    Ok((success, _)) => {
+                        log::info!("[CronTask] execute_task_directly completed for task {}: task_success={}", task_id_owned, success);
+                        let _ = handle.emit("cron:debug", serde_json::json!({
+                            "taskId": task_id_owned,
+                            "message": format!("execute_task_directly completed: task_success={}", success)
+                        }));
+                    }
+                    Err(ref e) => {
+                        log::warn!("[CronTask] execute_task_directly failed for task {}: {}", task_id_owned, e);
+                        let _ = handle.emit("cron:debug", serde_json::json!({
+                            "taskId": task_id_owned,
+                            "message": format!("execute_task_directly failed: {}", e),
+                            "error": true
+                        }));
+                    }
+                }
 
                 // Mark task as no longer executing
                 {
@@ -1110,10 +1121,10 @@ async fn execute_task_directly(
 
     let _ = handle.emit("cron:debug", serde_json::json!({
         "taskId": task.id,
-        "message": "execute_task_directly: execute_cron_task completed successfully"
+        "message": format!("execute_task_directly: execute_cron_task completed, task_success={}", result.success)
     }));
 
-    log::info!("[CronTask] execute_cron_task completed for task {}", task.id);
+    log::info!("[CronTask] execute_cron_task completed for task {}, task_success={}", task.id, result.success);
 
     // Send notification if enabled
     if task.notify_enabled {

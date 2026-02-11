@@ -175,14 +175,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
     },
-    onExecutionComplete: async (task) => {
+    onExecutionComplete: async (task, success) => {
       // Called when a single execution completes (task may still be running)
       // Refresh the session to show the latest messages
       // Use task.sessionId (the cron task's actual session) instead of Chat's sessionId
       // which may be a pending/different session
-      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId);
+      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId, 'success:', success);
       setIsLoading(false);
-      if (task.sessionId) {
+      // Only refresh session on successful execution.
+      // On timeout (success=false), the original streaming task may still be running
+      // and calling loadSession would abort it (via switchToSession) and lose data.
+      if (success && task.sessionId) {
         await loadSession(task.sessionId);
       }
     },

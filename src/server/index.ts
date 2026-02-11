@@ -1047,8 +1047,8 @@ async function main() {
           // Enqueue the message (this starts the async execution)
           // Send the user's original prompt (clean, without wrapper templates)
           console.log('[cron] execute-sync: about to enqueue user message');
-          await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
-          console.log('[cron] execute-sync: user message enqueued');
+          const enqueueResult = await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
+          console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)
           // Timeout: 10 minutes max execution time
@@ -1056,6 +1056,13 @@ async function main() {
 
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
+            // Clean up the cron message from the queue to prevent ghost execution
+            // after the original streaming task finishes.
+            // Use cancelQueueItem (not clearMessageQueue) to avoid removing unrelated
+            // user-queued messages that should still execute after the current task.
+            if (enqueueResult.queued && enqueueResult.queueId) {
+              cancelQueueItem(enqueueResult.queueId);
+            }
             clearCronTaskContext(effectiveSessionId);
             clearSystemPromptConfig();
             return jsonResponse({
