@@ -26,7 +26,12 @@ import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 
 export default function App() {
   // Auto-update state (silent background updates)
-  const { updateReady, updateVersion, restartAndUpdate } = useUpdater();
+  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate } = useUpdater();
+
+  // Stable callback for Settings prop — avoids inline arrow creating new ref every render
+  const handleRestartAndUpdate = useCallback(() => {
+    void restartAndUpdate();
+  }, [restartAndUpdate]);
 
   // App config for tray behavior
   const { config, reload: reloadConfig } = useConfig();
@@ -979,6 +984,12 @@ export default function App() {
                 <Settings
                   initialSection={settingsInitialSection}
                   onSectionChange={() => setSettingsInitialSection(undefined)}
+                  updateReady={updateReady}
+                  updateVersion={updateVersion}
+                  updateChecking={updateChecking}
+                  updateDownloading={updateDownloading}
+                  onCheckForUpdate={checkForUpdate}
+                  onRestartAndUpdate={handleRestartAndUpdate}
                 />
               ) : (
                 /* Chat views use Tab Sidecar - wrapped in TabProvider */

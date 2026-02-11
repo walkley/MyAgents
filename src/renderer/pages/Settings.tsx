@@ -94,6 +94,18 @@ interface SettingsProps {
     initialSection?: string;
     /** Callback when section changes (to clear initialSection) */
     onSectionChange?: () => void;
+    /** Whether an update is ready to install (from useUpdater) */
+    updateReady?: boolean;
+    /** Version ready to install (from useUpdater) */
+    updateVersion?: string | null;
+    /** Whether a manual check is in progress (from useUpdater) */
+    updateChecking?: boolean;
+    /** Whether an update is being downloaded (from useUpdater) */
+    updateDownloading?: boolean;
+    /** Trigger manual update check. Returns result for toast feedback. */
+    onCheckForUpdate?: () => Promise<'up-to-date' | 'downloading' | 'error'>;
+    /** Restart and install update (from useUpdater) */
+    onRestartAndUpdate?: () => void;
 }
 
 const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'about'];
@@ -175,7 +187,7 @@ const ModelTagList = React.memo(function ModelTagList({
     );
 });
 
-export default function Settings({ initialSection, onSectionChange }: SettingsProps) {
+export default function Settings({ initialSection, onSectionChange, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -1511,12 +1523,59 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                     >
                                         MyAgents
                                     </h1>
-                                    <p className="mt-1 text-sm font-medium text-[var(--ink-muted)]">
-                                        Version {appVersion || '...'}
-                                    </p>
+                                    <div className="mt-1 flex items-center gap-2">
+                                        <p className="text-sm font-medium text-[var(--ink-muted)]">
+                                            Version {appVersion || '...'}
+                                        </p>
+                                        {!propUpdateReady && !updateDownloading && (
+                                            <button
+                                                type="button"
+                                                onClick={async () => {
+                                                    if (!onCheckForUpdate) {
+                                                        toast.error('此功能仅在桌面应用中可用');
+                                                        return;
+                                                    }
+                                                    const result = await onCheckForUpdate();
+                                                    if (result === 'up-to-date') {
+                                                        toast.info('当前已是最新版本');
+                                                    } else if (result === 'error') {
+                                                        toast.error('检查更新失败，请稍后重试');
+                                                    }
+                                                    // 'downloading' — UI already shows download progress, no toast needed
+                                                }}
+                                                disabled={updateChecking}
+                                                className="rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
+                                            >
+                                                {updateChecking ? (
+                                                    <span className="flex items-center gap-1">
+                                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                                        检查中...
+                                                    </span>
+                                                ) : '检查更新'}
+                                            </button>
+                                        )}
+                                    </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
                                         Your Universal AI Assistant
                                     </p>
+                                    {updateDownloading && propUpdateVersion && (
+                                        <div className="mt-3 flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
+                                            <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
+                                            <span>发现新版本 v{propUpdateVersion}，正在下载...</span>
+                                        </div>
+                                    )}
+                                    {propUpdateReady && propUpdateVersion && (
+                                        <div className="mt-3 flex items-center gap-2">
+                                            <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
+                                            <button
+                                                type="button"
+                                                onClick={onRestartAndUpdate}
+                                                className="rounded-lg bg-[var(--success)] px-3 py-1 text-xs font-medium text-white transition-colors hover:opacity-90"
+                                            >
+                                                重启安装
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
