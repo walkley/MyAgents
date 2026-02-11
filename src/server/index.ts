@@ -2633,12 +2633,13 @@ async function main() {
               });
             }
 
-            // Custom MCP or non-npx command → check if command exists
+            // Custom MCP or non-npx command → check if command exists in user's shell PATH
             const { spawn } = await import('child_process');
+            const { getShellEnv } = await import('./utils/shell');
             const checkCmd = process.platform === 'win32' ? 'where' : 'which';
 
             return new Promise<Response>((resolve) => {
-              const proc = spawn(checkCmd, [command], { stdio: 'ignore' });
+              const proc = spawn(checkCmd, [command], { stdio: 'ignore', env: getShellEnv() });
 
               proc.on('error', () => {
                 resolve(jsonResponse({

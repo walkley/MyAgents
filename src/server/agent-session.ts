@@ -622,26 +622,31 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       let command = server.command;
       let args = server.args || [];
 
-      // For npx commands, try to use bundled bun (bun x is npx-compatible)
-      // This ensures the app works without requiring Node.js/npm
+      // For npx commands: builtin MCP uses bundled bun, custom MCP uses system npx
       if (command === 'npx') {
-        // Pin @latest to known versions to avoid npm registry check on every startup
-        // This eliminates 2-5s of network latency per MCP server per session
-        args = pinMcpPackageVersions(args);
+        if (server.isBuiltin) {
+          // Builtin MCP: use bundled bun x (no Node.js dependency)
+          // Pin @latest to known versions to avoid npm registry check on every startup
+          args = pinMcpPackageVersions(args);
 
-        // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
-        const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
-        const runtime = getBundledRuntimePath();
+          // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
+          const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+          const runtime = getBundledRuntimePath();
 
-        if (isBunRuntime(runtime)) {
-          // Use bundled bun: bun x @package@version <args>
-          command = runtime;
-          args = ['x', ...args];
-          console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+          if (isBunRuntime(runtime)) {
+            command = runtime;
+            args = ['x', ...args];
+            console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+          } else {
+            args = ['-y', ...args];
+            console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+          }
         } else {
-          // Fallback to npx with -y flag for auto-confirm
-          args = ['-y', ...args];
-          console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+          // Custom MCP: use system npx with -y for auto-confirm
+          if (!args.includes('-y')) {
+            args = ['-y', ...args];
+          }
+          console.log(`[agent] MCP ${server.id}: Using system npx`);
         }
       }
 
