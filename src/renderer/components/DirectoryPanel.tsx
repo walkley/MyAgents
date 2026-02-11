@@ -29,6 +29,7 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useToast } from '@/components/Toast';
 import { type Provider } from '@/config/types';
 import { isDebugMode } from '@/utils/debug';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 import ConfirmDialog from './ConfirmDialog';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
@@ -1041,8 +1042,8 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
                 </span>
               )}
             </div>
-            {/* Second row: full path */}
-            <div className="mt-1 truncate pl-6 text-[10px] text-[var(--ink-muted)]">{agentDir}</div>
+            {/* Second row: full path (shortened for display) */}
+            <div className="mt-1 truncate pl-6 text-[10px] text-[var(--ink-muted)]">{shortenPathForDisplay(agentDir)}</div>
             {/* Hidden file input for import functionality */}
             <input
               ref={importInputRef}

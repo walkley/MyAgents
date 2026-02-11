@@ -90,3 +90,18 @@ export function looksLikeFilePath(text: string): boolean {
   // Single word without extension or separator — not a path
   return false;
 }
+
+/**
+ * Shorten a path for display purposes only.
+ * On macOS, replaces `/Users/<username>/` prefix with `~/`.
+ * On Windows, returns the path unchanged.
+ *
+ * This is purely cosmetic — never use the returned value for file operations.
+ */
+export function shortenPathForDisplay(path: string): string {
+  if (!path) return path;
+  // macOS: /Users/<username>/... → ~/...
+  const match = path.match(/^\/Users\/[^/]+\/(.*)/);
+  if (match) return `~/${match[1]}`;
+  return path;
+}

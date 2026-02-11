@@ -13,6 +13,7 @@ import { useTabStateOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 interface ClaudeMdEditorProps {
     agentDir: string;
@@ -173,7 +174,7 @@ const ClaudeMdEditor = forwardRef<ClaudeMdEditorRef, ClaudeMdEditorProps>(
                             <div>
                                 <h3 className="text-sm font-semibold text-[var(--ink)]">CLAUDE.md</h3>
                                 <div className="flex items-center gap-2">
-                                    <span className="max-w-[350px] truncate font-mono text-xs text-[var(--ink-muted)]" title={path}>{path}</span>
+                                    <span className="max-w-[350px] truncate font-mono text-xs text-[var(--ink-muted)]" title={path}>{shortenPathForDisplay(path)}</span>
                                     <button
                                         type="button"
                                         onClick={handleOpenInFinder}
