@@ -498,6 +498,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     }
   }, [currentProvider?.id, currentProvider?.primaryModel]);
 
+  // Sync selectedModel to backend so pre-warm uses the correct model.
+  // Without this, backend currentModel stays undefined until the first message,
+  // causing a blocking setModel() call during pre-warm → active transition.
+  useEffect(() => {
+    if (selectedModel) {
+      apiPost('/api/model/set', { model: selectedModel }).catch(err => {
+        console.error('[Chat] Failed to sync model to backend:', err);
+      });
+    }
+  }, [selectedModel, apiPost]);
+
   const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages, sessionId);
 
   // Auto-focus input when Tab becomes active

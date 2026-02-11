@@ -91,6 +91,7 @@ import {
   setMcpServers,
   getMcpServers,
   setAgents,
+  setSessionModel,
   resetSession,
   waitForSessionIdle,
   setSystemPromptConfig,
@@ -4244,6 +4245,21 @@ async function main() {
         } catch (error) {
           console.error('[api/agents/set] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set agents' }, 500);
+        }
+      }
+
+      // POST /api/model/set - Set default model for this session
+      if (pathname === '/api/model/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { model?: string };
+          if (!payload?.model) {
+            return jsonResponse({ success: false, error: 'model is required' }, 400);
+          }
+          setSessionModel(payload.model);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/model/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set model' }, 500);
         }
       }
 

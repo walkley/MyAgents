@@ -435,6 +435,35 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
 }
 
 /**
+ * Set the default model for subsequent queries.
+ * Called during tab initialization so the backend has a real default model
+ * before pre-warm starts. This ensures:
+ * 1. Pre-warm uses the correct model (no undefined → SDK guesses)
+ * 2. Gateway clients (Telegram, API) can omit model and get a proper default
+ * 3. First user message doesn't trigger a blocking setModel() call
+ *
+ * Unlike MCP/agents, model changes don't require session restart —
+ * so this does NOT trigger schedulePreWarm(). The debounced pre-warm
+ * from MCP/agents sync will pick up the model automatically.
+ */
+export function setSessionModel(model: string): void {
+  if (model === currentModel) return;
+
+  const oldModel = currentModel;
+  currentModel = model;
+  console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
+
+  // If a session is actively running (not pre-warming), apply model change to subprocess.
+  // This ensures dropdown model switches take effect immediately, even if the sync
+  // arrives before the next user message triggers applySessionConfig.
+  if (querySession && !isPreWarming) {
+    querySession.setModel(model).catch(err => {
+      console.error('[agent] failed to apply model to running session:', err);
+    });
+  }
+}
+
+/**
  * Schedule a pre-warm of the SDK subprocess and MCP servers.
  * Uses debounce to batch rapid config changes during tab initialization.
  * The pre-warmed session is invisible to the frontend until the first user message.
