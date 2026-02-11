@@ -477,6 +477,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
     const [mcpEnabledIds, setMcpEnabledIds] = useState<string[]>([]);
     const [mcpEnabling, setMcpEnabling] = useState<Record<string, boolean>>({}); // Loading state for enable toggle
     const [showMcpForm, setShowMcpForm] = useState(false);
+    const [editingMcpId, setEditingMcpId] = useState<string | null>(null);
     // Dialog state for runtime not found
     const [runtimeDialog, setRuntimeDialog] = useState<{
         show: boolean;
@@ -573,6 +574,33 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         }
     };
 
+    const resetMcpForm = () => {
+        setEditingMcpId(null);
+        setMcpForm({
+            id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
+            env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
+        });
+    };
+
+    // Edit custom MCP server - populate form and open modal
+    const handleEditMcp = (server: McpServerDefinition) => {
+        setMcpForm({
+            id: server.id,
+            name: server.name,
+            type: server.type || 'stdio',
+            command: server.command || '',
+            args: server.args || [],
+            newArg: '',
+            url: server.url || '',
+            env: server.env ? { ...server.env } : {},
+            newEnvKey: '',
+            headers: server.headers ? { ...server.headers } : {},
+            newHeaderKey: '',
+        });
+        setEditingMcpId(server.id);
+        setShowMcpForm(true);
+    };
+
     // Add custom MCP server - auto-install after adding
     const handleAddMcp = async () => {
         // Validate based on transport type
@@ -599,19 +627,20 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         };
         try {
             await addCustomMcpServer(newServer);
-            setMcpServersState(prev => [...prev, newServer]);
-            setMcpForm({
-                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-            });
+            if (editingMcpId) {
+                setMcpServersState(prev => prev.map(s => s.id === editingMcpId ? newServer : s));
+            } else {
+                setMcpServersState(prev => [...prev, newServer]);
+            }
+            resetMcpForm();
             setShowMcpForm(false);
 
             // Track mcp_add event
-            track('mcp_add', { type: mcpForm.type });
+            if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
-            toast.success('MCP 服务器已添加');
+            toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
         } catch {
-            toast.error('添加失败');
+            toast.error(editingMcpId ? '保存失败' : '添加失败');
         }
     };
 
@@ -1933,7 +1962,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                             <div className="mb-8 flex items-center justify-between">
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">工具 & MCP</h2>
                                 <button
-                                    onClick={() => setShowMcpForm(true)}
+                                    onClick={() => { resetMcpForm(); setShowMcpForm(true); }}
                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
@@ -1980,7 +2009,14 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                                     </p>
                                                 </div>
                                                 <div className="flex items-center gap-2">
-                                                    {!server.isBuiltin && (
+                                                    {!server.isBuiltin && (<>
+                                                        <button
+                                                            onClick={() => handleEditMcp(server)}
+                                                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                            title="编辑"
+                                                        >
+                                                            <Settings2 className="h-4 w-4" />
+                                                        </button>
                                                         <button
                                                             onClick={() => handleDeleteMcp(server.id)}
                                                             className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
@@ -1988,7 +2024,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                                         >
                                                             <Trash2 className="h-4 w-4" />
                                                         </button>
-                                                    )}
+                                                    </>)}
                                                     <button
                                                         onClick={() => handleMcpToggle(server, !isEnabled)}
                                                         disabled={isEnabling}
@@ -2038,15 +2074,9 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                             <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                                 {/* Header */}
                                 <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                                    <h3 className="text-lg font-semibold text-[var(--ink)]">添加 MCP 服务器</h3>
+                                    <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
                                     <button
-                                        onClick={() => {
-                                            setShowMcpForm(false);
-                                            setMcpForm({
-                                                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                                                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-                                            });
-                                        }}
+                                        onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                         className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
                                     >
                                         <X className="h-5 w-5" />
@@ -2093,7 +2123,8 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                                 value={mcpForm.id}
                                                 onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
                                                 placeholder="例如: my-mcp-server"
-                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                disabled={!!editingMcpId}
+                                                className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             />
                                             <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
                                         </div>
@@ -2373,13 +2404,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                 {/* Footer */}
                                 <div className="flex gap-3 px-6 py-4 border-t border-[var(--line)]">
                                     <button
-                                        onClick={() => {
-                                            setShowMcpForm(false);
-                                            setMcpForm({
-                                                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                                                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-                                            });
-                                        }}
+                                        onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                         className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
                                     >
                                         取消
@@ -2393,7 +2418,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                         }
                                         className="flex-1 rounded-lg bg-[var(--ink)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)] disabled:opacity-50"
                                     >
-                                        添加服务器
+                                        {editingMcpId ? '保存修改' : '添加服务器'}
                                     </button>
                                 </div>
                             </div>

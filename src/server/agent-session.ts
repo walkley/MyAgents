@@ -2662,6 +2662,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   shouldAbortSession = false;
   resetAbortFlag();
   isProcessing = true;
+  let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   streamIndexToToolId.clear();
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
   if (!preWarm) {
@@ -2822,6 +2823,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           broadcast('chat:system-init', { info: systemInitInfo, sessionId });
         } else {
           // Pre-warm succeeded — subprocess + MCP ready
+          preWarmStartedOk = true;
           preWarmFailCount = 0;
           resumeSessionId = undefined; // Session started successfully, safe to clear
           console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
@@ -3363,13 +3365,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
     }
 
-    // Don't broadcast errors to frontend during pre-warm
+    // Don't broadcast errors to frontend during pre-warm.
+    // Failure counting is handled uniformly in the finally block via preWarmStartedOk flag,
+    // so we don't increment preWarmFailCount here — avoids double-counting when both
+    // catch and finally execute for the same failed pre-warm.
     if (!isPreWarming) {
       broadcast('chat:message-error', userFacingError);
       handleMessageError(errorMessage);
       setSessionState('error');
-    } else {
-      preWarmFailCount++;
     }
   } finally {
     const wasPreWarming = isPreWarming;
@@ -3398,9 +3401,32 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     clearCronTaskContext();
     resolveTermination!();
 
-    // If pre-warm was aborted (e.g., config change), re-warm with updated config
     if (wasPreWarming) {
-      schedulePreWarm();
+      // The SDK subprocess has exited, so the sessionId is no longer "in use".
+      sessionIdUsedByQuery = false;
+
+      if (!preWarmStartedOk) {
+        // Pre-warm never received system_init — session didn't start successfully.
+        // Clear stale resumeSessionId to prevent infinite retry with a non-existent
+        // server-side session (e.g., expired session from a previous app launch).
+        resumeSessionId = undefined;
+
+        if (!shouldAbortSession) {
+          // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
+          // SDK "No conversation found" errors arrive as result messages (not exceptions),
+          // so this is the only path that increments preWarmFailCount for such failures.
+          preWarmFailCount++;
+          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}`);
+        } else {
+          console.log('[agent] pre-warm aborted before system_init, cleared resumeSessionId');
+        }
+      }
+
+      // Re-schedule: on failure (retry with fresh session) or on abort (config change).
+      // Don't re-schedule after success — subprocess+MCP already warmed, no benefit.
+      if (!preWarmStartedOk || shouldAbortSession) {
+        schedulePreWarm();
+      }
     } else if (shouldRestart) {
       // Process next queued message by starting a new session with resume
       // (resumeSessionId already set above)
