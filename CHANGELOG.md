@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.14] - 2026-02-11
+
+### Added
+- **后台会话完成**：AI 流式回复中切换对话/关闭标签页不再丢失数据，旧 Sidecar 在后台继续运行直到回复完成
+- **手动检查更新**：设置页「关于」区域增加检查更新按钮与下载进度展示
+- **MCP 服务器编辑**：自定义 MCP 卡片增加设置按钮，复用添加弹窗编辑配置
+- **新增预设供应商**：硅基流动 SiliconFlow（Kimi K2.5、GLM 4.7、DeepSeek V3.2、MiniMax M2.1、Step 3.5 Flash）
+- **供应商「去官网」链接**：7 个预设供应商卡片增加官网入口
+- **智谱 AI 新增 GLM 5 模型**
+- **Settings 双栏布局**：供应商、MCP、技能、Agent 页面统一为双栏卡片网格
+
+### Changed
+- Settings 页面样式全面统一（Toggle、Button、Card、Input、Modal 共 24 处对齐）
+
+### Fixed
+- 修复首消息 5~13 秒延迟（stale resumeSessionId + 模型未同步导致阻塞）
+- 修复编辑供应商保存时 API Key 被清空（React config 状态覆盖磁盘数据）
+- 修复定时任务超时导致流式数据丢失（四层防御）
+- 修复自定义 MCP 启用检测找不到系统 npx/node（PATH 环境变量未传递）
+- 修复 MCP 设置按钮无响应 & 切换 Tab 残留 MCP 面板（Modal 渲染位置错误）
+- 修复 Launcher 移除按钮使用未定义 CSS 变量 `--danger`
+- 修复 Windows CSP 配置缺失导致 IPC 通信失败
+
+---
+
 ## [0.1.13] - 2026-02-10
 
 ### Added
