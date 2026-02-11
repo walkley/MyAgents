@@ -622,6 +622,12 @@ async function main() {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
 
+      // Session state endpoint - used by Rust background completion polling
+      if (pathname === '/api/session-state' && request.method === 'GET') {
+        const { sessionState } = getAgentState();
+        return jsonResponse({ sessionState });
+      }
+
       // 🔍 Debug endpoint: Expose logger diagnostics via HTTP
       if (pathname === '/debug/logger' && request.method === 'GET') {
         const diagnostics = getLoggerDiagnostics();

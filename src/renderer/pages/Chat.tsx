@@ -32,7 +32,8 @@ import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 
 interface ChatProps {
   onBack?: () => void;
-  onNewSession?: () => void;
+  /** Called when user starts a new session. Returns true if handled externally (background completion started). */
+  onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
   onSwitchSession?: (sessionId: string) => void;
 }
@@ -698,16 +699,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   }, [forceExecuteQueuedMessage]);
 
   // Internal handler for starting a new session
-  // This resets both frontend and backend state
+  // If AI is running, App.tsx handles it via background completion (returns true).
+  // If AI is idle, falls back to resetSession (reuses Sidecar).
   const handleNewSession = useCallback(async () => {
     if (onNewSession) {
-      // Use external handler if provided
-      onNewSession();
-      return;
+      const handled = await onNewSession();
+      if (handled) {
+        // App.tsx started background completion and created new Sidecar
+        // TabProvider will detect sessionId change and reconnect
+        return;
+      }
     }
 
-    // Reset session on backend (stops any ongoing response + clears messages)
-    // This also clears frontend state via resetSession()
+    // Fallback: AI is idle, reset session within existing Sidecar
     console.log('[Chat] Starting new session...');
     const success = await resetSession();
     if (success) {

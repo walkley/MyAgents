@@ -986,3 +986,66 @@ export async function executeCronTask(
         };
     }
 }
+
+// ============= Background Session Completion API =============
+
+/** Result from startBackgroundCompletion */
+export interface BackgroundCompletionResult {
+    started: boolean;
+    sessionId: string;
+}
+
+/**
+ * Start background completion for a session.
+ * If the AI is actively generating a response, adds a BackgroundCompletion owner
+ * to keep the Sidecar alive and spawns a polling thread to monitor completion.
+ *
+ * @param sessionId - Session identifier
+ * @returns { started: true } if AI is running and background completion started,
+ *          { started: false } if AI is idle (no background completion needed)
+ */
+export async function startBackgroundCompletion(
+    sessionId: string
+): Promise<BackgroundCompletionResult> {
+    if (!isTauri()) {
+        return { started: false, sessionId };
+    }
+
+    try {
+        const result = await invoke<BackgroundCompletionResult>('cmd_start_background_completion', {
+            sessionId,
+        });
+        console.debug(`[tauriClient] startBackgroundCompletion: session=${sessionId}, started=${result.started}`);
+        return result;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to start background completion for ${sessionId}:`, error);
+        return { started: false, sessionId };
+    }
+}
+
+/**
+ * Cancel background completion for a session.
+ * Removes the BackgroundCompletion owner so the polling thread exits gracefully.
+ * Used when user reconnects to a session that's completing in the background.
+ *
+ * @param sessionId - Session identifier
+ * @returns true if a BackgroundCompletion owner was found and removed
+ */
+export async function cancelBackgroundCompletion(
+    sessionId: string
+): Promise<boolean> {
+    if (!isTauri()) {
+        return false;
+    }
+
+    try {
+        const cancelled = await invoke<boolean>('cmd_cancel_background_completion', {
+            sessionId,
+        });
+        console.debug(`[tauriClient] cancelBackgroundCompletion: session=${sessionId}, cancelled=${cancelled}`);
+        return cancelled;
+    } catch (error) {
+        console.error(`[tauriClient] Failed to cancel background completion for ${sessionId}:`, error);
+        return false;
+    }
+}

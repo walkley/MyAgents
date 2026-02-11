@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -152,12 +152,24 @@ export default function App() {
     let unlistenManagerReady: (() => void) | null = null;
     let unlistenRecoverySummary: (() => void) | null = null;
     let unlistenTaskRecovered: (() => void) | null = null;
+    let unlistenBgComplete: (() => void) | null = null;
 
     const setupCronRecoveryListeners = async () => {
       if (!isTauriEnvironment()) return;
 
       try {
         const { listen } = await import('@tauri-apps/api/event');
+
+        // Listen for background session completion events
+        unlistenBgComplete = await listen<{ sessionId: string; sidecarStopped: boolean }>(
+          'session:background-complete',
+          (event) => {
+            if (mountedRef.current) {
+              const { sessionId, sidecarStopped } = event.payload;
+              console.log(`[App] Background session completion finished: session=${sessionId}, sidecarStopped=${sidecarStopped}`);
+            }
+          }
+        );
 
         // Listen for individual task recovered events
         unlistenTaskRecovered = await listen<CronTaskRecoveredPayload>(
@@ -222,6 +234,9 @@ export default function App() {
       }
       if (unlistenManagerReady) {
         unlistenManagerReady();
+      }
+      if (unlistenBgComplete) {
+        unlistenBgComplete();
       }
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
@@ -309,20 +324,35 @@ export default function App() {
     // When Sidecar dies, open HTTP connections break mid-stream causing errors
     const cleanupResources = async () => {
       try {
-        // Step 1: Stop SSE proxy FIRST to ensure clean disconnection
+        // Step 1: Try to start background completion if AI is running
+        // This keeps the Sidecar alive so AI can finish its response
+        if (tabSessionId) {
+          const bgResult = await startBackgroundCompletion(tabSessionId);
+          if (bgResult.started) {
+            console.log(`[App] Tab ${tabId} closing: AI still running, background completion started for session ${tabSessionId}`);
+          }
+        }
+
+        // Step 2: Stop SSE proxy FIRST to ensure clean disconnection
         // This prevents "unexpected EOF" errors when Sidecar is stopped
         await stopSseProxy(tabId);
 
-        // Step 2: Release Tab's ownership of the Session Sidecar
+        // Step 3: Release Tab's ownership of the Session Sidecar
+        // If background completion is active, Sidecar continues running (BG owner keeps it alive)
         if (tabSessionId) {
           try {
-            const stopped = await releaseSessionSidecar(tabSessionId, 'tab', tabId);
-            console.log(`[App] Tab ${tabId} released session ${tabSessionId}, sidecar stopped: ${stopped}`);
-
             // Update cron task tab association if exists
             const cronTask = await getTabCronTask(tabId);
             if (cronTask && cronTask.status === 'running') {
               await updateCronTaskTab(cronTask.id, undefined);
+            }
+
+            const stopped = await releaseSessionSidecar(tabSessionId, 'tab', tabId);
+            console.log(`[App] Tab ${tabId} released session ${tabSessionId}, sidecar stopped: ${stopped}`);
+
+            // Clean up session activation
+            if (!cronTask || cronTask.status !== 'running') {
+              await deactivateSession(tabSessionId);
             }
           } catch (error) {
             console.error(`[App] Error releasing session sidecar for tab ${tabId}:`, error);
@@ -525,6 +555,27 @@ export default function App() {
       // ========================================
       console.log(`[App] Scenario 4: Normal launch - tab ${targetTabId}, project: ${project.path}, sessionId: ${sessionId}`);
 
+      // If current tab has an active session, release it before launching new one
+      const currentTabForLaunch = tabs.find(t => t.id === targetTabId);
+      const oldSessionForLaunch = currentTabForLaunch?.sessionId;
+      if (oldSessionForLaunch) {
+        const bgResult = await startBackgroundCompletion(oldSessionForLaunch);
+        if (bgResult.started) {
+          console.log(`[App] Scenario 4: AI running on ${oldSessionForLaunch}, background completion started`);
+        }
+        // Always release old session regardless of AI state:
+        // - If BG started: Sidecar stays alive via BG owner
+        // - If idle: Sidecar stops (no more owners)
+        await stopSseProxy(targetTabId);
+        await releaseSessionSidecar(oldSessionForLaunch, 'tab', targetTabId);
+        await deactivateSession(oldSessionForLaunch);
+      }
+
+      // Cancel background completion on target session if reconnecting
+      if (sessionId) {
+        await cancelBackgroundCompletion(sessionId);
+      }
+
       // For new sessions (no sessionId), generate a temporary session ID
       // The actual session ID will be created by the backend when the session starts
       const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
@@ -695,15 +746,12 @@ export default function App() {
       return;
     }
 
-    // Scenario 4: Normal switch → Hand over Sidecar to new Session
+    // Scenario 4: Normal switch
     //
-    // Core concept: One Sidecar = One Agent instance = One Session + One Workspace
-    // When user switches Session within the same Tab:
-    // - Old Session is "closed" (no longer needs its Sidecar)
-    // - New Session "takes over" the running Sidecar (efficiency optimization)
-    // - This is resource reuse, not shared design - each Session still has 1:1 Sidecar relationship
-    //
-    // Key operation: upgradeSessionId() moves the sidecars HashMap entry from old key to new key
+    // Two sub-paths:
+    // A) AI is idle → hot-swap Sidecar via upgradeSessionId (no new process)
+    // B) AI is running → start background completion for old session,
+    //    release Tab from old Sidecar, create new Sidecar for new session
     console.log(`[App] handleSwitchSession Scenario 4: Switching tab ${tabId} to session ${sessionId}`);
 
     // Get current tab info
@@ -716,40 +764,68 @@ export default function App() {
     const oldSessionId = currentTab.sessionId;
 
     try {
-      // Case A: Have old Session → Hand over its Sidecar to new Session
-      if (oldSessionId) {
-        // 1. Move sidecars HashMap entry: sidecars[oldSessionId] → sidecars[newSessionId]
-        const upgraded = await upgradeSessionId(oldSessionId, sessionId);
+      // First, cancel any background completion on the TARGET session (user reconnecting)
+      await cancelBackgroundCompletion(sessionId);
 
-        if (upgraded) {
-          // 2. Update session_activations to reflect the new Session
+      if (oldSessionId) {
+        // Check if AI is running on old session → background completion
+        const bgResult = await startBackgroundCompletion(oldSessionId);
+
+        if (bgResult.started) {
+          // AI is running → old Sidecar stays alive via BG owner, create new Sidecar for target
+          console.log(`[App] AI running on ${oldSessionId}, starting background completion`);
+          await stopSseProxy(tabId);
+          await releaseSessionSidecar(oldSessionId, 'tab', tabId);
           await deactivateSession(oldSessionId);
-          const port = await getSessionPort(sessionId);  // Now accessible via new key
-          if (port !== null) {
-            await activateSession(sessionId, tabId, null, port, currentTab.agentDir, false);
-            console.log(`[App] Session ${sessionId} took over Sidecar from ${oldSessionId} on port ${port}`);
-          } else {
-            // Shouldn't happen after successful upgrade, but handle gracefully
-            console.warn(`[App] Port not found after upgrade, creating new Sidecar`);
-            const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-            await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
-          }
-        } else {
-          // Upgrade failed (e.g., old Sidecar not found) - create new Sidecar
-          console.log(`[App] Sidecar upgrade failed, creating new Sidecar for session ${sessionId}`);
-          await deactivateSession(oldSessionId);
+
+          // Create/reuse Sidecar for the target session
           const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
           await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+          console.log(`[App] Created new Sidecar for session ${sessionId} on port ${result.port}`);
+        } else {
+          // AI is idle → check if target session already has a sidecar (e.g., from BG completion)
+          // If yes, we can't use upgradeSessionId — it would overwrite the existing sidecar
+          const targetPort = await getSessionPort(sessionId);
+
+          if (targetPort !== null) {
+            // Target session has existing sidecar → release current, reconnect to existing
+            console.log(`[App] Target session ${sessionId} has existing sidecar on port ${targetPort}, reconnecting`);
+            await stopSseProxy(tabId);
+            await releaseSessionSidecar(oldSessionId, 'tab', tabId);
+            await deactivateSession(oldSessionId);
+            const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+            await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+          } else {
+            // No existing sidecar for target → hot-swap via upgradeSessionId (efficient, no new process)
+            const upgraded = await upgradeSessionId(oldSessionId, sessionId);
+
+            if (upgraded) {
+              await deactivateSession(oldSessionId);
+              const port = await getSessionPort(sessionId);
+              if (port !== null) {
+                await activateSession(sessionId, tabId, null, port, currentTab.agentDir, false);
+                console.log(`[App] Session ${sessionId} took over Sidecar from ${oldSessionId} on port ${port}`);
+              } else {
+                console.warn(`[App] Port not found after upgrade, creating new Sidecar`);
+                const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+                await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+              }
+            } else {
+              console.log(`[App] Sidecar upgrade failed, creating new Sidecar for session ${sessionId}`);
+              await deactivateSession(oldSessionId);
+              const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
+              await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+            }
+          }
         }
       } else {
-        // Case B: No old Session → Create new Sidecar
+        // No old Session → Create new Sidecar
         console.log(`[App] No previous session, creating new Sidecar for session ${sessionId}`);
         const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
         await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
       }
 
       // Update UI state - TabProvider will detect sessionId change and call loadSession()
-      // SSE stays connected to the same port (via getTabServerUrl fallback using session_activations)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
@@ -769,11 +845,19 @@ export default function App() {
     // Get current tab to access sessionId
     const currentTab = tabs.find(t => t.id === activeTabId);
 
-    // Step 1: Stop SSE proxy FIRST to avoid EOF errors when Sidecar stops
+    // Step 1: Try to start background completion if AI is running
+    if (currentTab?.sessionId) {
+      const bgResult = await startBackgroundCompletion(currentTab.sessionId);
+      if (bgResult.started) {
+        console.log(`[App] Back to launcher: AI still running, background completion started for session ${currentTab.sessionId}`);
+      }
+    }
+
+    // Step 2: Stop SSE proxy FIRST to avoid EOF errors when Sidecar stops
     await stopSseProxy(activeTabId);
 
-    // Step 2: Release Tab's ownership of the Session Sidecar
-    // If CronTask also owns it, Sidecar continues running (Owner model handles this)
+    // Step 3: Release Tab's ownership of the Session Sidecar
+    // If BackgroundCompletion or CronTask also owns it, Sidecar continues running
     if (currentTab?.sessionId) {
       try {
         // Check if this Tab has an active cron task to update associations
@@ -788,6 +872,12 @@ export default function App() {
         // Release Tab's ownership - Sidecar stops only if no other owners
         const stopped = await releaseSessionSidecar(currentTab.sessionId, 'tab', activeTabId);
         console.log(`[App] Tab ${activeTabId} released session ${currentTab.sessionId}, sidecar stopped: ${stopped}`);
+
+        // Clean up session activation (Tab no longer owns this session)
+        // If cron task is active, updateSessionTab above already handled it
+        if (!cronTask || cronTask.status !== 'running') {
+          await deactivateSession(currentTab.sessionId);
+        }
       } catch (error) {
         console.error(`[App] Error releasing session sidecar for tab ${activeTabId}:`, error);
         // Fallback to legacy stopTabSidecar
@@ -803,6 +893,55 @@ export default function App() {
       )
     );
   }, [activeTabId, tabs]);
+
+  /**
+   * Handle "New Session" from Chat component.
+   * If AI is running, starts background completion on old session and creates new Sidecar.
+   * Returns true if handled (Chat should NOT call resetSession), false if AI is idle (Chat falls back to resetSession).
+   */
+  const handleNewSession = useCallback(async (tabId: string): Promise<boolean> => {
+    const currentTab = tabs.find(t => t.id === tabId);
+    if (!currentTab?.sessionId || !currentTab?.agentDir) {
+      return false;
+    }
+
+    const oldSessionId = currentTab.sessionId;
+
+    // Check if AI is running → start background completion
+    const bgResult = await startBackgroundCompletion(oldSessionId);
+    if (!bgResult.started) {
+      // AI is idle → let Chat handle it via resetSession (more efficient, reuses Sidecar)
+      return false;
+    }
+
+    // AI is running → release old Sidecar (BG owner keeps it alive), create new one
+    console.log(`[App] handleNewSession: AI running on ${oldSessionId}, background completion started`);
+
+    try {
+      await stopSseProxy(tabId);
+      await releaseSessionSidecar(oldSessionId, 'tab', tabId);
+      await deactivateSession(oldSessionId);
+
+      // Create new pending session with new Sidecar
+      const pendingSessionId = createPendingSessionId(tabId);
+      const result = await ensureSessionSidecar(pendingSessionId, currentTab.agentDir, 'tab', tabId);
+      await activateSession(pendingSessionId, tabId, null, result.port, currentTab.agentDir, false);
+
+      // Update tab state → TabProvider will detect sessionId change and reconnect
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? { ...t, sessionId: pendingSessionId }
+            : t
+        )
+      );
+      console.log(`[App] handleNewSession: Created new Sidecar for pending session ${pendingSessionId} on port ${result.port}`);
+      return true;
+    } catch (error) {
+      console.error('[App] handleNewSession failed:', error);
+      return false;
+    }
+  }, [tabs]);
 
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
@@ -1004,6 +1143,7 @@ export default function App() {
                   <Chat
                     onBack={handleBackToLauncher}
                     onSwitchSession={(sessionId) => handleSwitchSession(tab.id, sessionId)}
+                    onNewSession={() => handleNewSession(tab.id)}
                   />
                 </TabProvider>
               )}
