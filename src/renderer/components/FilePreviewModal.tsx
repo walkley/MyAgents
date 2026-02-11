@@ -8,13 +8,14 @@
  * - Monaco Editor for editing mode
  * - Unsaved changes confirmation
  */
-import { Edit2, FileText, Loader2, Save, X } from 'lucide-react';
+import { Edit2, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 import { useTabState } from '@/context/TabContext';
 import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownFile } from '@/utils/languageUtils';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 import ConfirmDialog from './ConfirmDialog';
 import Markdown from './Markdown';
@@ -45,6 +46,12 @@ interface FilePreviewModalProps {
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
 const LARGE_FILE_TOKENIZATION_THRESHOLD = 100 * 1024; // 100KB
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export default function FilePreviewModal({
     name,
@@ -208,6 +215,14 @@ export default function FilePreviewModal({
         }
     }, [handleClose]);
 
+    const handleOpenInFinder = useCallback(async () => {
+        try {
+            await apiPost('/agent/open-in-finder', { path });
+        } catch {
+            toastRef.current.error('无法打开目录');
+        }
+    }, [apiPost, path]);
+
     // Render preview content based on file type
     const renderPreviewContent = () => {
         // Show loading spinner while fetching or while content is preparing to render
@@ -297,15 +312,27 @@ export default function FilePreviewModal({
                                 <FileText className="h-4 w-4 text-[var(--accent)]" />
                             </div>
                             <div className="min-w-0">
-                                <div className="truncate text-[13px] font-semibold text-[var(--ink)]">
-                                    {name}
-                                </div>
-                                <div className="text-[11px] text-[var(--ink-muted)]">
-                                    {isEditing ? (
-                                        hasUnsavedChanges ? '编辑中（未保存）' : '编辑中'
-                                    ) : (
-                                        `${size.toLocaleString()} bytes`
+                                <div className="flex items-center gap-3 truncate">
+                                    <span className="truncate text-[13px] font-semibold text-[var(--ink)]">{name}</span>
+                                    <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
+                                    {isEditing && (
+                                        <span className="flex-shrink-0 text-[11px] text-[var(--accent)]">
+                                            {hasUnsavedChanges ? '编辑中（未保存）' : '编辑中'}
+                                        </span>
                                     )}
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
+                                        {shortenPathForDisplay(path)}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={handleOpenInFinder}
+                                        className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                        title="打开所在文件夹"
+                                    >
+                                        <FolderOpen className="h-3.5 w-3.5" />
+                                    </button>
                                 </div>
                             </div>
                         </div>
