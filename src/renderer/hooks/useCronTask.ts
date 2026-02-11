@@ -58,7 +58,7 @@ export interface UseCronTaskOptions {
   /** Callback when task completes (stops) */
   onComplete?: (task: CronTask, reason?: string) => void;
   /** Callback when a single execution completes (task may continue running) */
-  onExecutionComplete?: (task: CronTask) => void;
+  onExecutionComplete?: (task: CronTask, success: boolean) => void;
   /** Ref to register the cron task exit handler (provided by TabContext) */
   onCronTaskExitRequestedRef?: React.MutableRefObject<((taskId: string, reason: string) => void) | null>;
 }
@@ -439,8 +439,9 @@ export function useCronTask(options: UseCronTaskOptions) {
       });
 
       // Notify caller that execution completed (for UI refresh, loading state reset, etc.)
+      // Pass success flag so caller can decide whether to refresh (e.g., skip on timeout)
       if (optionsRef.current.onExecutionComplete) {
-        optionsRef.current.onExecutionComplete(task);
+        optionsRef.current.onExecutionComplete(task, payload.success);
       }
 
       // Check if task stopped (end conditions met or AI exit)

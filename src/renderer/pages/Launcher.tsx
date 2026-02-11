@@ -242,7 +242,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             {config.showDevTools && (
                                 <button
                                     onClick={() => setShowLogs(true)}
-                                    className="rounded-md px-2.5 py-1.5 text-[13px] font-normal text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink-muted)]"
+                                    className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                                     title="查看 Rust 日志"
                                 >
                                     Logs
@@ -251,7 +251,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             {projects.length > 0 && (
                                 <button
                                     onClick={handleAddProject}
-                                    className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] font-normal text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink-muted)]"
+                                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
                                     添加

@@ -94,6 +94,18 @@ interface SettingsProps {
     initialSection?: string;
     /** Callback when section changes (to clear initialSection) */
     onSectionChange?: () => void;
+    /** Whether an update is ready to install (from useUpdater) */
+    updateReady?: boolean;
+    /** Version ready to install (from useUpdater) */
+    updateVersion?: string | null;
+    /** Whether a manual check is in progress (from useUpdater) */
+    updateChecking?: boolean;
+    /** Whether an update is being downloaded (from useUpdater) */
+    updateDownloading?: boolean;
+    /** Trigger manual update check. Returns result for toast feedback. */
+    onCheckForUpdate?: () => Promise<'up-to-date' | 'downloading' | 'error'>;
+    /** Restart and install update (from useUpdater) */
+    onRestartAndUpdate?: () => void;
 }
 
 const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'about'];
@@ -175,7 +187,7 @@ const ModelTagList = React.memo(function ModelTagList({
     );
 });
 
-export default function Settings({ initialSection, onSectionChange }: SettingsProps) {
+export default function Settings({ initialSection, onSectionChange, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -465,6 +477,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
     const [mcpEnabledIds, setMcpEnabledIds] = useState<string[]>([]);
     const [mcpEnabling, setMcpEnabling] = useState<Record<string, boolean>>({}); // Loading state for enable toggle
     const [showMcpForm, setShowMcpForm] = useState(false);
+    const [editingMcpId, setEditingMcpId] = useState<string | null>(null);
     // Dialog state for runtime not found
     const [runtimeDialog, setRuntimeDialog] = useState<{
         show: boolean;
@@ -561,6 +574,33 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
         }
     };
 
+    const resetMcpForm = () => {
+        setEditingMcpId(null);
+        setMcpForm({
+            id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
+            env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
+        });
+    };
+
+    // Edit custom MCP server - populate form and open modal
+    const handleEditMcp = (server: McpServerDefinition) => {
+        setMcpForm({
+            id: server.id,
+            name: server.name,
+            type: server.type || 'stdio',
+            command: server.command || '',
+            args: server.args || [],
+            newArg: '',
+            url: server.url || '',
+            env: server.env ? { ...server.env } : {},
+            newEnvKey: '',
+            headers: server.headers ? { ...server.headers } : {},
+            newHeaderKey: '',
+        });
+        setEditingMcpId(server.id);
+        setShowMcpForm(true);
+    };
+
     // Add custom MCP server - auto-install after adding
     const handleAddMcp = async () => {
         // Validate based on transport type
@@ -587,19 +627,20 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
         };
         try {
             await addCustomMcpServer(newServer);
-            setMcpServersState(prev => [...prev, newServer]);
-            setMcpForm({
-                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-            });
+            if (editingMcpId) {
+                setMcpServersState(prev => prev.map(s => s.id === editingMcpId ? newServer : s));
+            } else {
+                setMcpServersState(prev => [...prev, newServer]);
+            }
+            resetMcpForm();
             setShowMcpForm(false);
 
             // Track mcp_add event
-            track('mcp_add', { type: mcpForm.type });
+            if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
-            toast.success('MCP 服务器已添加');
+            toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
         } catch {
-            toast.error('添加失败');
+            toast.error(editingMcpId ? '保存失败' : '添加失败');
         }
     };
 
@@ -1241,20 +1282,276 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
             <div className="flex-1 overflow-y-auto overscroll-contain">
                 {/* Skills section uses wider layout */}
                 {activeSection === 'skills' && (
-                    <div className="px-8 py-8">
+                    <div className="mx-auto max-w-4xl px-8 py-8">
                         <GlobalSkillsPanel />
                     </div>
                 )}
 
                 {/* Agents section uses wider layout */}
                 {activeSection === 'agents' && (
-                    <div className="px-8 py-8">
+                    <div className="mx-auto max-w-4xl px-8 py-8">
                         <GlobalAgentsPanel />
                     </div>
                 )}
 
+                {/* Providers section uses wider layout */}
+                {activeSection === 'providers' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <div className="mb-8 flex items-center justify-between">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
+                            <button
+                                onClick={() => setShowCustomForm(true)}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                            >
+                                <Plus className="h-3.5 w-3.5" />
+                                添加
+                            </button>
+                        </div>
+
+                        <p className="mb-6 text-sm text-[var(--ink-muted)]">
+                            配置 API 密钥以使用不同的模型供应商
+                        </p>
+
+                        {/* Provider list */}
+                        <div className="grid grid-cols-2 gap-4">
+                            {allProviders.map((provider) => (
+                                <div
+                                    key={provider.id}
+                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                >
+                                    {/* Provider header */}
+                                    <div className="mb-4 flex items-start justify-between gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                                <h3 className="truncate font-semibold text-[var(--ink)]">{provider.name}</h3>
+                                                <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                    {provider.cloudProvider}
+                                                </span>
+                                            </div>
+                                            <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                                                {getModelsDisplay(provider)}
+                                            </p>
+                                        </div>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            {provider.websiteUrl && (
+                                                <ExternalLink
+                                                    href={provider.websiteUrl}
+                                                    className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                >
+                                                    去官网
+                                                </ExternalLink>
+                                            )}
+                                            <button
+                                                onClick={() => openProviderManage(provider)}
+                                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                title="管理"
+                                            >
+                                                <Settings2 className="h-4 w-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* API Key input */}
+                                    {provider.type === 'api' && (
+                                        <div className="flex items-center gap-2">
+                                            <div className="relative flex-1">
+                                                <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
+                                                <input
+                                                    type="password"
+                                                    placeholder="输入 API Key"
+                                                    value={apiKeys[provider.id] || ''}
+                                                    onChange={(e) => handleSaveApiKey(provider, e.target.value)}
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                />
+                                            </div>
+                                            {renderVerifyStatus(provider)}
+                                        </div>
+                                    )}
+
+                                    {/* Subscription type - show status */}
+                                    {provider.type === 'subscription' && (
+                                        <div className="space-y-2">
+                                            <p className="text-sm text-[var(--ink-muted)]">
+                                                使用 Anthropic 订阅账户，无需 API Key
+                                            </p>
+                                            {/* Subscription status display */}
+                                            <div className="flex items-center gap-2 text-xs flex-wrap">
+                                                {subscriptionStatus?.available ? (
+                                                    <>
+                                                        {/* Email display first */}
+                                                        <span className="text-[var(--ink-muted)] font-mono text-[10px]">
+                                                            {subscriptionStatus.info?.email}
+                                                        </span>
+                                                        {/* Verification status after email */}
+                                                        {subscriptionStatus.verifyStatus === 'loading' && (
+                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
+                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                                <span>验证中...</span>
+                                                            </div>
+                                                        )}
+                                                        {subscriptionStatus.verifyStatus === 'valid' && (
+                                                            <div className="flex items-center gap-1.5 text-[var(--success)]">
+                                                                <Check className="h-3.5 w-3.5" />
+                                                                <span className="font-medium">已验证</span>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleReVerifySubscription}
+                                                                    disabled={subscriptionVerifying}
+                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                    title="重新验证"
+                                                                >
+                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        {subscriptionStatus.verifyStatus === 'invalid' && (
+                                                            <div className="flex items-center gap-1.5 text-[var(--error)]">
+                                                                <AlertCircle className="h-3.5 w-3.5" />
+                                                                <span className="font-medium">验证失败</span>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleReVerifySubscription}
+                                                                    disabled={subscriptionVerifying}
+                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                    title="重新验证"
+                                                                >
+                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        {subscriptionStatus.verifyStatus === 'idle' && (
+                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
+                                                                <span>检测中...</span>
+                                                            </div>
+                                                        )}
+                                                        {/* Error message */}
+                                                        {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
+                                                            <span className="text-[var(--error)] text-[10px] w-full mt-1">
+                                                                {subscriptionStatus.verifyError}
+                                                            </span>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    <span className="text-[var(--ink-muted)]">
+                                                        未登录，请先使用 Claude Code CLI 登录 (claude --login)
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* MCP section uses wider layout */}
+                {activeSection === 'mcp' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <div className="mb-8 flex items-center justify-between">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">工具 & MCP</h2>
+                            <button
+                                onClick={() => { resetMcpForm(); setShowMcpForm(true); }}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                            >
+                                <Plus className="h-3.5 w-3.5" />
+                                添加
+                            </button>
+                        </div>
+
+                        <p className="mb-6 text-sm text-[var(--ink-muted)]">
+                            MCP (Model Context Protocol) 扩展能力让 Agent 可以使用更多工具
+                        </p>
+
+                        {/* MCP Server list */}
+                        <div className="grid grid-cols-2 gap-4">
+                            {mcpServers.map((server) => {
+                                const isEnabled = mcpEnabledIds.includes(server.id);
+                                const isEnabling = mcpEnabling[server.id] ?? false;
+                                return (
+                                    <div
+                                        key={server.id}
+                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                    >
+                                        <div className="flex items-start justify-between gap-2">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <Globe className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
+                                                    <h3 className="truncate font-semibold text-[var(--ink)]">{server.name}</h3>
+                                                    {server.isBuiltin && (
+                                                        <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                                                            预设
+                                                        </span>
+                                                    )}
+                                                    {/* Status indicator */}
+                                                    {isEnabling && (
+                                                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--info)]" />
+                                                    )}
+                                                </div>
+                                                {server.description && (
+                                                    <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                                                        {server.description}
+                                                    </p>
+                                                )}
+                                                <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]">
+                                                    {server.command} {server.args?.join(' ')}
+                                                </p>
+                                            </div>
+                                            <div className="flex shrink-0 items-center gap-2">
+                                                {!server.isBuiltin && (<>
+                                                    <button
+                                                        onClick={() => handleEditMcp(server)}
+                                                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                        title="编辑"
+                                                    >
+                                                        <Settings2 className="h-4 w-4" />
+                                                    </button>
+                                                </>)}
+                                                <button
+                                                    onClick={() => handleMcpToggle(server, !isEnabled)}
+                                                    disabled={isEnabling}
+                                                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${isEnabling
+                                                        ? 'bg-[var(--info)]/60 cursor-wait'
+                                                        : isEnabled
+                                                            ? 'cursor-pointer bg-[var(--accent)]'
+                                                            : 'cursor-pointer bg-[var(--line-strong)]'
+                                                        }`}
+                                                    title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Discovery links */}
+                        <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                            <p className="text-sm text-[var(--ink-muted)]">
+                                更多 MCP 可以在以下网站寻找：
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-3">
+                                {MCP_DISCOVERY_LINKS.map((link) => (
+                                    <ExternalLink
+                                        key={link.url}
+                                        href={link.url}
+                                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:bg-[var(--info-bg)] hover:text-[var(--info)]"
+                                    >
+                                        {link.name}
+                                        <ExternalLinkIcon className="h-3 w-3" />
+                                    </ExternalLink>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Other sections use narrower layout */}
-                <div className={`mx-auto max-w-xl px-8 py-8 ${activeSection === 'skills' || activeSection === 'agents' ? 'hidden' : ''}`}>
+                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
 
                     {activeSection === 'general' && (
                         <div className="space-y-6">
@@ -1266,7 +1563,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             </div>
 
                             {/* Startup Settings */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-base font-medium text-[var(--ink)]">启动设置</h3>
 
                                 {/* Auto Start */}
@@ -1287,17 +1584,17 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             }
                                         }}
                                         disabled={autostartLoading}
-                                        className={`relative h-6 w-11 flex-shrink-0 rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
                                             autostartLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                                         } ${
                                             autostartEnabled
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[#C4C4C4]'
+                                                : 'bg-[var(--line-strong)]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                                                autostartEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                autostartEnabled ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
@@ -1316,15 +1613,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             updateConfig({ minimizeToTray: !config.minimizeToTray });
                                             toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
                                         }}
-                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.minimizeToTray
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[#C4C4C4]'
+                                                : 'bg-[var(--line-strong)]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                                                config.minimizeToTray ? 'translate-x-5' : 'translate-x-0.5'
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.minimizeToTray ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
@@ -1332,7 +1629,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             </div>
 
                             {/* Notification Settings */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
 
                                 {/* Task Notifications */}
@@ -1348,15 +1645,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                             updateConfig({ cronNotifications: !config.cronNotifications });
                                             toast.success(config.cronNotifications ? '已关闭任务通知' : '已开启任务通知');
                                         }}
-                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.cronNotifications
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[#C4C4C4]'
+                                                : 'bg-[var(--line-strong)]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                                                config.cronNotifications ? 'translate-x-5' : 'translate-x-0.5'
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.cronNotifications ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
@@ -1364,7 +1661,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             </div>
 
                             {/* Network Proxy Settings */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-base font-medium text-[var(--ink)]">网络代理</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     配置 HTTP/SOCKS5 代理，用于外部 API 请求（如 Clash、V2Ray 等）
@@ -1390,15 +1687,15 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                 }
                                             });
                                         }}
-                                        className={`relative h-6 w-11 flex-shrink-0 cursor-pointer rounded-full transition-colors ${
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.proxySettings?.enabled
                                                 ? 'bg-[var(--accent)]'
-                                                : 'bg-[#C4C4C4]'
+                                                : 'bg-[var(--line-strong)]'
                                         }`}
                                     >
                                         <span
-                                            className={`absolute left-0 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                                                config.proxySettings?.enabled ? 'translate-x-5' : 'translate-x-0.5'
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                                config.proxySettings?.enabled ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
@@ -1420,7 +1717,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                         }
                                                     });
                                                 }}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--ink)] focus:outline-none"
                                             >
                                                 <option value="http">HTTP</option>
                                                 <option value="socks5">SOCKS5</option>
@@ -1445,7 +1742,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                     }
                                                 }}
                                                 placeholder={PROXY_DEFAULTS.host}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)] focus:outline-none"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--ink)] focus:outline-none"
                                             />
                                         </div>
 
@@ -1479,7 +1776,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                     }
                                                 }}
                                                 placeholder={String(PROXY_DEFAULTS.port)}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)] focus:outline-none"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--ink)] focus:outline-none"
                                             />
                                         </div>
 
@@ -1511,17 +1808,64 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                     >
                                         MyAgents
                                     </h1>
-                                    <p className="mt-1 text-sm font-medium text-[var(--ink-muted)]">
-                                        Version {appVersion || '...'}
-                                    </p>
+                                    <div className="mt-1 flex items-center gap-2">
+                                        <p className="text-sm font-medium text-[var(--ink-muted)]">
+                                            Version {appVersion || '...'}
+                                        </p>
+                                        {!propUpdateReady && !updateDownloading && (
+                                            <button
+                                                type="button"
+                                                onClick={async () => {
+                                                    if (!onCheckForUpdate) {
+                                                        toast.error('此功能仅在桌面应用中可用');
+                                                        return;
+                                                    }
+                                                    const result = await onCheckForUpdate();
+                                                    if (result === 'up-to-date') {
+                                                        toast.info('当前已是最新版本');
+                                                    } else if (result === 'error') {
+                                                        toast.error('检查更新失败，请稍后重试');
+                                                    }
+                                                    // 'downloading' — UI already shows download progress, no toast needed
+                                                }}
+                                                disabled={updateChecking}
+                                                className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
+                                            >
+                                                {updateChecking ? (
+                                                    <span className="flex items-center gap-1">
+                                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                                        检查中...
+                                                    </span>
+                                                ) : '检查更新'}
+                                            </button>
+                                        )}
+                                    </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
                                         Your Universal AI Assistant
                                     </p>
+                                    {updateDownloading && propUpdateVersion && (
+                                        <div className="mt-3 flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
+                                            <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
+                                            <span>发现新版本 v{propUpdateVersion}，正在下载...</span>
+                                        </div>
+                                    )}
+                                    {propUpdateReady && propUpdateVersion && (
+                                        <div className="mt-3 flex items-center gap-2">
+                                            <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
+                                            <button
+                                                type="button"
+                                                onClick={onRestartAndUpdate}
+                                                className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
+                                            >
+                                                重启安装
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
                             {/* Product Description */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-6">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="space-y-4 text-sm leading-relaxed text-[var(--ink-secondary)]">
                                     <p>
                                         <span className="font-medium text-[var(--ink)]">MyAgents</span> 是一款本地运行的 AI Agent 桌面客户端，基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换服务。
@@ -1537,7 +1881,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
                             {/* User Community QR Code - Show loading state, then image when ready */}
                             {(qrCodeLoading || qrCodeDataUrl) && (
-                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                     <div className="flex flex-col items-center text-center">
                                         <p className="text-sm font-medium text-[var(--ink)]">加入用户交流群</p>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">扫码加入，与其他用户交流使用心得</p>
@@ -1557,7 +1901,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             )}
 
                             {/* Contact & Links */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="grid grid-cols-2 gap-4 text-sm">
                                     <div>
                                         <p className="text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">Developer</p>
@@ -1595,7 +1939,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                     <h2 className="mb-4 text-base font-medium text-[var(--ink-muted)]">开发者</h2>
                                     <div className="space-y-4">
                                         {/* Developer Mode Toggle */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
                                                     <h3 className="text-sm font-medium text-[var(--ink)]">开发者模式</h3>
@@ -1605,11 +1949,11 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                                 </div>
                                                 <button
                                                     onClick={() => updateConfig({ showDevTools: !config.showDevTools })}
-                                                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${config.showDevTools ? 'bg-[var(--success)]' : 'bg-[var(--paper-inset)]'
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.showDevTools ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                                         }`}
                                                 >
                                                     <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--paper-elevated)] shadow transition-transform ${config.showDevTools ? 'translate-x-5' : 'translate-x-0'
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${config.showDevTools ? 'translate-x-5' : 'translate-x-0'
                                                             }`}
                                                     />
                                                 </button>
@@ -1617,7 +1961,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                         </div>
 
                                         {/* Build Versions */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>
                                             <div className="space-y-2 text-xs">
                                                 {(() => {
@@ -1643,7 +1987,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                         </div>
 
                                         {/* Manual Update */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">手动更新</h3>
 
                                             {/* Version comparison */}
@@ -1701,7 +2045,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                         </div>
 
                                         {/* Cron Task Debug Panel */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-5">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
                                                     <h3 className="text-sm font-medium text-[var(--ink)]">心跳循环</h3>
@@ -1729,619 +2073,376 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                         </div>
                     )}
 
-                    {activeSection === 'providers' && (
-                        <div>
-                            <div className="mb-8 flex items-center justify-between">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
-                                <button
-                                    onClick={() => setShowCustomForm(true)}
-                                    className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
-                                >
-                                    <Plus className="h-3.5 w-3.5" />
-                                    添加
-                                </button>
-                            </div>
+                </div>
+            </div>
 
-                            <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                                配置 API 密钥以使用不同的模型供应商
-                            </p>
-
-                            {/* Provider list */}
-                            <div className="space-y-4">
-                                {allProviders.map((provider) => (
-                                    <div
-                                        key={provider.id}
-                                        className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
-                                    >
-                                        {/* Provider header */}
-                                        <div className="mb-4 flex items-start justify-between">
-                                            <div>
-                                                <div className="flex items-center gap-2">
-                                                    <h3 className="font-semibold text-[var(--ink)]">{provider.name}</h3>
-                                                    <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
-                                                        {provider.cloudProvider}
-                                                    </span>
-                                                </div>
-                                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                    {getModelsDisplay(provider)}
-                                                </p>
-                                            </div>
-                                            <button
-                                                onClick={() => openProviderManage(provider)}
-                                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                                                title="管理"
-                                            >
-                                                <Settings2 className="h-4 w-4" />
-                                            </button>
-                                        </div>
-
-                                        {/* API Key input */}
-                                        {provider.type === 'api' && (
-                                            <div className="flex items-center gap-2">
-                                                <div className="relative flex-1">
-                                                    <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
-                                                    <input
-                                                        type="password"
-                                                        placeholder="输入 API Key"
-                                                        value={apiKeys[provider.id] || ''}
-                                                        onChange={(e) => handleSaveApiKey(provider, e.target.value)}
-                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                    />
-                                                </div>
-                                                {renderVerifyStatus(provider)}
-                                            </div>
-                                        )}
-
-                                        {/* Subscription type - show status */}
-                                        {provider.type === 'subscription' && (
-                                            <div className="space-y-2">
-                                                <p className="text-sm text-[var(--ink-muted)]">
-                                                    使用 Anthropic 订阅账户，无需 API Key
-                                                </p>
-                                                {/* Subscription status display */}
-                                                <div className="flex items-center gap-2 text-xs flex-wrap">
-                                                    {subscriptionStatus?.available ? (
-                                                        <>
-                                                            {/* Email display first */}
-                                                            <span className="text-[var(--ink-muted)] font-mono text-[10px]">
-                                                                {subscriptionStatus.info?.email}
-                                                            </span>
-                                                            {/* Verification status after email */}
-                                                            {subscriptionStatus.verifyStatus === 'loading' && (
-                                                                <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                                    <span>验证中...</span>
-                                                                </div>
-                                                            )}
-                                                            {subscriptionStatus.verifyStatus === 'valid' && (
-                                                                <div className="flex items-center gap-1.5 text-[var(--success)]">
-                                                                    <Check className="h-3.5 w-3.5" />
-                                                                    <span className="font-medium">已验证</span>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={handleReVerifySubscription}
-                                                                        disabled={subscriptionVerifying}
-                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                        title="重新验证"
-                                                                    >
-                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                    </button>
-                                                                </div>
-                                                            )}
-                                                            {subscriptionStatus.verifyStatus === 'invalid' && (
-                                                                <div className="flex items-center gap-1.5 text-[var(--error)]">
-                                                                    <AlertCircle className="h-3.5 w-3.5" />
-                                                                    <span className="font-medium">验证失败</span>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={handleReVerifySubscription}
-                                                                        disabled={subscriptionVerifying}
-                                                                        className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                        title="重新验证"
-                                                                    >
-                                                                        <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                    </button>
-                                                                </div>
-                                                            )}
-                                                            {subscriptionStatus.verifyStatus === 'idle' && (
-                                                                <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                    <span>检测中...</span>
-                                                                </div>
-                                                            )}
-                                                            {/* Error message */}
-                                                            {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
-                                                                <span className="text-[var(--error)] text-[10px] w-full mt-1">
-                                                                    {subscriptionStatus.verifyError}
-                                                                </span>
-                                                            )}
-                                                        </>
-                                                    ) : (
-                                                        <span className="text-[var(--ink-muted)]">
-                                                            未登录，请先使用 Claude Code CLI 登录 (claude --login)
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
+            {/* Add MCP Modal */}
+            {showMcpForm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
+                            <button
+                                onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
                         </div>
-                    )}
 
-                    {activeSection === 'mcp' && (
-                        <div>
-                            <div className="mb-8 flex items-center justify-between">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">工具 & MCP</h2>
-                                <button
-                                    onClick={() => setShowMcpForm(true)}
-                                    className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
-                                >
-                                    <Plus className="h-3.5 w-3.5" />
-                                    添加
-                                </button>
-                            </div>
-
-                            <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                                MCP (Model Context Protocol) 扩展能力让 Agent 可以使用更多工具
-                            </p>
-
-                            {/* MCP Server list */}
-                            <div className="space-y-3">
-                                {mcpServers.map((server) => {
-                                    const isEnabled = mcpEnabledIds.includes(server.id);
-                                    const isEnabling = mcpEnabling[server.id] ?? false;
-                                    return (
-                                        <div
-                                            key={server.id}
-                                            className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:shadow-sm"
+                        {/* Content - Scrollable */}
+                        <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-5">
+                            {/* Transport Type Selector */}
+                            <div className="mb-5">
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
+                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
+                                        { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
+                                    ].map((t) => (
+                                        <button
+                                            key={t.type}
+                                            onClick={() => setMcpForm((p) => ({ ...p, type: t.type }))}
+                                            className={`flex flex-col items-center rounded-xl border p-3 transition-all ${mcpForm.type === t.type
+                                                ? 'border-[var(--ink)] bg-[var(--paper-contrast)]'
+                                                : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                                }`}
                                         >
-                                            <div className="flex items-start justify-between">
-                                                <div className="flex-1">
-                                                    <div className="flex items-center gap-2">
-                                                        <Globe className="h-4 w-4 text-[var(--accent-warm)]/70" />
-                                                        <h3 className="font-medium text-[var(--ink)]">{server.name}</h3>
-                                                        {server.isBuiltin && (
-                                                            <span className="rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--info)]">
-                                                                预设
-                                                            </span>
-                                                        )}
-                                                        {/* Status indicator */}
-                                                        {isEnabling && (
-                                                            <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--info)]" />
-                                                        )}
-                                                    </div>
-                                                    {server.description && (
-                                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                            {server.description}
-                                                        </p>
-                                                    )}
-                                                    <p className="mt-2 font-mono text-[10px] text-[var(--ink-muted)]">
-                                                        {server.command} {server.args?.join(' ')}
-                                                    </p>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    {!server.isBuiltin && (
-                                                        <button
-                                                            onClick={() => handleDeleteMcp(server.id)}
-                                                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                                                            title="删除"
-                                                        >
-                                                            <Trash2 className="h-4 w-4" />
-                                                        </button>
-                                                    )}
-                                                    <button
-                                                        onClick={() => handleMcpToggle(server, !isEnabled)}
-                                                        disabled={isEnabling}
-                                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${isEnabling
-                                                            ? 'bg-[var(--info)]/60 cursor-wait'
-                                                            : isEnabled
-                                                                ? 'bg-[var(--success)]'
-                                                                : 'bg-[var(--paper-inset)]'
-                                                            }`}
-                                                        title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
-                                                    >
-                                                        <span
-                                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--paper-elevated)] shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
-                                                        />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-
-                            {/* Discovery links */}
-                            <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                <p className="text-sm text-[var(--ink-muted)]">
-                                    更多 MCP 可以在以下网站寻找：
-                                </p>
-                                <div className="mt-2 flex flex-wrap gap-3">
-                                    {MCP_DISCOVERY_LINKS.map((link) => (
-                                        <ExternalLink
-                                            key={link.url}
-                                            href={link.url}
-                                            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:bg-[var(--info-bg)] hover:text-[var(--info)]"
-                                        >
-                                            {link.name}
-                                            <ExternalLinkIcon className="h-3 w-3" />
-                                        </ExternalLink>
+                                            <span className="text-xl mb-1">{t.icon}</span>
+                                            <span className={`text-sm font-medium ${mcpForm.type === t.type ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
+                                                {t.name}
+                                            </span>
+                                            <span className="text-xs text-[var(--ink-muted)]">{t.desc}</span>
+                                        </button>
                                     ))}
                                 </div>
                             </div>
-                        </div>
-                    )}
 
-                    {/* Add MCP Modal */}
-                    {showMcpForm && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                            <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
-                                {/* Header */}
-                                <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                                    <h3 className="text-lg font-semibold text-[var(--ink)]">添加 MCP 服务器</h3>
-                                    <button
-                                        onClick={() => {
-                                            setShowMcpForm(false);
-                                            setMcpForm({
-                                                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                                                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-                                            });
-                                        }}
-                                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
-                                    >
-                                        <X className="h-5 w-5" />
-                                    </button>
+                            <div className="space-y-4">
+                                {/* ID - Common */}
+                                <div>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                        <span className="font-mono">ID</span> <span className="text-[var(--error)]">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={mcpForm.id}
+                                        onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
+                                        placeholder="例如: my-mcp-server"
+                                        disabled={!!editingMcpId}
+                                        className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    />
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
                                 </div>
 
-                                {/* Content - Scrollable */}
-                                <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-5">
-                                    {/* Transport Type Selector */}
-                                    <div className="mb-5">
-                                        <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
-                                        <div className="grid grid-cols-3 gap-2">
-                                            {[
-                                                { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
-                                                { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
-                                                { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
-                                            ].map((t) => (
-                                                <button
-                                                    key={t.type}
-                                                    onClick={() => setMcpForm((p) => ({ ...p, type: t.type }))}
-                                                    className={`flex flex-col items-center rounded-xl border p-3 transition-all ${mcpForm.type === t.type
-                                                        ? 'border-[var(--ink)] bg-[var(--paper-contrast)]'
-                                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
-                                                        }`}
-                                                >
-                                                    <span className="text-xl mb-1">{t.icon}</span>
-                                                    <span className={`text-sm font-medium ${mcpForm.type === t.type ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
-                                                        {t.name}
-                                                    </span>
-                                                    <span className="text-xs text-[var(--ink-muted)]">{t.desc}</span>
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
+                                {/* Name - Common */}
+                                <div>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                        名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={mcpForm.name}
+                                        onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
+                                        placeholder="例如: 我的 MCP 服务器"
+                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                    />
+                                </div>
 
-                                    <div className="space-y-4">
-                                        {/* ID - Common */}
+                                {/* STDIO Fields */}
+                                {mcpForm.type === 'stdio' && (
+                                    <>
                                         <div>
                                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                <span className="font-mono">ID</span> <span className="text-[var(--error)]">*</span>
+                                                命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
                                             </label>
                                             <input
                                                 type="text"
-                                                value={mcpForm.id}
-                                                onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
-                                                placeholder="例如: my-mcp-server"
+                                                value={mcpForm.command}
+                                                onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
+                                                placeholder="例如: npx, uvx, node, python"
                                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
                                             />
-                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
                                         </div>
 
-                                        {/* Name - Common */}
-                                        <div>
-                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
+                                        {/* Args - array input */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
+                                                参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
                                             </label>
-                                            <input
-                                                type="text"
-                                                value={mcpForm.name}
-                                                onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
-                                                placeholder="例如: 我的 MCP 服务器"
-                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                            />
+
+                                            {/* Existing args */}
+                                            {mcpForm.args.length > 0 && (
+                                                <div className="mb-3 flex flex-wrap gap-2">
+                                                    {mcpForm.args.map((arg, index) => (
+                                                        <div key={index} className="flex items-center gap-1 rounded-lg bg-[var(--paper-elevated)] px-2.5 py-1.5 text-xs font-mono text-[var(--ink)]">
+                                                            <span>{arg}</span>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setMcpForm((p) => ({
+                                                                        ...p,
+                                                                        args: p.args.filter((_, i) => i !== index)
+                                                                    }));
+                                                                }}
+                                                                className="ml-1 text-[var(--ink-muted)] hover:text-[var(--error)]"
+                                                            >
+                                                                <X className="h-3 w-3" />
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {/* Add new arg */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newArg}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
+                                                    placeholder="例如: @playwright/mcp@latest"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newArg.trim()) {
+                                                                setMcpForm((p) => ({
+                                                                    ...p,
+                                                                    args: [...p.args, p.newArg.trim()],
+                                                                    newArg: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newArg.trim()) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                args: [...p.args, p.newArg.trim()],
+                                                                newArg: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newArg.trim()}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
                                         </div>
 
-                                        {/* STDIO Fields */}
-                                        {mcpForm.type === 'stdio' && (
-                                            <>
-                                                <div>
-                                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                        命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
-                                                    </label>
+                                        {/* Environment Variables */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
+                                                <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
+                                            </label>
+
+                                            {/* Existing env vars */}
+                                            {Object.entries(mcpForm.env).map(([key, value]) => (
+                                                <div key={key} className="mb-2 flex items-center gap-2">
+                                                    <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
                                                     <input
                                                         type="text"
-                                                        value={mcpForm.command}
-                                                        onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
-                                                        placeholder="例如: npx, uvx, node, python"
-                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                        value={value}
+                                                        onChange={(e) => setMcpForm((p) => ({
+                                                            ...p,
+                                                            env: { ...p.env, [key]: e.target.value }
+                                                        }))}
+                                                        placeholder="值"
+                                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
                                                     />
-                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
+                                                    <button
+                                                        onClick={() => {
+                                                            const newEnv = { ...mcpForm.env };
+                                                            delete newEnv[key];
+                                                            setMcpForm((p) => ({ ...p, env: newEnv }));
+                                                        }}
+                                                        className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
                                                 </div>
+                                            ))}
 
-                                                {/* Args - array input */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
-                                                        参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
-                                                    </label>
-
-                                                    {/* Existing args */}
-                                                    {mcpForm.args.length > 0 && (
-                                                        <div className="mb-3 flex flex-wrap gap-2">
-                                                            {mcpForm.args.map((arg, index) => (
-                                                                <div key={index} className="flex items-center gap-1 rounded-lg bg-[var(--paper-elevated)] px-2.5 py-1.5 text-xs font-mono text-[var(--ink)]">
-                                                                    <span>{arg}</span>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setMcpForm((p) => ({
-                                                                                ...p,
-                                                                                args: p.args.filter((_, i) => i !== index)
-                                                                            }));
-                                                                        }}
-                                                                        className="ml-1 text-[var(--ink-muted)] hover:text-[var(--error)]"
-                                                                    >
-                                                                        <X className="h-3 w-3" />
-                                                                    </button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-
-                                                    {/* Add new arg */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newArg}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
-                                                            placeholder="例如: @playwright/mcp@latest"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newArg.trim()) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            args: [...p.args, p.newArg.trim()],
-                                                                            newArg: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newArg.trim()) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        args: [...p.args, p.newArg.trim()],
-                                                                        newArg: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newArg.trim()}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
-                                                </div>
-
-                                                {/* Environment Variables */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
-                                                    </label>
-
-                                                    {/* Existing env vars */}
-                                                    {Object.entries(mcpForm.env).map(([key, value]) => (
-                                                        <div key={key} className="mb-2 flex items-center gap-2">
-                                                            <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
-                                                            <input
-                                                                type="text"
-                                                                value={value}
-                                                                onChange={(e) => setMcpForm((p) => ({
+                                            {/* Add new env var */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newEnvKey}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
+                                                    placeholder="变量名（如 API_KEY）"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newEnvKey) {
+                                                                setMcpForm((p) => ({
                                                                     ...p,
-                                                                    env: { ...p.env, [key]: e.target.value }
-                                                                }))}
-                                                                placeholder="值"
-                                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            />
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newEnv = { ...mcpForm.env };
-                                                                    delete newEnv[key];
-                                                                    setMcpForm((p) => ({ ...p, env: newEnv }));
-                                                                }}
-                                                                className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </button>
-                                                        </div>
-                                                    ))}
+                                                                    env: { ...p.env, [p.newEnvKey]: '' },
+                                                                    newEnvKey: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newEnvKey) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                env: { ...p.env, [p.newEnvKey]: '' },
+                                                                newEnvKey: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newEnvKey}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
 
-                                                    {/* Add new env var */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newEnvKey}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
-                                                            placeholder="变量名（如 API_KEY）"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newEnvKey) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            env: { ...p.env, [p.newEnvKey]: '' },
-                                                                            newEnvKey: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newEnvKey) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        env: { ...p.env, [p.newEnvKey]: '' },
-                                                                        newEnvKey: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newEnvKey}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </>
-                                        )}
+                                {/* HTTP/SSE Fields */}
+                                {(mcpForm.type === 'http' || mcpForm.type === 'sse') && (
+                                    <>
+                                        <div>
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                                服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
+                                            </label>
+                                            <input
+                                                type="url"
+                                                value={mcpForm.url}
+                                                onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
+                                                placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
+                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                            />
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
+                                            </p>
+                                        </div>
 
-                                        {/* HTTP/SSE Fields */}
-                                        {(mcpForm.type === 'http' || mcpForm.type === 'sse') && (
-                                            <>
-                                                <div>
-                                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                        服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
-                                                    </label>
+                                        {/* HTTP Headers */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
+                                                <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
+                                            </label>
+
+                                            {/* Existing headers */}
+                                            {Object.entries(mcpForm.headers).map(([key, value]) => (
+                                                <div key={key} className="mb-2 flex items-center gap-2">
+                                                    <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
                                                     <input
-                                                        type="url"
-                                                        value={mcpForm.url}
-                                                        onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
-                                                        placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
-                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                        type="text"
+                                                        value={value}
+                                                        onChange={(e) => setMcpForm((p) => ({
+                                                            ...p,
+                                                            headers: { ...p.headers, [key]: e.target.value }
+                                                        }))}
+                                                        placeholder="值"
+                                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
                                                     />
-                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
-                                                    </p>
+                                                    <button
+                                                        onClick={() => {
+                                                            const newHeaders = { ...mcpForm.headers };
+                                                            delete newHeaders[key];
+                                                            setMcpForm((p) => ({ ...p, headers: newHeaders }));
+                                                        }}
+                                                        className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
                                                 </div>
+                                            ))}
 
-                                                {/* HTTP Headers */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
-                                                    </label>
-
-                                                    {/* Existing headers */}
-                                                    {Object.entries(mcpForm.headers).map(([key, value]) => (
-                                                        <div key={key} className="mb-2 flex items-center gap-2">
-                                                            <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
-                                                            <input
-                                                                type="text"
-                                                                value={value}
-                                                                onChange={(e) => setMcpForm((p) => ({
+                                            {/* Add new header */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newHeaderKey}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
+                                                    placeholder="头名称（如 Authorization）"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newHeaderKey) {
+                                                                setMcpForm((p) => ({
                                                                     ...p,
-                                                                    headers: { ...p.headers, [key]: e.target.value }
-                                                                }))}
-                                                                placeholder="值"
-                                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            />
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newHeaders = { ...mcpForm.headers };
-                                                                    delete newHeaders[key];
-                                                                    setMcpForm((p) => ({ ...p, headers: newHeaders }));
-                                                                }}
-                                                                className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </button>
-                                                        </div>
-                                                    ))}
-
-                                                    {/* Add new header */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newHeaderKey}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
-                                                            placeholder="头名称（如 Authorization）"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newHeaderKey) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                            newHeaderKey: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newHeaderKey) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                        newHeaderKey: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newHeaderKey}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Footer */}
-                                <div className="flex gap-3 px-6 py-4 border-t border-[var(--line)]">
-                                    <button
-                                        onClick={() => {
-                                            setShowMcpForm(false);
-                                            setMcpForm({
-                                                id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-                                                env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
-                                            });
-                                        }}
-                                        className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
-                                    >
-                                        取消
-                                    </button>
-                                    <button
-                                        onClick={handleAddMcp}
-                                        disabled={
-                                            !mcpForm.id || !mcpForm.name ||
-                                            (mcpForm.type === 'stdio' && !mcpForm.command) ||
-                                            ((mcpForm.type === 'http' || mcpForm.type === 'sse') && !mcpForm.url)
-                                        }
-                                        className="flex-1 rounded-lg bg-[var(--ink)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)] disabled:opacity-50"
-                                    >
-                                        添加服务器
-                                    </button>
-                                </div>
+                                                                    headers: { ...p.headers, [p.newHeaderKey]: '' },
+                                                                    newHeaderKey: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newHeaderKey) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                headers: { ...p.headers, [p.newHeaderKey]: '' },
+                                                                newHeaderKey: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newHeaderKey}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
-                    )}
+
+                        {/* Footer */}
+                        <div className={`flex items-center px-6 py-4 border-t border-[var(--line)] ${editingMcpId ? 'justify-between' : 'gap-3'}`}>
+                            {editingMcpId && (
+                                <button
+                                    onClick={() => { setShowMcpForm(false); resetMcpForm(); handleDeleteMcp(editingMcpId); }}
+                                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                    删除
+                                </button>
+                            )}
+                            <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
+                                <button
+                                    onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
+                                    className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] ${editingMcpId ? '' : 'flex-1'}`}
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleAddMcp}
+                                    disabled={
+                                        !mcpForm.id || !mcpForm.name ||
+                                        (mcpForm.type === 'stdio' && !mcpForm.command) ||
+                                        ((mcpForm.type === 'http' || mcpForm.type === 'sse') && !mcpForm.url)
+                                    }
+                                    className={`rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50 ${editingMcpId ? '' : 'flex-1'}`}
+                                >
+                                    {editingMcpId ? '保存修改' : '添加服务器'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
+            )}
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
@@ -2523,7 +2624,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             <button
                                 onClick={handleAddCustomProvider}
                                 disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
-                                className="flex-1 rounded-lg bg-[var(--ink)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)] disabled:opacity-50"
+                                className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                             >
                                 添加
                             </button>
@@ -2705,7 +2806,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                                 </button>
                                 <button
                                     onClick={saveProviderEdits}
-                                    className="rounded-lg bg-[var(--ink)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
+                                    className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                 >
                                     保存
                                 </button>
@@ -2737,7 +2838,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             </button>
                             <button
                                 onClick={confirmDeleteCustomProvider}
-                                className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:brightness-110"
+                                className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#b91c1c]"
                             >
                                 删除
                             </button>
@@ -2748,8 +2849,8 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
 
             {/* Runtime not found dialog */}
             {runtimeDialog.show && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-                    <div className="w-[400px] rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
                                 <AlertCircle className="h-5 w-5 text-[var(--warning)]" />
@@ -2769,7 +2870,7 @@ export default function Settings({ initialSection, onSectionChange }: SettingsPr
                             <div onClick={() => setRuntimeDialog({ show: false })} className="flex-1">
                                 <ExternalLink
                                     href={runtimeDialog.downloadUrl || '#'}
-                                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:brightness-110"
+                                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-strong)]"
                                 >
                                     去官网下载
                                     <ExternalLinkIcon className="h-3.5 w-3.5" />

@@ -91,6 +91,7 @@ import {
   setMcpServers,
   getMcpServers,
   setAgents,
+  setSessionModel,
   resetSession,
   waitForSessionIdle,
   setSystemPromptConfig,
@@ -622,6 +623,12 @@ async function main() {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
 
+      // Session state endpoint - used by Rust background completion polling
+      if (pathname === '/api/session-state' && request.method === 'GET') {
+        const { sessionState } = getAgentState();
+        return jsonResponse({ sessionState });
+      }
+
       // 🔍 Debug endpoint: Expose logger diagnostics via HTTP
       if (pathname === '/debug/logger' && request.method === 'GET') {
         const diagnostics = getLoggerDiagnostics();
@@ -1047,8 +1054,8 @@ async function main() {
           // Enqueue the message (this starts the async execution)
           // Send the user's original prompt (clean, without wrapper templates)
           console.log('[cron] execute-sync: about to enqueue user message');
-          await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
-          console.log('[cron] execute-sync: user message enqueued');
+          const enqueueResult = await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
+          console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)
           // Timeout: 10 minutes max execution time
@@ -1056,6 +1063,13 @@ async function main() {
 
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
+            // Clean up the cron message from the queue to prevent ghost execution
+            // after the original streaming task finishes.
+            // Use cancelQueueItem (not clearMessageQueue) to avoid removing unrelated
+            // user-queued messages that should still execute after the current task.
+            if (enqueueResult.queued && enqueueResult.queueId) {
+              cancelQueueItem(enqueueResult.queueId);
+            }
             clearCronTaskContext(effectiveSessionId);
             clearSystemPromptConfig();
             return jsonResponse({
@@ -2620,12 +2634,13 @@ async function main() {
               });
             }
 
-            // Custom MCP or non-npx command → check if command exists
+            // Custom MCP or non-npx command → check if command exists in user's shell PATH
             const { spawn } = await import('child_process');
+            const { getShellEnv } = await import('./utils/shell');
             const checkCmd = process.platform === 'win32' ? 'where' : 'which';
 
             return new Promise<Response>((resolve) => {
-              const proc = spawn(checkCmd, [command], { stdio: 'ignore' });
+              const proc = spawn(checkCmd, [command], { stdio: 'ignore', env: getShellEnv() });
 
               proc.on('error', () => {
                 resolve(jsonResponse({
@@ -4230,6 +4245,21 @@ async function main() {
         } catch (error) {
           console.error('[api/agents/set] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set agents' }, 500);
+        }
+      }
+
+      // POST /api/model/set - Set default model for this session
+      if (pathname === '/api/model/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { model?: string };
+          if (!payload?.model) {
+            return jsonResponse({ success: false, error: 'model is required' }, 400);
+          }
+          setSessionModel(payload.model);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/model/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set model' }, 500);
         }
       }
 

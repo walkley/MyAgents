@@ -1,7 +1,7 @@
 # MyAgents Design Guide
 
-> **Version**: 1.4.0
-> **Last Updated**: 2026-01-30
+> **Version**: 1.5.0
+> **Last Updated**: 2026-02-11
 > **Status**: Active
 > **Platform**: macOS / Windows Desktop Client
 
@@ -302,25 +302,45 @@ Hover 文字: var(--ink)
 ```
 背景: var(--error)
 文字: white
+Hover: bg-[#b91c1c] (暗红)
 用于: 删除、不可恢复操作
+```
+
+#### 强调按钮 (Accent)
+```
+背景: var(--accent)
+文字: white
+Hover: var(--accent-strong)
+用于: 下载、跳转等次要强调操作
+```
+
+#### 文字链按钮 (Text Link)
+```
+背景: transparent
+文字: var(--ink-muted), text-xs
+Hover 背景: var(--paper-contrast)
+Hover 文字: var(--ink)
+用于: 卡片内"去官网"等外部链接入口
 ```
 
 ### 6.2 卡片 (Cards)
 
-#### 默认卡片
+#### 主卡片（供应商/MCP/设置区块）
 ```
 背景: var(--paper-elevated)
 边框: 1px solid var(--line)
 圆角: var(--radius-lg)
-内边距: var(--space-4)
-Hover: border-color 加深至 var(--line-strong)
+内边距: var(--space-5) (p-5, 20px)
+Hover: 添加 var(--shadow-sm)
 ```
 
-#### 可交互卡片
+#### 紧凑卡片（Grid 内技能/Agent/命令）
 ```
-同默认卡片 +
-Hover: 添加 var(--shadow-sm)
-Active: 轻微缩放 scale(0.99)
+背景: var(--paper-elevated)
+边框: 1px solid var(--line)
+圆角: var(--radius-lg)
+内边距: var(--space-4) (p-4, 16px)
+Hover: border-color 加深至 var(--line-strong), 添加 var(--shadow-sm)
 ```
 
 ### 6.3 输入框 (Inputs)
@@ -365,12 +385,14 @@ Item 选中: 文字 var(--accent-warm)
 ### 6.6 开关 (Toggle/Switch)
 
 ```
-宽度: 44px
-高度: 24px
+宽度: 44px (w-11)
+高度: 24px (h-6)
 圆角: var(--radius-full)
-关闭背景: var(--paper-inset)
-开启背景: var(--success)
-滑块: 20px 白色圆形
+关闭背景: var(--line-strong)
+开启背景: var(--accent)
+滑块: 20px (h-5 w-5) 白色圆形, bg-white shadow
+滑块位置: 关闭 translate-x-0, 开启 translate-x-5
+光标: cursor-pointer, 加载中 cursor-wait, 禁用 cursor-not-allowed
 ```
 
 ### 6.7 Section 标题 (Section Headers)
@@ -409,11 +431,11 @@ Item 选中: 文字 var(--accent-warm)
 
 ### 7.2 容器宽度
 
-| 用途 | 最大宽度 |
-|------|---------|
-| 消息列表 | 768px (max-w-3xl) |
-| 设置表单 | 576px (max-w-xl) |
-| 技能面板 | 全宽 |
+| 用途 | 最大宽度 | 布局 |
+|------|---------|------|
+| 消息列表 | 768px (max-w-3xl) | 单栏 |
+| 设置 - 通用/关于 | 576px (max-w-xl) | 单栏 |
+| 设置 - 供应商/MCP/技能/Agent | 896px (max-w-4xl) | 双栏 grid-cols-2 gap-4 |
 
 ### 7.3 侧边栏
 
@@ -879,19 +901,19 @@ body {
 
 ---
 
-## 13. 兼容性说明
+## 13. 变量别名
 
-### 旧变量映射
+### 等价别名
 
-为保持向后兼容，保留以下旧变量名（建议逐步迁移）：
+以下简写别名在 `index.css` 中定义，指向对应的语义变量，可在代码中直接使用：
 
-| 旧变量 | 新变量 |
-|-------|-------|
-| `--ink-strong` | `--ink-secondary` |
-| `--paper-strong` | `--paper-elevated` |
-| `--paper-contrast` | `--paper-inset` |
-| `--accent` | `--accent-warm` |
-| `--accent-strong` | `--accent-warm-hover` |
+| 别名 | 等价于 | 说明 |
+|------|-------|------|
+| `--accent` | `--accent-warm` | 默认强调色（暖棕），Toggle ON、高亮等 |
+| `--accent-strong` | `--accent-warm-hover` | 强调色 hover 态 |
+| `--paper-contrast` | `--paper-inset` | 对比背景色，hover、输入框等 |
+| `--ink-strong` | `--ink-secondary` | 加深文字色 |
+| `--paper-strong` | `--paper-elevated` | 提升背景色 |
 
 ---
 
@@ -1068,6 +1090,7 @@ Hover 状态:
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 1.5.0 | 2026-02-11 | Toggle 规范对齐实际实现（ON=accent, OFF=line-strong）；Settings 双栏布局；卡片分主/紧凑两级；按钮补充危险/强调/文字链；变量别名重新定位 |
 | 1.4.0 | 2026-01-30 | 新增 Launcher 页面规范、Section 标题规范、透明度层级规范；统一文件夹图标为暖色调 |
 | 1.3.0 | 2026-01-22 | 按钮尺寸规范：工具栏按钮 13px + h-3.5 图标，主按钮 14px |
 | 1.2.0 | 2026-01-22 | 字号体系重构：以 16px 为正文基准，H1-H6 标题 22/20/18/16px |

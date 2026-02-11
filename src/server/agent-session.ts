@@ -435,6 +435,35 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
 }
 
 /**
+ * Set the default model for subsequent queries.
+ * Called during tab initialization so the backend has a real default model
+ * before pre-warm starts. This ensures:
+ * 1. Pre-warm uses the correct model (no undefined → SDK guesses)
+ * 2. Gateway clients (Telegram, API) can omit model and get a proper default
+ * 3. First user message doesn't trigger a blocking setModel() call
+ *
+ * Unlike MCP/agents, model changes don't require session restart —
+ * so this does NOT trigger schedulePreWarm(). The debounced pre-warm
+ * from MCP/agents sync will pick up the model automatically.
+ */
+export function setSessionModel(model: string): void {
+  if (model === currentModel) return;
+
+  const oldModel = currentModel;
+  currentModel = model;
+  console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
+
+  // If a session is actively running (not pre-warming), apply model change to subprocess.
+  // This ensures dropdown model switches take effect immediately, even if the sync
+  // arrives before the next user message triggers applySessionConfig.
+  if (querySession && !isPreWarming) {
+    querySession.setModel(model).catch(err => {
+      console.error('[agent] failed to apply model to running session:', err);
+    });
+  }
+}
+
+/**
  * Schedule a pre-warm of the SDK subprocess and MCP servers.
  * Uses debounce to batch rapid config changes during tab initialization.
  * The pre-warmed session is invisible to the frontend until the first user message.
@@ -622,26 +651,31 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       let command = server.command;
       let args = server.args || [];
 
-      // For npx commands, try to use bundled bun (bun x is npx-compatible)
-      // This ensures the app works without requiring Node.js/npm
+      // For npx commands: builtin MCP uses bundled bun, custom MCP uses system npx
       if (command === 'npx') {
-        // Pin @latest to known versions to avoid npm registry check on every startup
-        // This eliminates 2-5s of network latency per MCP server per session
-        args = pinMcpPackageVersions(args);
+        if (server.isBuiltin) {
+          // Builtin MCP: use bundled bun x (no Node.js dependency)
+          // Pin @latest to known versions to avoid npm registry check on every startup
+          args = pinMcpPackageVersions(args);
 
-        // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
-        const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
-        const runtime = getBundledRuntimePath();
+          // eslint-disable-next-line @typescript-eslint/no-require-imports -- Dynamic import for runtime detection
+          const { getBundledRuntimePath, isBunRuntime } = require('./utils/runtime');
+          const runtime = getBundledRuntimePath();
 
-        if (isBunRuntime(runtime)) {
-          // Use bundled bun: bun x @package@version <args>
-          command = runtime;
-          args = ['x', ...args];
-          console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+          if (isBunRuntime(runtime)) {
+            command = runtime;
+            args = ['x', ...args];
+            console.log(`[agent] MCP ${server.id}: Using bundled bun x`);
+          } else {
+            args = ['-y', ...args];
+            console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+          }
         } else {
-          // Fallback to npx with -y flag for auto-confirm
-          args = ['-y', ...args];
-          console.log(`[agent] MCP ${server.id}: Using npx (bun not available)`);
+          // Custom MCP: use system npx with -y for auto-confirm
+          if (!args.includes('-y')) {
+            args = ['-y', ...args];
+          }
+          console.log(`[agent] MCP ${server.id}: Using system npx`);
         }
       }
 
@@ -1983,6 +2017,16 @@ export async function resetSession(): Promise<void> {
     querySession = null;
   }
 
+  // 1b. Persist in-memory messages from the old session before clearing.
+  // If streaming was aborted mid-turn, handleMessageComplete was never called,
+  // so these messages exist only in memory. Persist them to prevent data loss
+  // in the old session (user may revisit it from history).
+  // sessionId still points to the OLD session here (updated in step 3).
+  if (messages.length > 0) {
+    console.log(`[agent] resetSession: persisting ${messages.length} in-memory messages before clearing`);
+    persistMessagesToStorage();
+  }
+
   // 2. Clear all message state (shared with initializeAgent)
   clearMessageState();
 
@@ -2060,6 +2104,13 @@ export function initializeAgent(nextAgentDir: string, initialPrompt?: string | n
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
   console.log(`[agent] switchToSession: ${targetSessionId}`);
 
+  // Skip if already on the target session — prevents aborting an active streaming task
+  // when frontend calls loadSession on the same session (e.g., after cron timeout)
+  if (targetSessionId === sessionId) {
+    console.log(`[agent] switchToSession: already on session ${targetSessionId}, skipping`);
+    return true;
+  }
+
   // Get the target session metadata to find SDK session_id
   const sessionMeta = getSessionMetadata(targetSessionId);
   if (!sessionMeta) {
@@ -2078,6 +2129,13 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
       await sessionTerminationPromise;
     }
     querySession = null;
+  }
+
+  // Persist current in-memory messages before clearing to prevent data loss
+  // (e.g., if an active streaming session accumulated messages not yet saved to disk)
+  if (messages.length > 0) {
+    console.log(`[agent] switchToSession: persisting ${messages.length} in-memory messages before clearing`);
+    persistMessagesToStorage();
   }
 
   // Reset all runtime state
@@ -2633,6 +2691,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   shouldAbortSession = false;
   resetAbortFlag();
   isProcessing = true;
+  let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   streamIndexToToolId.clear();
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
   if (!preWarm) {
@@ -2793,6 +2852,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           broadcast('chat:system-init', { info: systemInitInfo, sessionId });
         } else {
           // Pre-warm succeeded — subprocess + MCP ready
+          preWarmStartedOk = true;
           preWarmFailCount = 0;
           resumeSessionId = undefined; // Session started successfully, safe to clear
           console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
@@ -3334,13 +3394,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
     }
 
-    // Don't broadcast errors to frontend during pre-warm
+    // Don't broadcast errors to frontend during pre-warm.
+    // Failure counting is handled uniformly in the finally block via preWarmStartedOk flag,
+    // so we don't increment preWarmFailCount here — avoids double-counting when both
+    // catch and finally execute for the same failed pre-warm.
     if (!isPreWarming) {
       broadcast('chat:message-error', userFacingError);
       handleMessageError(errorMessage);
       setSessionState('error');
-    } else {
-      preWarmFailCount++;
     }
   } finally {
     const wasPreWarming = isPreWarming;
@@ -3369,9 +3430,32 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     clearCronTaskContext();
     resolveTermination!();
 
-    // If pre-warm was aborted (e.g., config change), re-warm with updated config
     if (wasPreWarming) {
-      schedulePreWarm();
+      // The SDK subprocess has exited, so the sessionId is no longer "in use".
+      sessionIdUsedByQuery = false;
+
+      if (!preWarmStartedOk) {
+        // Pre-warm never received system_init — session didn't start successfully.
+        // Clear stale resumeSessionId to prevent infinite retry with a non-existent
+        // server-side session (e.g., expired session from a previous app launch).
+        resumeSessionId = undefined;
+
+        if (!shouldAbortSession) {
+          // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
+          // SDK "No conversation found" errors arrive as result messages (not exceptions),
+          // so this is the only path that increments preWarmFailCount for such failures.
+          preWarmFailCount++;
+          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}`);
+        } else {
+          console.log('[agent] pre-warm aborted before system_init, cleared resumeSessionId');
+        }
+      }
+
+      // Re-schedule: on failure (retry with fresh session) or on abort (config change).
+      // Don't re-schedule after success — subprocess+MCP already warmed, no benefit.
+      if (!preWarmStartedOk || shouldAbortSession) {
+        schedulePreWarm();
+      }
     } else if (shouldRestart) {
       // Process next queued message by starting a new session with resume
       // (resumeSessionId already set above)

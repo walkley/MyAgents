@@ -8,6 +8,7 @@
 // 5. User clicks → restartAndUpdate() → app restarts with new version
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -15,10 +16,14 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
+import { compareVersions } from '../../shared/utils';
 
 export interface UpdateReadyInfo {
     version: string;
 }
+
+/** Result of a manual update check, used by caller for user-facing feedback (toast) */
+export type CheckUpdateResult = 'up-to-date' | 'downloading' | 'error';
 
 interface UseUpdaterResult {
     /** Whether an update has been downloaded and is ready to install */
@@ -27,21 +32,97 @@ interface UseUpdaterResult {
     updateVersion: string | null;
     /** Restart the app to apply the update */
     restartAndUpdate: () => Promise<void>;
+    /** Whether a manual check is in progress */
+    checking: boolean;
+    /** Whether an update is being downloaded */
+    downloading: boolean;
+    /** Manually trigger an update check. Returns result for caller to show toast feedback. */
+    checkForUpdate: () => Promise<CheckUpdateResult>;
 }
 
-// Periodic check interval: 4 hours
-const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+// Periodic check interval: 30 minutes
+const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
 export function useUpdater(): UseUpdaterResult {
     const [updateReady, setUpdateReady] = useState(false);
     const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+    const [checking, setChecking] = useState(false);
+    const [downloading, setDownloading] = useState(false);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
     const updateReadyRef = useRef(false);
+    // Ref guards for checkForUpdate to prevent race conditions on rapid clicks.
+    // State values in a useCallback closure can be stale; refs are always current.
+    const checkingRef = useRef(false);
+    const downloadingRef = useRef(false);
+    // Cache app version — it never changes during a session, no need to IPC every time.
+    const appVersionRef = useRef<string | null>(null);
 
     // Keep ref in sync with state
     useEffect(() => {
         updateReadyRef.current = updateReady;
     }, [updateReady]);
+
+    // Manual update check: test connectivity → compare version → download if needed
+    // Returns a result string so the caller can show appropriate toast feedback.
+    const checkForUpdate = useCallback(async (): Promise<CheckUpdateResult> => {
+        if (!isTauriEnvironment()) {
+            console.warn('[useUpdater] Manual check not available outside Tauri');
+            return 'error';
+        }
+        // Use refs for guards — immune to stale closure on rapid clicks
+        if (updateReadyRef.current || checkingRef.current || downloadingRef.current) {
+            return 'up-to-date';
+        }
+
+        checkingRef.current = true;
+        setChecking(true);
+        try {
+            // Step 1: Get remote version
+            const result = await invoke('test_update_connectivity') as string;
+            const versionMatch = result.match(/version:\s*([^\n]+)/);
+            if (!versionMatch) {
+                throw new Error('无法解析远程版本信息');
+            }
+            const remoteVer = versionMatch[1].trim();
+
+            // Step 2: Get local version (cached) and compare
+            if (!appVersionRef.current) {
+                appVersionRef.current = await getVersion();
+            }
+            const comparison = compareVersions(remoteVer, appVersionRef.current);
+
+            if (comparison <= 0) {
+                // Already up to date
+                return 'up-to-date';
+            }
+
+            // Step 3: New version available → download
+            checkingRef.current = false;
+            setChecking(false);
+            downloadingRef.current = true;
+            setDownloading(true);
+            setUpdateVersion(remoteVer);
+
+            const downloaded = await invoke('check_and_download_update') as boolean;
+            if (downloaded) {
+                // updater:ready-to-restart event will also fire and set updateReady
+                setUpdateReady(true);
+                return 'downloading';
+            }
+            // Rust updater decided no update — clear orphan version state
+            setUpdateVersion(null);
+            return 'up-to-date';
+        } catch (err) {
+            console.error('[useUpdater] Manual check failed:', err);
+            return 'error';
+        } finally {
+            // Always reset both guards — ensures clean state regardless of exit path
+            checkingRef.current = false;
+            setChecking(false);
+            downloadingRef.current = false;
+            setDownloading(false);
+        }
+    }, []); // Stable reference — all mutable state accessed via refs
 
     // Restart app to apply the update
     const restartAndUpdate = useCallback(async () => {
@@ -93,6 +174,7 @@ export function useUpdater(): UseUpdaterResult {
                     }
                     setUpdateVersion(event.payload.version);
                     setUpdateReady(true);
+                    setDownloading(false);
                 });
                 if (isDebugMode()) {
                     console.log('[useUpdater] Event listener registered successfully');
@@ -144,5 +226,8 @@ export function useUpdater(): UseUpdaterResult {
         updateReady,
         updateVersion,
         restartAndUpdate,
+        checking,
+        downloading,
+        checkForUpdate,
     };
 }

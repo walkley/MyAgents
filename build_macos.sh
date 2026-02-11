@@ -50,7 +50,7 @@ fi
 # ========================================
 # 加载环境变量 (签名配置)
 # ========================================
-echo -e "${BLUE}[1/8] 加载签名配置...${NC}"
+echo -e "${BLUE}[1/7] 加载签名配置...${NC}"
 if [ -f "$ENV_FILE" ]; then
     set -a
     source "$ENV_FILE"
@@ -144,7 +144,7 @@ check_dependency() {
     fi
 }
 
-echo -e "${BLUE}[2/8] 检查依赖...${NC}"
+echo -e "${BLUE}[2/7] 检查依赖...${NC}"
 check_dependency "rustc" "请安装 Rust: https://rustup.rs"
 check_dependency "npm" "请安装 Node.js: https://nodejs.org"
 check_dependency "codesign" "需要 Xcode Command Line Tools"
@@ -162,22 +162,9 @@ done
 echo -e "${GREEN}✓ 依赖检查通过${NC}"
 echo ""
 
-# 配置生产 CSP (更严格，但支持 KaTeX 字体)
-echo -e "${BLUE}[3/8] 配置生产环境 CSP...${NC}"
-cp "$TAURI_CONF" "${TAURI_CONF}.bak"
-
-export TAURI_CONF_PATH="$TAURI_CONF"
-node << 'EOF'
-const fs = require('fs');
-const confPath = process.env.TAURI_CONF_PATH;
-const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
-// 生产 CSP: 禁用 unsafe-eval，但保留 KaTeX 字体支持
-conf.app.security.csp = "default-src 'self' ipc: tauri:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: tauri: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; img-src 'self' data: blob:;";
-fs.writeFileSync(confPath, JSON.stringify(conf, null, 2));
-console.log('CSP updated for production');
-EOF
-
-echo -e "${GREEN}✓ CSP 已配置${NC}"
+# CSP 验证（tauri.conf.json 中已包含跨平台完整 CSP，无需覆写）
+echo -e "${BLUE}[3/7] 验证 CSP 配置...${NC}"
+echo -e "${GREEN}✓ 使用 tauri.conf.json 中的跨平台 CSP（含 Windows 兼容指令）${NC}"
 echo ""
 
 # 清理旧构建
@@ -192,18 +179,17 @@ echo -e "${GREEN}✓ 清理完成${NC}"
 echo ""
 
 # TypeScript 类型检查
-echo -e "${BLUE}[4/8] TypeScript 类型检查...${NC}"
+echo -e "${BLUE}[4/7] TypeScript 类型检查...${NC}"
 cd "${PROJECT_DIR}"
 if ! bun run typecheck; then
     echo -e "${RED}✗ TypeScript 检查失败，请修复后重试${NC}"
-    [ -f "${TAURI_CONF}.bak" ] && mv "${TAURI_CONF}.bak" "$TAURI_CONF"  # 恢复配置
     exit 1
 fi
 echo -e "${GREEN}✓ TypeScript 检查通过${NC}"
 echo ""
 
 # 构建前端和服务端
-echo -e "${BLUE}[5/8] 构建前端和服务端...${NC}"
+echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 
 # 打包服务端代码
 echo -e "  ${CYAN}打包服务端代码...${NC}"
@@ -242,7 +228,7 @@ echo ""
 # ========================================
 # 签名 Bun 可执行文件 (重要：确保与应用使用相同签名)
 # ========================================
-echo -e "${BLUE}[6/8] 签名外部二进制文件...${NC}"
+echo -e "${BLUE}[6/7] 签名外部二进制文件...${NC}"
 
 # 签名 Bun 可执行文件
 # 重要：Bun 默认使用官方签名 (Jarred Sumner)，需要重签名为应用签名
@@ -310,7 +296,7 @@ echo -e "${GREEN}✓ Vendor 签名完成 (成功: ${SIGNED_COUNT}, 失败: ${FAI
 echo ""
 
 # 构建 Tauri 应用
-echo -e "${BLUE}[7/8] 构建 Tauri 应用 (Release + 签名 + 公证)...${NC}"
+echo -e "${BLUE}[7/7] 构建 Tauri 应用 (Release + 签名 + 公证)...${NC}"
 echo -e "${YELLOW}这可能需要 5-10 分钟 (包含公证等待时间)...${NC}"
 
 for TARGET in "${BUILD_TARGETS[@]}"; do
@@ -322,15 +308,6 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
     echo -e "${GREEN}✓ $TARGET 构建完成${NC}"
 done
 
-# 恢复配置
-echo ""
-echo -e "${BLUE}[8/8] 恢复开发配置...${NC}"
-if [ -f "${TAURI_CONF}.bak" ]; then
-    mv "${TAURI_CONF}.bak" "$TAURI_CONF"
-    echo -e "${GREEN}✓ 配置已恢复${NC}"
-else
-    echo -e "${YELLOW}⚠ 备份文件不存在，跳过恢复${NC}"
-fi
 echo ""
 
 # 检查输出

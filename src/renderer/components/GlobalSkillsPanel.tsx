@@ -285,7 +285,7 @@ export default function GlobalSkillsPanel() {
     // Skill Detail View - Reuse SkillDetailPanel
     if (viewState.type === 'skill-detail') {
         return (
-            <div className="mx-auto max-w-3xl space-y-4">
+            <div className="space-y-4">
                 <button
                     onClick={handleBackToList}
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
@@ -311,7 +311,7 @@ export default function GlobalSkillsPanel() {
     // Command Detail View - Reuse CommandDetailPanel
     if (viewState.type === 'command-detail') {
         return (
-            <div className="mx-auto max-w-3xl space-y-4">
+            <div className="space-y-4">
                 <button
                     onClick={handleBackToList}
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
@@ -335,7 +335,7 @@ export default function GlobalSkillsPanel() {
 
     // List View
     return (
-        <div className="mx-auto max-w-3xl space-y-8">
+        <div className="space-y-8">
             {/* Skills Section */}
             <div>
                 <div className="mb-4 flex items-center justify-between">

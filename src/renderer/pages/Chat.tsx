@@ -32,7 +32,8 @@ import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 
 interface ChatProps {
   onBack?: () => void;
-  onNewSession?: () => void;
+  /** Called when user starts a new session. Returns true if handled externally (background completion started). */
+  onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
   onSwitchSession?: (sessionId: string) => void;
 }
@@ -175,14 +176,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
     },
-    onExecutionComplete: async (task) => {
+    onExecutionComplete: async (task, success) => {
       // Called when a single execution completes (task may still be running)
       // Refresh the session to show the latest messages
       // Use task.sessionId (the cron task's actual session) instead of Chat's sessionId
       // which may be a pending/different session
-      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId);
+      console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'taskSessionId:', task.sessionId, 'success:', success);
       setIsLoading(false);
-      if (task.sessionId) {
+      // Only refresh session on successful execution.
+      // On timeout (success=false), the original streaming task may still be running
+      // and calling loadSession would abort it (via switchToSession) and lose data.
+      if (success && task.sessionId) {
         await loadSession(task.sessionId);
       }
     },
@@ -494,6 +498,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     }
   }, [currentProvider?.id, currentProvider?.primaryModel]);
 
+  // Sync selectedModel to backend so pre-warm uses the correct model.
+  // Without this, backend currentModel stays undefined until the first message,
+  // causing a blocking setModel() call during pre-warm → active transition.
+  useEffect(() => {
+    if (selectedModel) {
+      apiPost('/api/model/set', { model: selectedModel }).catch(err => {
+        console.error('[Chat] Failed to sync model to backend:', err);
+      });
+    }
+  }, [selectedModel, apiPost]);
+
   const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages, sessionId);
 
   // Auto-focus input when Tab becomes active
@@ -695,16 +710,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   }, [forceExecuteQueuedMessage]);
 
   // Internal handler for starting a new session
-  // This resets both frontend and backend state
+  // If AI is running, App.tsx handles it via background completion (returns true).
+  // If AI is idle, falls back to resetSession (reuses Sidecar).
   const handleNewSession = useCallback(async () => {
     if (onNewSession) {
-      // Use external handler if provided
-      onNewSession();
-      return;
+      const handled = await onNewSession();
+      if (handled) {
+        // App.tsx started background completion and created new Sidecar
+        // TabProvider will detect sessionId change and reconnect
+        return;
+      }
     }
 
-    // Reset session on backend (stops any ongoing response + clears messages)
-    // This also clears frontend state via resetSession()
+    // Fallback: AI is idle, reset session within existing Sidecar
     console.log('[Chat] Starting new session...');
     const success = await resetSession();
     if (success) {
