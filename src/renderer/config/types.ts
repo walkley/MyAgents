@@ -378,6 +378,26 @@ export const PRESET_PROVIDERS: Provider[] = [
     ],
   },
   {
+    id: 'siliconflow',
+    name: '硅基流动SiliconFlow',
+    vendor: 'SiliconFlow',
+    cloudProvider: '云服务商',
+    type: 'api',
+    primaryModel: 'Pro/deepseek-ai/DeepSeek-V3.2',
+    isBuiltin: true,
+    authType: 'api_key',
+    config: {
+      baseUrl: 'https://api.siliconflow.cn/',
+    },
+    models: [
+      { model: 'Pro/moonshotai/Kimi-K2.5', modelName: 'Kimi K2.5', modelSeries: 'siliconflow' },
+      { model: 'Pro/zai-org/GLM-4.7', modelName: 'GLM 4.7', modelSeries: 'siliconflow' },
+      { model: 'Pro/deepseek-ai/DeepSeek-V3.2', modelName: 'DeepSeek V3.2', modelSeries: 'siliconflow' },
+      { model: 'Pro/MiniMaxAI/MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'siliconflow' },
+      { model: 'stepfun-ai/Step-3.5-Flash', modelName: 'Step 3.5 Flash', modelSeries: 'siliconflow' },
+    ],
+  },
+  {
     id: 'openrouter',
     name: 'OpenRouter',
     vendor: 'OpenRouter',

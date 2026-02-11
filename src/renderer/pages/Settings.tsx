@@ -2063,375 +2063,376 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                         </div>
                     )}
 
-                    {/* Add MCP Modal */}
-                    {showMcpForm && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                            <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
-                                {/* Header */}
-                                <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                                    <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
-                                    <button
-                                        onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
-                                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
-                                    >
-                                        <X className="h-5 w-5" />
-                                    </button>
-                                </div>
-
-                                {/* Content - Scrollable */}
-                                <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-5">
-                                    {/* Transport Type Selector */}
-                                    <div className="mb-5">
-                                        <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
-                                        <div className="grid grid-cols-3 gap-2">
-                                            {[
-                                                { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
-                                                { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
-                                                { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
-                                            ].map((t) => (
-                                                <button
-                                                    key={t.type}
-                                                    onClick={() => setMcpForm((p) => ({ ...p, type: t.type }))}
-                                                    className={`flex flex-col items-center rounded-xl border p-3 transition-all ${mcpForm.type === t.type
-                                                        ? 'border-[var(--ink)] bg-[var(--paper-contrast)]'
-                                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
-                                                        }`}
-                                                >
-                                                    <span className="text-xl mb-1">{t.icon}</span>
-                                                    <span className={`text-sm font-medium ${mcpForm.type === t.type ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
-                                                        {t.name}
-                                                    </span>
-                                                    <span className="text-xs text-[var(--ink-muted)]">{t.desc}</span>
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="space-y-4">
-                                        {/* ID - Common */}
-                                        <div>
-                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                <span className="font-mono">ID</span> <span className="text-[var(--error)]">*</span>
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={mcpForm.id}
-                                                onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
-                                                placeholder="例如: my-mcp-server"
-                                                disabled={!!editingMcpId}
-                                                className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                            />
-                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
-                                        </div>
-
-                                        {/* Name - Common */}
-                                        <div>
-                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={mcpForm.name}
-                                                onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
-                                                placeholder="例如: 我的 MCP 服务器"
-                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                            />
-                                        </div>
-
-                                        {/* STDIO Fields */}
-                                        {mcpForm.type === 'stdio' && (
-                                            <>
-                                                <div>
-                                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                        命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
-                                                    </label>
-                                                    <input
-                                                        type="text"
-                                                        value={mcpForm.command}
-                                                        onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
-                                                        placeholder="例如: npx, uvx, node, python"
-                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                    />
-                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
-                                                </div>
-
-                                                {/* Args - array input */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
-                                                        参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
-                                                    </label>
-
-                                                    {/* Existing args */}
-                                                    {mcpForm.args.length > 0 && (
-                                                        <div className="mb-3 flex flex-wrap gap-2">
-                                                            {mcpForm.args.map((arg, index) => (
-                                                                <div key={index} className="flex items-center gap-1 rounded-lg bg-[var(--paper-elevated)] px-2.5 py-1.5 text-xs font-mono text-[var(--ink)]">
-                                                                    <span>{arg}</span>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setMcpForm((p) => ({
-                                                                                ...p,
-                                                                                args: p.args.filter((_, i) => i !== index)
-                                                                            }));
-                                                                        }}
-                                                                        className="ml-1 text-[var(--ink-muted)] hover:text-[var(--error)]"
-                                                                    >
-                                                                        <X className="h-3 w-3" />
-                                                                    </button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-
-                                                    {/* Add new arg */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newArg}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
-                                                            placeholder="例如: @playwright/mcp@latest"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newArg.trim()) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            args: [...p.args, p.newArg.trim()],
-                                                                            newArg: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newArg.trim()) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        args: [...p.args, p.newArg.trim()],
-                                                                        newArg: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newArg.trim()}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
-                                                </div>
-
-                                                {/* Environment Variables */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
-                                                    </label>
-
-                                                    {/* Existing env vars */}
-                                                    {Object.entries(mcpForm.env).map(([key, value]) => (
-                                                        <div key={key} className="mb-2 flex items-center gap-2">
-                                                            <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
-                                                            <input
-                                                                type="text"
-                                                                value={value}
-                                                                onChange={(e) => setMcpForm((p) => ({
-                                                                    ...p,
-                                                                    env: { ...p.env, [key]: e.target.value }
-                                                                }))}
-                                                                placeholder="值"
-                                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            />
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newEnv = { ...mcpForm.env };
-                                                                    delete newEnv[key];
-                                                                    setMcpForm((p) => ({ ...p, env: newEnv }));
-                                                                }}
-                                                                className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </button>
-                                                        </div>
-                                                    ))}
-
-                                                    {/* Add new env var */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newEnvKey}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
-                                                            placeholder="变量名（如 API_KEY）"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newEnvKey) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            env: { ...p.env, [p.newEnvKey]: '' },
-                                                                            newEnvKey: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newEnvKey) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        env: { ...p.env, [p.newEnvKey]: '' },
-                                                                        newEnvKey: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newEnvKey}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </>
-                                        )}
-
-                                        {/* HTTP/SSE Fields */}
-                                        {(mcpForm.type === 'http' || mcpForm.type === 'sse') && (
-                                            <>
-                                                <div>
-                                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                        服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
-                                                    </label>
-                                                    <input
-                                                        type="url"
-                                                        value={mcpForm.url}
-                                                        onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
-                                                        placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
-                                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                    />
-                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
-                                                    </p>
-                                                </div>
-
-                                                {/* HTTP Headers */}
-                                                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
-                                                    <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
-                                                    </label>
-
-                                                    {/* Existing headers */}
-                                                    {Object.entries(mcpForm.headers).map(([key, value]) => (
-                                                        <div key={key} className="mb-2 flex items-center gap-2">
-                                                            <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
-                                                            <input
-                                                                type="text"
-                                                                value={value}
-                                                                onChange={(e) => setMcpForm((p) => ({
-                                                                    ...p,
-                                                                    headers: { ...p.headers, [key]: e.target.value }
-                                                                }))}
-                                                                placeholder="值"
-                                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            />
-                                                            <button
-                                                                onClick={() => {
-                                                                    const newHeaders = { ...mcpForm.headers };
-                                                                    delete newHeaders[key];
-                                                                    setMcpForm((p) => ({ ...p, headers: newHeaders }));
-                                                                }}
-                                                                className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                                            >
-                                                                <Trash2 className="h-4 w-4" />
-                                                            </button>
-                                                        </div>
-                                                    ))}
-
-                                                    {/* Add new header */}
-                                                    <div className="flex items-center gap-2">
-                                                        <input
-                                                            type="text"
-                                                            value={mcpForm.newHeaderKey}
-                                                            onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
-                                                            placeholder="头名称（如 Authorization）"
-                                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                                            onKeyDown={(e) => {
-                                                                if (e.key === 'Enter') {
-                                                                    e.preventDefault();
-                                                                    if (mcpForm.newHeaderKey) {
-                                                                        setMcpForm((p) => ({
-                                                                            ...p,
-                                                                            headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                            newHeaderKey: ''
-                                                                        }));
-                                                                    }
-                                                                }
-                                                            }}
-                                                        />
-                                                        <button
-                                                            onClick={() => {
-                                                                if (mcpForm.newHeaderKey) {
-                                                                    setMcpForm((p) => ({
-                                                                        ...p,
-                                                                        headers: { ...p.headers, [p.newHeaderKey]: '' },
-                                                                        newHeaderKey: ''
-                                                                    }));
-                                                                }
-                                                            }}
-                                                            disabled={!mcpForm.newHeaderKey}
-                                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
-                                                        >
-                                                            <Plus className="h-4 w-4" />
-                                                            添加
-                                                        </button>
-                                                    </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Footer */}
-                                <div className={`flex items-center px-6 py-4 border-t border-[var(--line)] ${editingMcpId ? 'justify-between' : 'gap-3'}`}>
-                                    {editingMcpId && (
-                                        <button
-                                            onClick={() => { setShowMcpForm(false); resetMcpForm(); handleDeleteMcp(editingMcpId); }}
-                                            className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                            删除
-                                        </button>
-                                    )}
-                                    <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
-                                        <button
-                                            onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
-                                            className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] ${editingMcpId ? '' : 'flex-1'}`}
-                                        >
-                                            取消
-                                        </button>
-                                        <button
-                                            onClick={handleAddMcp}
-                                            disabled={
-                                                !mcpForm.id || !mcpForm.name ||
-                                                (mcpForm.type === 'stdio' && !mcpForm.command) ||
-                                                ((mcpForm.type === 'http' || mcpForm.type === 'sse') && !mcpForm.url)
-                                            }
-                                            className={`rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50 ${editingMcpId ? '' : 'flex-1'}`}
-                                        >
-                                            {editingMcpId ? '保存修改' : '添加服务器'}
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    )}
                 </div>
             </div>
+
+            {/* Add MCP Modal */}
+            {showMcpForm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
+                            <button
+                                onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        {/* Content - Scrollable */}
+                        <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-5">
+                            {/* Transport Type Selector */}
+                            <div className="mb-5">
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
+                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
+                                        { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
+                                    ].map((t) => (
+                                        <button
+                                            key={t.type}
+                                            onClick={() => setMcpForm((p) => ({ ...p, type: t.type }))}
+                                            className={`flex flex-col items-center rounded-xl border p-3 transition-all ${mcpForm.type === t.type
+                                                ? 'border-[var(--ink)] bg-[var(--paper-contrast)]'
+                                                : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                                }`}
+                                        >
+                                            <span className="text-xl mb-1">{t.icon}</span>
+                                            <span className={`text-sm font-medium ${mcpForm.type === t.type ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
+                                                {t.name}
+                                            </span>
+                                            <span className="text-xs text-[var(--ink-muted)]">{t.desc}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                {/* ID - Common */}
+                                <div>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                        <span className="font-mono">ID</span> <span className="text-[var(--error)]">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={mcpForm.id}
+                                        onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
+                                        placeholder="例如: my-mcp-server"
+                                        disabled={!!editingMcpId}
+                                        className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    />
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
+                                </div>
+
+                                {/* Name - Common */}
+                                <div>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                        名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={mcpForm.name}
+                                        onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
+                                        placeholder="例如: 我的 MCP 服务器"
+                                        className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                    />
+                                </div>
+
+                                {/* STDIO Fields */}
+                                {mcpForm.type === 'stdio' && (
+                                    <>
+                                        <div>
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                                命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
+                                            </label>
+                                            <input
+                                                type="text"
+                                                value={mcpForm.command}
+                                                onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
+                                                placeholder="例如: npx, uvx, node, python"
+                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                            />
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
+                                        </div>
+
+                                        {/* Args - array input */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
+                                                参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
+                                            </label>
+
+                                            {/* Existing args */}
+                                            {mcpForm.args.length > 0 && (
+                                                <div className="mb-3 flex flex-wrap gap-2">
+                                                    {mcpForm.args.map((arg, index) => (
+                                                        <div key={index} className="flex items-center gap-1 rounded-lg bg-[var(--paper-elevated)] px-2.5 py-1.5 text-xs font-mono text-[var(--ink)]">
+                                                            <span>{arg}</span>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setMcpForm((p) => ({
+                                                                        ...p,
+                                                                        args: p.args.filter((_, i) => i !== index)
+                                                                    }));
+                                                                }}
+                                                                className="ml-1 text-[var(--ink-muted)] hover:text-[var(--error)]"
+                                                            >
+                                                                <X className="h-3 w-3" />
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {/* Add new arg */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newArg}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
+                                                    placeholder="例如: @playwright/mcp@latest"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newArg.trim()) {
+                                                                setMcpForm((p) => ({
+                                                                    ...p,
+                                                                    args: [...p.args, p.newArg.trim()],
+                                                                    newArg: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newArg.trim()) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                args: [...p.args, p.newArg.trim()],
+                                                                newArg: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newArg.trim()}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
+                                        </div>
+
+                                        {/* Environment Variables */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
+                                                <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
+                                            </label>
+
+                                            {/* Existing env vars */}
+                                            {Object.entries(mcpForm.env).map(([key, value]) => (
+                                                <div key={key} className="mb-2 flex items-center gap-2">
+                                                    <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
+                                                    <input
+                                                        type="text"
+                                                        value={value}
+                                                        onChange={(e) => setMcpForm((p) => ({
+                                                            ...p,
+                                                            env: { ...p.env, [key]: e.target.value }
+                                                        }))}
+                                                        placeholder="值"
+                                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    />
+                                                    <button
+                                                        onClick={() => {
+                                                            const newEnv = { ...mcpForm.env };
+                                                            delete newEnv[key];
+                                                            setMcpForm((p) => ({ ...p, env: newEnv }));
+                                                        }}
+                                                        className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
+                                                </div>
+                                            ))}
+
+                                            {/* Add new env var */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newEnvKey}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
+                                                    placeholder="变量名（如 API_KEY）"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newEnvKey) {
+                                                                setMcpForm((p) => ({
+                                                                    ...p,
+                                                                    env: { ...p.env, [p.newEnvKey]: '' },
+                                                                    newEnvKey: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newEnvKey) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                env: { ...p.env, [p.newEnvKey]: '' },
+                                                                newEnvKey: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newEnvKey}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+
+                                {/* HTTP/SSE Fields */}
+                                {(mcpForm.type === 'http' || mcpForm.type === 'sse') && (
+                                    <>
+                                        <div>
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                                服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
+                                            </label>
+                                            <input
+                                                type="url"
+                                                value={mcpForm.url}
+                                                onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
+                                                placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
+                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                            />
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
+                                            </p>
+                                        </div>
+
+                                        {/* HTTP Headers */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                            <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
+                                                <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
+                                            </label>
+
+                                            {/* Existing headers */}
+                                            {Object.entries(mcpForm.headers).map(([key, value]) => (
+                                                <div key={key} className="mb-2 flex items-center gap-2">
+                                                    <span className="min-w-[100px] text-xs font-mono text-[var(--success)]">{key}</span>
+                                                    <input
+                                                        type="text"
+                                                        value={value}
+                                                        onChange={(e) => setMcpForm((p) => ({
+                                                            ...p,
+                                                            headers: { ...p.headers, [key]: e.target.value }
+                                                        }))}
+                                                        placeholder="值"
+                                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    />
+                                                    <button
+                                                        onClick={() => {
+                                                            const newHeaders = { ...mcpForm.headers };
+                                                            delete newHeaders[key];
+                                                            setMcpForm((p) => ({ ...p, headers: newHeaders }));
+                                                        }}
+                                                        className="rounded-lg p-2 text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
+                                                </div>
+                                            ))}
+
+                                            {/* Add new header */}
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newHeaderKey}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
+                                                    placeholder="头名称（如 Authorization）"
+                                                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            if (mcpForm.newHeaderKey) {
+                                                                setMcpForm((p) => ({
+                                                                    ...p,
+                                                                    headers: { ...p.headers, [p.newHeaderKey]: '' },
+                                                                    newHeaderKey: ''
+                                                                }));
+                                                            }
+                                                        }
+                                                    }}
+                                                />
+                                                <button
+                                                    onClick={() => {
+                                                        if (mcpForm.newHeaderKey) {
+                                                            setMcpForm((p) => ({
+                                                                ...p,
+                                                                headers: { ...p.headers, [p.newHeaderKey]: '' },
+                                                                newHeaderKey: ''
+                                                            }));
+                                                        }
+                                                    }}
+                                                    disabled={!mcpForm.newHeaderKey}
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                >
+                                                    <Plus className="h-4 w-4" />
+                                                    添加
+                                                </button>
+                                            </div>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className={`flex items-center px-6 py-4 border-t border-[var(--line)] ${editingMcpId ? 'justify-between' : 'gap-3'}`}>
+                            {editingMcpId && (
+                                <button
+                                    onClick={() => { setShowMcpForm(false); resetMcpForm(); handleDeleteMcp(editingMcpId); }}
+                                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                >
+                                    <Trash2 className="h-4 w-4" />
+                                    删除
+                                </button>
+                            )}
+                            <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
+                                <button
+                                    onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
+                                    className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] ${editingMcpId ? '' : 'flex-1'}`}
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleAddMcp}
+                                    disabled={
+                                        !mcpForm.id || !mcpForm.name ||
+                                        (mcpForm.type === 'stdio' && !mcpForm.command) ||
+                                        ((mcpForm.type === 'http' || mcpForm.type === 'sse') && !mcpForm.url)
+                                    }
+                                    className={`rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50 ${editingMcpId ? '' : 'flex-1'}`}
+                                >
+                                    {editingMcpId ? '保存修改' : '添加服务器'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
