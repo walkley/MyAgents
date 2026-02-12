@@ -1,4 +1,5 @@
 
+import { memo } from 'react';
 import type { ContentBlock } from '@/types/chat';
 import ProcessRow from './ProcessRow';
 
@@ -9,7 +10,7 @@ interface BlockGroupProps {
   hasTextAfter?: boolean;
 }
 
-export default function BlockGroup({
+const BlockGroup = memo(function BlockGroup({
   blocks,
   isLatestActiveSection = false,
   isStreaming = false
@@ -31,4 +32,6 @@ export default function BlockGroup({
       </div>
     </div>
   );
-}
+});
+
+export default BlockGroup;

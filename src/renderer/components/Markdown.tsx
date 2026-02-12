@@ -11,6 +11,7 @@
 
 import 'katex/dist/katex.min.css';
 
+import { memo } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -303,7 +304,7 @@ function preprocessContent(content: string): string {
   return processed;
 }
 
-export default function Markdown({ children, compact = false, preserveNewlines = false, raw = false }: MarkdownProps) {
+const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
   const processedContent = raw ? children : preprocessContent(children);
 
@@ -318,5 +319,7 @@ export default function Markdown({ children, compact = false, preserveNewlines =
       </ReactMarkdown>
     </div>
   );
-}
+});
+
+export default Markdown;
 

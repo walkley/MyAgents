@@ -9,7 +9,7 @@ import { Save, FolderOpen, Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Ch
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
 
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
@@ -43,7 +43,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         toastRef.current = toast;
 
         // Use Tab-scoped API when available (in project workspace context)
-        const tabState = useTabStateOptional();
+        const tabState = useTabApiOptional();
 
         // Create stable API functions - only depend on the specific functions, not the whole tabState
         const apiGet = tabState?.apiGet;

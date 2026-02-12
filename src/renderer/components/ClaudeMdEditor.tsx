@@ -9,7 +9,7 @@ import { Save, Edit2, X, FolderOpen, FileText, AlertCircle, Loader2 } from 'luci
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useMemo, useRef } from 'react';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost } from '@/api/apiFetch';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
@@ -39,7 +39,7 @@ const ClaudeMdEditor = forwardRef<ClaudeMdEditorRef, ClaudeMdEditorProps>(
         toastRef.current = toast;
 
         // Use Tab-scoped API when available (in project workspace context)
-        const tabState = useTabStateOptional();
+        const tabState = useTabApiOptional();
 
         // Create stable API functions - only depend on the specific functions, not the whole tabState
         // This prevents re-creating the api object when unrelated tabState properties change

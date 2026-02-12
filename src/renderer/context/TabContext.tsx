@@ -168,6 +168,35 @@ const defaultContextValue: TabContextValue = {
  */
 export const TabContext = createContext<TabContextValue>(defaultContextValue);
 
+// ─── TabApiContext (lightweight, stable during streaming) ───
+
+/**
+ * Lightweight context containing only tabId, agentDir, and API functions.
+ * This context does NOT include `messages` or other frequently-changing state,
+ * so consumers subscribed to it won't re-render on every SSE chunk.
+ */
+export interface TabApiContextValue {
+    tabId: string;
+    agentDir: string;
+    apiGet: <T>(path: string) => Promise<T>;
+    apiPost: <T>(path: string, body?: unknown) => Promise<T>;
+    apiPut: <T>(path: string, body?: unknown) => Promise<T>;
+    apiDelete: <T>(path: string) => Promise<T>;
+}
+
+const defaultApiContextValue: TabApiContextValue = {
+    tabId: '',
+    agentDir: '',
+    apiGet: async () => { throw new Error('Not in TabProvider'); },
+    apiPost: async () => { throw new Error('Not in TabProvider'); },
+    apiPut: async () => { throw new Error('Not in TabProvider'); },
+    apiDelete: async () => { throw new Error('Not in TabProvider'); },
+};
+
+export const TabApiContext = createContext<TabApiContextValue>(defaultApiContextValue);
+
+// ─── Hooks ───
+
 /**
  * Hook to access Tab state - throws if used outside TabProvider
  */
@@ -187,5 +216,28 @@ export function useTabState(): TabContextValue {
  */
 export function useTabStateOptional(): TabContextValue | null {
     const context = useContext(TabContext);
+    return context.tabId ? context : null;
+}
+
+/**
+ * Hook to access only Tab API functions (lightweight, stable during streaming).
+ * Use this in components that only need tabId + API functions to avoid
+ * unnecessary re-renders when messages/loading state changes.
+ * Throws if used outside TabProvider.
+ */
+export function useTabApi(): TabApiContextValue {
+    const context = useContext(TabApiContext);
+    if (!context.tabId) {
+        throw new Error('useTabApi must be used within a TabProvider');
+    }
+    return context;
+}
+
+/**
+ * Safe version of useTabApi - returns null if outside TabProvider.
+ * Use this in components that may or may not be rendered within a Tab context.
+ */
+export function useTabApiOptional(): TabApiContextValue | null {
+    const context = useContext(TabApiContext);
     return context.tabId ? context : null;
 }

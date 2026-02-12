@@ -1,9 +1,9 @@
 import { ChevronDown, ChevronUp, Image, Loader, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
-import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
+import { memo, useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { useTabStateOptional, type SessionState } from '@/context/TabContext';
+import { useTabApiOptional, type SessionState } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import QueuedMessagesPanel from './QueuedMessageBubble';
@@ -123,7 +123,7 @@ interface FileSearchResult {
   type: 'file' | 'dir';
 }
 
-const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
+const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
   value: externalValue,
   onChange: _externalOnChange,
   onSend,
@@ -193,9 +193,9 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
   };
 
   // Get Tab-scoped API functions (for @file search and file operations)
-  const tabContext = useTabStateOptional();
-  const apiGet = tabContext?.apiGet;
-  const apiPost = tabContext?.apiPost;
+  const tabApiContext = useTabApiOptional();
+  const apiGet = tabApiContext?.apiGet;
+  const apiPost = tabApiContext?.apiPost;
 
   const toast = useToast();
   // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -1705,6 +1705,6 @@ const SimpleChatInput = forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(
       </div>
     </div>
   );
-});
+}));
 
 export default SimpleChatInput;

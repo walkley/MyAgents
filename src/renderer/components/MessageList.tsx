@@ -1,5 +1,5 @@
 import { Loader2 } from 'lucide-react';
-import { useMemo, useState, useEffect, useRef, type CSSProperties, type RefObject } from 'react';
+import { memo, useMemo, useState, useEffect, useRef, type CSSProperties, type RefObject } from 'react';
 
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
@@ -81,6 +81,37 @@ function getRandomStreamingMessage(): string {
   return STREAMING_MESSAGES[Math.floor(Math.random() * STREAMING_MESSAGES.length)];
 }
 
+/**
+ * StatusTimer - isolated component for elapsed time counter.
+ * Ticks every 1s via setInterval. Isolating it here prevents the
+ * parent MessageList from re-rendering (and re-running messages.map())
+ * on every tick.
+ */
+const StatusTimer = memo(function StatusTimer({ message }: { message: string }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const startTimeRef = useRef(0);
+
+  useEffect(() => {
+    startTimeRef.current = Date.now();
+
+    const intervalId = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, []);
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
+      <Loader2 className="h-3 w-3 animate-spin" />
+      <span>
+        {message}
+        {elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}
+      </span>
+    </div>
+  );
+});
+
 export default function MessageList({
   messages,
   isLoading,
@@ -104,39 +135,11 @@ export default function MessageList({
     [messages.length]
   );
 
-  // Determine status display - CSS handles the fade transition
+  // Determine status display
   const showStatus = isLoading || !!systemStatus;
   const statusMessage = systemStatus
     ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
     : streamingMessage;
-
-  // Elapsed time counter for loading state
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const loadingStartTimeRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (showStatus) {
-      // Start timing when loading begins
-      if (loadingStartTimeRef.current === null) {
-        loadingStartTimeRef.current = Date.now();
-        setElapsedSeconds(0);
-      }
-
-      // Update every second
-      const intervalId = setInterval(() => {
-        if (loadingStartTimeRef.current !== null) {
-          const elapsed = Math.floor((Date.now() - loadingStartTimeRef.current) / 1000);
-          setElapsedSeconds(elapsed);
-        }
-      }, 1000);
-
-      return () => clearInterval(intervalId);
-    } else {
-      // Reset when loading ends
-      loadingStartTimeRef.current = null;
-      setElapsedSeconds(0);
-    }
-  }, [showStatus]);
 
   return (
     <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle}>
@@ -167,16 +170,9 @@ export default function MessageList({
             />
           </div>
         )}
-        {/* Unified status indicator - only render when active */}
-        {showStatus && (
-          <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>
-              {statusMessage}
-              {elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}
-            </span>
-          </div>
-        )}
+        {/* Unified status indicator - rendered in isolated component to avoid
+            re-running messages.map() on every 1-second timer tick */}
+        {showStatus && <StatusTimer message={statusMessage} />}
       </div>
       {/* Scroll anchor - helps browser maintain scroll position during content changes */}
       <div className="scroll-anchor h-px" aria-hidden="true" />

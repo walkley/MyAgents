@@ -13,7 +13,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } fro
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-import { useTabState } from '@/context/TabContext';
+import { useTabApi } from '@/context/TabContext';
 import { getPrismLanguage, getMonacoLanguage, shouldShowLineNumbers, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
@@ -68,7 +68,7 @@ export default function FilePreviewModal({
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const { apiPost } = useTabState();
+    const { apiPost } = useTabApi();
 
     // State
     const [isEditing, setIsEditing] = useState(false);

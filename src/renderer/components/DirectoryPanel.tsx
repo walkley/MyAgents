@@ -17,10 +17,10 @@ import {
   Upload,
   PanelRightClose
 } from 'lucide-react';
-import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Tree } from 'react-arborist';
 
-import { useTabState } from '@/context/TabContext';
+import { useTabApi } from '@/context/TabContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import type { DirectoryTreeNode, DirectoryTree, ExpandDirectoryResult } from '../../shared/dir-types';
 import { isImageFile, isPreviewable } from '../../shared/fileTypes';
@@ -111,7 +111,7 @@ function getFolderName(path: string): string {
   return parts[parts.length - 1] || 'Workspace';
 }
 
-const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(function DirectoryPanel({
+const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(function DirectoryPanel({
   agentDir,
   provider: _provider,
   providers: _providers = [],
@@ -168,7 +168,7 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
   const toast = useToast();
 
   // Get Tab-scoped API functions and tabId
-  const { apiGet, apiPost, tabId } = useTabState();
+  const { apiGet, apiPost, tabId } = useTabApi();
 
   // Narrow mode collapse state (for responsive layout)
   const [isNarrowMode, setIsNarrowMode] = useState(false);
@@ -1373,6 +1373,6 @@ const DirectoryPanel = forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(fun
       )}
     </div>
   );
-});
+}));
 
 export default DirectoryPanel;

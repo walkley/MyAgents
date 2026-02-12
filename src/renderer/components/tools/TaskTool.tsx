@@ -3,7 +3,7 @@ import type { AgentInput, BackgroundTaskStats, SubagentToolCall, ToolUseSimple, 
 
 import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
 import { CheckCircle, ChevronDown, ChevronRight, Clock, Coins, Loader2, Terminal, Wrench, XCircle } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -478,7 +478,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
 
   // Background task polling
   const outputFile = isBackgroundTask ? parsedResult?.output_file ?? null : null;
-  const tabState = useTabStateOptional();
+  const tabState = useTabApiOptional();
   const noopApiPost = useCallback(async <T,>(_path: string, _body?: unknown): Promise<T> => { throw new Error('no apiPost'); }, []);
   const { stats: bgStats, isComplete: bgComplete } = useBackgroundTaskPolling({
     outputFile,
