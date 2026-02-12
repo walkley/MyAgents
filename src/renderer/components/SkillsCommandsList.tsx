@@ -8,7 +8,7 @@ import { Plus, Sparkles, Terminal, Loader2, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiDelete as globalApiDelete } from '@/api/apiFetch';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { CreateDialog, NewSkillChooser } from './SkillDialogs';
@@ -40,7 +40,7 @@ export default function SkillsCommandsList({
 
     // Use Tab-scoped API when available (in project workspace context)
     // Fall back to global API when not in Tab context (Settings page)
-    const tabState = useTabStateOptional();
+    const tabState = useTabApiOptional();
 
     // Create stable API functions - only depend on the specific functions, not the whole tabState
     // This prevents re-creating the api object when unrelated tabState properties change

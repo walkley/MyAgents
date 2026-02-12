@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useR
 
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import Markdown from '@/components/Markdown';
@@ -213,7 +213,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
         const toastRef = useRef(toast);
         useEffect(() => { toastRef.current = toast; }, [toast]);
 
-        const tabState = useTabStateOptional();
+        const tabState = useTabApiOptional();
         const apiGet = tabState?.apiGet;
         const apiPost = tabState?.apiPost;
         const apiPut = tabState?.apiPut;

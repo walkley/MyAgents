@@ -7,6 +7,7 @@ import { useEffect, useState, useRef } from 'react';
 import { AlertCircle, ChevronDown, FolderOpen, Loader2, MoreVertical, Play, Trash2 } from 'lucide-react';
 
 import { getModelsDisplay, type Project, type Provider } from '@/config/types';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 
 /**
  * Extract folder name from path (cross-platform, handles both / and \)
@@ -103,7 +104,7 @@ export default function WorkspaceCard({
                         {getFolderName(project.path)}
                     </h3>
                     <p className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]/70">
-                        {project.path}
+                        {shortenPathForDisplay(project.path)}
                     </p>
                 </div>
                 {/* More Menu */}

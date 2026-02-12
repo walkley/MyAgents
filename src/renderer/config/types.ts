@@ -355,7 +355,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'MiniMax',
     cloudProvider: '模型官方',
     type: 'api',
-    primaryModel: 'MiniMax-M2.1',
+    primaryModel: 'MiniMax-M2.5',
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.minimaxi.com/docs/guides/models-intro',
@@ -363,6 +363,8 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://api.minimaxi.com/anthropic',
     },
     models: [
+      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax' },
+      { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.1-lightning', modelName: 'MiniMax M2.1 Lightning', modelSeries: 'minimax' },
     ],

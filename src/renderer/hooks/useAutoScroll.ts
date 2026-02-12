@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
-import type { Message } from '@/types/chat';
 import { isDebugMode } from '@/utils/debug';
 
 const BOTTOM_SNAP_THRESHOLD_PX = 32;
@@ -33,7 +32,7 @@ export interface AutoScrollControls {
 
 export function useAutoScroll(
   isLoading: boolean,
-  messages: Message[],
+  messagesLength: number,
   sessionId?: string | null
 ): AutoScrollControls {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -117,15 +116,10 @@ export function useAutoScroll(
     const currentScrollTop = element.scrollTop;
     const distance = targetScrollTop - currentScrollTop;
 
-    // At bottom (or very close)
+    // At bottom (or very close) — stop RAF, ResizeObserver restarts when content grows
     if (distance <= SNAP_THRESHOLD_PX) {
       element.scrollTop = targetScrollTop;
-      // Keep animation loop running while loading to catch new content
-      if (isLoadingRef.current && animateSmoothScrollRef.current) {
-        animationFrameRef.current = requestAnimationFrame(animateSmoothScrollRef.current);
-      } else {
-        isAnimatingRef.current = false;
-      }
+      isAnimatingRef.current = false;
       return;
     }
 
@@ -268,8 +262,10 @@ export function useAutoScroll(
   }, [sessionId]);
 
   // Handle messages change - scroll to bottom if pending, otherwise smooth scroll
+  // Uses messagesLength (primitive) instead of messages (object reference) to avoid
+  // re-running on every SSE chunk that only mutates the last message's content.
   useEffect(() => {
-    if (messages.length === 0) return;
+    if (messagesLength === 0) return;
 
     // If we have a pending scroll from session switch, do instant scroll
     if (pendingScrollRef.current) {
@@ -290,7 +286,7 @@ export function useAutoScroll(
     if (isAutoScrollEnabledRef.current) {
       startSmoothScroll();
     }
-  }, [messages, startSmoothScroll, scrollToBottomInstant]);
+  }, [messagesLength, startSmoothScroll, scrollToBottomInstant]);
 
   // Start smooth scroll when loading starts, stop when loading ends
   useEffect(() => {

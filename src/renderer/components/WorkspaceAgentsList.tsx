@@ -6,7 +6,7 @@ import { Plus, Bot, Loader2, Trash2, X as XIcon, Link2 } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
-import { useTabStateOptional } from '@/context/TabContext';
+import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import type { AgentItem, AgentWorkspaceConfig } from '../../shared/agentTypes';
@@ -29,7 +29,7 @@ export default function WorkspaceAgentsList({
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const tabState = useTabStateOptional();
+    const tabState = useTabApiOptional();
     const apiGet = tabState?.apiGet;
     const apiPost = tabState?.apiPost;
     const apiPut = tabState?.apiPut;

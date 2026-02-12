@@ -65,14 +65,16 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
     const autoScrollRef = useRef(true);
 
     // Limit logs for display and sort newest first
+    // PERF: Skip expensive sort when panel is hidden — recomputes once on open
     const allLogs = useMemo(() => {
+        if (!isVisible) return [];
         const limited = sseLogs.length > MAX_DISPLAY_LOGS
             ? sseLogs.slice(-MAX_DISPLAY_LOGS)
             : sseLogs;
         return [...limited].sort(
             (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
         );
-    }, [sseLogs]);
+    }, [sseLogs, isVisible]);
 
     // Filter logs by source, level, and stream events
     const filteredLogs = useMemo(() => {

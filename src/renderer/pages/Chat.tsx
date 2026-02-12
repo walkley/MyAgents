@@ -509,7 +509,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     }
   }, [selectedModel, apiPost]);
 
-  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages, sessionId);
+  const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -709,6 +709,36 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     await forceExecuteQueuedMessage(queueId);
   }, [forceExecuteQueuedMessage]);
 
+  // Stable callbacks for SimpleChatInput (extracted from inline arrows to enable memo)
+  const handleStop = useCallback(async () => {
+    try {
+      await stopResponse();
+    } catch (error) {
+      console.error('[Chat] Failed to stop message:', error);
+    }
+  }, [stopResponse]);
+
+  const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
+  const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
+  const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
+
+  const handleCronStop = useCallback(async () => {
+    const originalPrompt = await stopCronTask();
+    if (originalPrompt) {
+      chatInputRef.current?.setValue(originalPrompt);
+    }
+  }, [stopCronTask]);
+
+  const handleCancelQueuedVoid = useCallback(
+    (queueId: string) => { void handleCancelQueued(queueId); },
+    [handleCancelQueued]
+  );
+
+  const handleForceExecuteQueuedVoid = useCallback(
+    (queueId: string) => { void handleForceExecuteQueued(queueId); },
+    [handleForceExecuteQueued]
+  );
+
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
   // If AI is idle, falls back to resetSession (reuses Sidecar).
@@ -894,13 +924,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
           <SimpleChatInput
             ref={chatInputRef}
             onSend={handleSendMessage}
-            onStop={async () => {
-              try {
-                await stopResponse();
-              } catch (error) {
-                console.error('[Chat] Failed to stop message:', error);
-              }
-            }}
+            onStop={handleStop}
             isLoading={isLoading || sessionState === 'running'}
             sessionState={sessionState}
             systemStatus={systemStatus}
@@ -920,30 +944,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             mcpServers={mcpServers}
             onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
             onRefreshProviders={refreshProviderData}
-            onOpenAgentSettings={() => setShowWorkspaceConfig(true)}
+            onOpenAgentSettings={handleOpenAgentSettings}
             onWorkspaceRefresh={triggerWorkspaceRefresh}
             // Cron task props - StatusBar and Overlay are rendered inside SimpleChatInput
             cronModeEnabled={cronState.isEnabled}
             cronConfig={cronState.config}
             cronTask={cronState.task}
-            onCronButtonClick={() => setShowCronSettings(true)}
-            onCronSettings={() => setShowCronSettings(true)}
+            onCronButtonClick={handleOpenCronSettings}
+            onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
-            onCronStop={async () => {
-              // Stop the task and restore the original prompt to the input
-              const originalPrompt = await stopCronTask();
-              if (originalPrompt) {
-                chatInputRef.current?.setValue(originalPrompt);
-              }
-              // Note: CRON_TASK_STOPPED event no longer needed
-              // With Session-centric Sidecar (Owner model), stopping a cron task only releases
-              // the CronTask owner. If Tab still owns the Sidecar, it continues running.
-              // No SSE reconnection or Sidecar restart is needed.
-            }}
-            onInputChange={(text) => setCronPrompt(text)}
+            onCronStop={handleCronStop}
+            onInputChange={setCronPrompt}
             queuedMessages={queuedMessages}
-            onCancelQueued={(queueId) => void handleCancelQueued(queueId)}
-            onForceExecuteQueued={(queueId) => void handleForceExecuteQueued(queueId)}
+            onCancelQueued={handleCancelQueuedVoid}
+            onForceExecuteQueued={handleForceExecuteQueuedVoid}
           />
         </div>
       </div>
@@ -960,8 +974,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
-            onCollapse={() => setShowWorkspace(false)}
-            onOpenConfig={() => setShowWorkspaceConfig(true)}
+            onCollapse={handleCollapseWorkspace}
+            onOpenConfig={handleOpenAgentSettings}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
             isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
             onInsertReference={handleInsertReference}

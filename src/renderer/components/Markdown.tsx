@@ -11,6 +11,7 @@
 
 import 'katex/dist/katex.min.css';
 
+import { memo, useEffect, useMemo, useState } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -22,6 +23,8 @@ import CodeBlock from './markdown/CodeBlock';
 import InlineCode from './markdown/InlineCode';
 import MermaidDiagram from './markdown/MermaidDiagram';
 import { openExternal } from '@/utils/openExternal';
+import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
+import { useTabApiOptional } from '@/context/TabContext';
 
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
@@ -241,6 +244,127 @@ interface MarkdownProps {
   preserveNewlines?: boolean;
   /** Skip preprocessing (for rendering complete documents like file preview) */
   raw?: boolean;
+  /** Document base directory path (relative to agentDir) for resolving relative image paths */
+  basePath?: string;
+}
+
+/**
+ * Resolve a relative path against a base directory.
+ * Handles ./ and ../ prefixes, normalizes the result.
+ */
+function resolveRelativePath(baseDir: string, src: string): string {
+  // Strip leading ./
+  const cleaned = src.replace(/^\.\//, '');
+  // Combine base dir and relative path
+  const parts = (baseDir ? baseDir + '/' + cleaned : cleaned).split('/').filter(Boolean);
+  // Resolve .. by walking the parts
+  const stack: string[] = [];
+  for (const part of parts) {
+    if (part === '..') {
+      stack.pop();
+    } else if (part !== '.') {
+      stack.push(part);
+    }
+  }
+  return stack.join('/');
+}
+
+/** Whether a URL is absolute (http/https/data/blob) */
+function isAbsoluteUrl(src: string): boolean {
+  return /^(https?:|data:|blob:)/i.test(src);
+}
+
+/** Safely decode URI component, returning original on malformed input */
+function safeDecodeURIComponent(str: string): string {
+  try { return decodeURIComponent(str); } catch { return str; }
+}
+
+/**
+ * Image component that resolves relative paths via the sidecar download API.
+ * Only used when basePath is provided (file preview mode).
+ *
+ * State model:
+ * - empty / absolute src → handled purely in render, no state or effect needed
+ * - relative src → useEffect fetches via API, stores blob URL in state
+ */
+function MarkdownImage({ src, alt, basePath, tabId }: {
+  src?: string;
+  alt?: string;
+  basePath: string;
+  tabId: string;
+}) {
+  // Classify src type on every render (derived, not state)
+  const srcType: 'empty' | 'absolute' | 'relative' =
+    !src ? 'empty' : isAbsoluteUrl(src) ? 'absolute' : 'relative';
+
+  // State only needed for async-loaded relative paths
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Only relative paths need async loading
+    if (srcType !== 'relative') return;
+
+    // Decode first to prevent double-encoding (e.g. "some%20image.png")
+    const decoded = safeDecodeURIComponent(src!);
+    const resolvedPath = resolveRelativePath(basePath, decoded);
+    const endpoint = `/agent/download?path=${encodeURIComponent(resolvedPath)}`;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        let response: Response;
+        if (isTauri()) {
+          const baseUrl = await getTabServerUrl(tabId);
+          response = await proxyFetch(`${baseUrl}${endpoint}`);
+        } else {
+          response = await fetch(endpoint);
+        }
+
+        if (!response.ok) {
+          if (!cancelled) setError(`图片未找到: ${src}`);
+          return;
+        }
+
+        const blob = await response.blob();
+        if (cancelled) return;
+        setBlobUrl(URL.createObjectURL(blob));
+      } catch {
+        if (!cancelled) setError(`图片加载失败: ${src}`);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      // Revoke blob URL on cleanup to prevent memory leaks
+      setBlobUrl(prev => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      setError(null);
+    };
+  }, [src, srcType, basePath, tabId]);
+
+  // Empty src: static error (no state needed)
+  if (srcType === 'empty') {
+    return <span className="text-xs text-[var(--ink-muted)] italic">[图片路径为空]</span>;
+  }
+
+  // Absolute URL: render directly (no state needed, always fresh from props)
+  if (srcType === 'absolute') {
+    return <img src={src} alt={alt ?? ''} className="max-w-full" />;
+  }
+
+  // Relative path: loading / error / loaded
+  if (error) {
+    return <span className="text-xs text-[var(--ink-muted)] italic">[{error}]</span>;
+  }
+
+  if (!blobUrl) {
+    return <span className="inline-block h-4 w-16 animate-pulse rounded bg-stone-200 dark:bg-neutral-700" />;
+  }
+
+  return <img src={blobUrl} alt={alt ?? ''} className="max-w-full" />;
 }
 
 /**
@@ -303,20 +427,38 @@ function preprocessContent(content: string): string {
   return processed;
 }
 
-export default function Markdown({ children, compact = false, preserveNewlines = false, raw = false }: MarkdownProps) {
+const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
   const processedContent = raw ? children : preprocessContent(children);
+
+  // Get tabId for image loading (only needed when basePath is provided)
+  const tabApi = useTabApiOptional();
+  const tabId = tabApi?.tabId ?? '';
+
+  // Merge img handler when basePath is provided (for resolving relative image paths)
+  // Use == null to allow empty string basePath (root-level files)
+  const components = useMemo(() => {
+    if (basePath == null) return markdownComponents;
+    return {
+      ...markdownComponents,
+      img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
+        <MarkdownImage src={props.src} alt={props.alt} basePath={basePath} tabId={tabId} />
+      ),
+    };
+  }, [basePath, tabId]);
 
   return (
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>
       <ReactMarkdown
         remarkPlugins={preserveNewlines ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS_DEFAULT}
         rehypePlugins={REHYPE_PLUGINS}
-        components={markdownComponents}
+        components={components}
       >
         {processedContent}
       </ReactMarkdown>
     </div>
   );
-}
+});
+
+export default Markdown;
 

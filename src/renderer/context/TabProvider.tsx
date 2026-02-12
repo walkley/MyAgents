@@ -19,7 +19,7 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { TabContext, type SessionState, type TabContextValue } from './TabContext';
+import { TabContext, TabApiContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -1657,9 +1657,22 @@ export default function TabProvider({
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
+    // Lightweight API-only context value — deps are all stable (created once per tabId),
+    // so this never rebuilds during streaming, protecting 11+ consumer components.
+    const apiContextValue: TabApiContextValue = useMemo(() => ({
+        tabId,
+        agentDir,
+        apiGet: apiGetJson,
+        apiPost: postJson,
+        apiPut: apiPutJson,
+        apiDelete: apiDeleteJson,
+    }), [tabId, agentDir, apiGetJson, postJson, apiPutJson, apiDeleteJson]);
+
     return (
-        <TabContext.Provider value={contextValue}>
-            {children}
-        </TabContext.Provider>
+        <TabApiContext.Provider value={apiContextValue}>
+            <TabContext.Provider value={contextValue}>
+                {children}
+            </TabContext.Provider>
+        </TabApiContext.Provider>
     );
 }

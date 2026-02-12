@@ -24,7 +24,7 @@ import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import ContextMenu from '@/components/ContextMenu';
 import type { ContextMenuItem } from '@/components/ContextMenu';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { useTabState } from '@/context/TabContext';
+import { useTabApi } from '@/context/TabContext';
 import { isImageFile, isPreviewable } from '../../shared/fileTypes';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
@@ -67,7 +67,7 @@ export function useFileAction(): FileActionContextValue | null {
 const BATCH_DELAY_MS = 50;
 
 export function FileActionProvider({ children, onInsertReference, refreshTrigger }: FileActionProviderProps) {
-  const { tabId, apiPost, apiGet } = useTabState();
+  const { tabId, apiPost, apiGet } = useTabApi();
   const { openPreview: openImagePreview } = useImagePreview();
 
   // Stabilise callbacks via refs

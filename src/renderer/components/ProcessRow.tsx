@@ -1,6 +1,6 @@
 
 import { AlertCircle, Brain, ChevronDown, Loader2, XCircle, StopCircle } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 
 import Markdown from '@/components/Markdown';
 import {
@@ -19,7 +19,7 @@ interface ProcessRowProps {
     isStreaming?: boolean;
 }
 
-export default function ProcessRow({
+const ProcessRow = memo(function ProcessRow({
     block,
     index,
     totalBlocks,
@@ -252,4 +252,6 @@ export default function ProcessRow({
             )}
         </div>
     );
-}
+});
+
+export default ProcessRow;

@@ -140,7 +140,7 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     );
   }
 
-  // Group consecutive thinking/tool blocks together
+  // Group consecutive thinking/tool blocks together, merge adjacent text blocks
   const groupedBlocks: (ContentBlock | ContentBlock[])[] = [];
   let currentGroup: ContentBlock[] = [];
 
@@ -151,7 +151,16 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
         groupedBlocks.push([...currentGroup]);
         currentGroup = [];
       }
-      groupedBlocks.push(block);
+      // Merge consecutive text blocks into one (defensive: prevents split rendering)
+      const prev = groupedBlocks[groupedBlocks.length - 1];
+      if (prev && !Array.isArray(prev) && prev.type === 'text') {
+        groupedBlocks[groupedBlocks.length - 1] = {
+          ...prev,
+          text: (prev.text || '') + '\n\n' + (block.text || '')
+        };
+      } else {
+        groupedBlocks.push(block);
+      }
     } else if (block.type === 'thinking' || block.type === 'tool_use' || block.type === 'server_tool_use') {
       // Add to current group (server_tool_use is treated like tool_use for display)
       currentGroup.push(block);
