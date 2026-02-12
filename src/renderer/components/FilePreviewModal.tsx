@@ -275,7 +275,7 @@ export default function FilePreviewModal({
             return (
                 <div className="h-full overflow-auto p-6 bg-[var(--paper-reading)]">
                     <div className="prose prose-stone max-w-none dark:prose-invert">
-                        <Markdown raw>{previewContent}</Markdown>
+                        <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewContent}</Markdown>
                     </div>
                 </div>
             );
