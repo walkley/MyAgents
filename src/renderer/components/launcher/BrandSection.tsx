@@ -82,7 +82,7 @@ export default function BrandSection({
             </div>
 
             {/* Lower area: Workspace selector (floating pill) + Input box */}
-            <div className="w-full max-w-[640px] pb-[12vh]">
+            <div className="mt-10 w-full max-w-[640px] pb-[12vh]">
                 {/* Floating workspace selector — small pill above input */}
                 <div className="mb-3 flex justify-start">
                     <WorkspaceSelector

@@ -52,6 +52,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         apiKeys,
         providerVerifyStatus,
         refreshProviderData,
+        updateConfig,
     } = useConfig();
     const [_addError, setAddError] = useState<string | null>(null);
     const [activeMenuProjectId, setActiveMenuProjectId] = useState<string | null>(null);
@@ -127,6 +128,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         );
     }, []);
 
+    // Restore launcherLastUsed settings once config finishes loading from disk.
+    // useState initializers run before async config load completes (config = DEFAULT_CONFIG
+    // at that point), so we must sync saved values via effect after isLoading becomes false.
+    const lastUsedAppliedRef = useRef(false);
+    useEffect(() => {
+        if (isLoading || lastUsedAppliedRef.current) return;
+        lastUsedAppliedRef.current = true;
+        const lastUsed = config.launcherLastUsed;
+        if (!lastUsed) return;
+        if (lastUsed.permissionMode) setLauncherPermissionMode(lastUsed.permissionMode);
+        if (lastUsed.providerId) setLauncherProviderId(lastUsed.providerId);
+        if (lastUsed.model) setLauncherSelectedModel(lastUsed.model);
+        if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
+    }, [isLoading, config.launcherLastUsed]);
+
     // Handle send from BrandSection
     const handleBrandSend = useCallback(async (text: string, images?: ImageAttachment[]) => {
         if (!selectedWorkspace) {
@@ -143,12 +159,22 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
         };
 
+        // Persist launcher settings for next app launch
+        updateConfig({
+            launcherLastUsed: {
+                providerId: launcherProvider?.id,
+                model: launcherSelectedModel,
+                permissionMode: launcherPermissionMode,
+                mcpEnabledServers: launcherWorkspaceMcpEnabled,
+            },
+        }).catch(err => console.warn('[Launcher] Failed to save launcherLastUsed:', err));
+
         setLaunchingProjectId(selectedWorkspace.id);
         touchProject(selectedWorkspace.id).catch(() => {});
         onLaunchProject(selectedWorkspace, launcherProvider, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        touchProject, onLaunchProject]);
+        touchProject, onLaunchProject, updateConfig]);
 
     // Check subscription status on mount
     useEffect(() => {

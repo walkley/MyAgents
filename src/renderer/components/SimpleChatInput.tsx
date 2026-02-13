@@ -96,7 +96,7 @@ interface SimpleChatInputProps {
   onForceExecuteQueued?: (queueId: string) => void;
 }
 
-const LINE_HEIGHT = 28; // px per line (matches text-base leading-relaxed)
+const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
 const MAX_LINES_COLLAPSED = 3;
 const MAX_LINES_EXPANDED = 12;
 const MAX_IMAGES = 5;
@@ -295,9 +295,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       textarea.style.height = `${LINE_HEIGHT * MAX_LINES_EXPANDED}px`;
     } else {
       textarea.style.height = 'auto';
+      const minHeight = LINE_HEIGHT * 2;
       const maxHeight = LINE_HEIGHT * MAX_LINES_COLLAPSED;
       const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+      textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
@@ -838,7 +839,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Detect new @ or / character (only when adding)
     if (newValue.length > inputValue.length) {
       const addedChar = newValue[cursorPos - 1];
-      if (addedChar === '@') {
+      if (addedChar === '@' && !isLauncherMode) {
         currentShowFileSearch = true;
         currentAtPosition = cursorPos - 1;
         setShowFileSearch(true);
@@ -1220,10 +1221,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={isLauncherMode ? '今天，想干点啥？' : '输入消息，使用 @ 引用文件，/ 使用技能...'}
-              rows={1}
+              rows={2}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
-                minHeight: `${LINE_HEIGHT}px`,
+                minHeight: `${LINE_HEIGHT * 2}px`,
                 maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : MAX_LINES_COLLAPSED)}px`,
                 overflowY: 'auto'
               }}
@@ -1329,6 +1330,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 </button>
                 {showPlusMenu && (
                   <div className="absolute left-0 bottom-full mb-1 w-40 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1">
+                    {!isLauncherMode && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1352,6 +1354,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       <AtSign className="h-4 w-4" />
                       引用文件
                     </button>
+                    )}
+                    {!isLauncherMode && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -1376,6 +1380,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
                       使用技能
                     </button>
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {

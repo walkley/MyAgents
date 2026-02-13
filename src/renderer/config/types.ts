@@ -241,6 +241,16 @@ export interface AppConfig {
   // ===== Default Workspace =====
   // Path to the default workspace shown on Launcher
   defaultWorkspacePath?: string;
+
+  // ===== Launcher Last-Used Settings =====
+  // Persisted on send from Launcher, restored on next app launch
+  // Note: workspace is NOT included — always uses defaultWorkspacePath
+  launcherLastUsed?: {
+    providerId?: string;
+    model?: string;
+    permissionMode?: PermissionMode;
+    mcpEnabledServers?: string[];
+  };
 }
 
 /**
