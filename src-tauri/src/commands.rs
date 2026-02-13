@@ -1,8 +1,9 @@
 // Tauri IPC commands for sidecar management and app operations
 // Supports both legacy single-instance and new multi-instance APIs
 
-use std::path::PathBuf;
-use tauri::{AppHandle, Runtime, State};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager, Runtime, State};
 
 use crate::sidecar::{
     // Legacy exports
@@ -319,4 +320,70 @@ pub fn cmd_get_device_id() -> Result<String, String> {
         .map_err(|e| format!("Failed to write device_id file: {}", e))?;
 
     Ok(new_id)
+}
+
+// ============= Bundled Workspace Commands =============
+
+#[derive(serde::Serialize)]
+pub struct InitBundledWorkspaceResult {
+    pub path: String,
+    pub is_new: bool,
+}
+
+/// Command: Initialize bundled workspace (mino) on first launch
+/// Copies from app resources to ~/.myagents/projects/mino/
+#[tauri::command]
+pub fn cmd_initialize_bundled_workspace<R: Runtime>(
+    app_handle: AppHandle<R>,
+) -> Result<InitBundledWorkspaceResult, String> {
+    let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
+    let mino_dest = home_dir.join(".myagents").join("projects").join("mino");
+
+    if mino_dest.exists() {
+        return Ok(InitBundledWorkspaceResult {
+            path: mino_dest.to_string_lossy().to_string(),
+            is_new: false,
+        });
+    }
+
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    let mino_src = resource_dir.join("mino");
+    if !mino_src.exists() {
+        return Err("Bundled mino not found in resources".to_string());
+    }
+
+    copy_dir_recursive(&mino_src, &mino_dest)
+        .map_err(|e| format!("Failed to copy mino workspace: {}", e))?;
+
+    Ok(InitBundledWorkspaceResult {
+        path: mino_dest.to_string_lossy().to_string(),
+        is_new: true,
+    })
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        // Skip .git and node_modules
+        if name == ".git" || name == "node_modules" {
+            continue;
+        }
+        // Skip symlinks to avoid circular copies and unexpected data
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let dest = dst.join(name);
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(&entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }

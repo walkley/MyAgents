@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.16] - 2026-02-14
+
+### Added
+- **启动页改版——任务优先模式**：左侧 BrandSection 新增全功能输入框 + 工作区选择器，支持直接发送消息启动工作区
+  - 工作区选择器：默认/最近打开分组、向上展开菜单
+  - 输入框复用 SimpleChatInput，支持文本、图片、Provider/Model、权限模式、MCP 工具选择
+  - 发送设置自动持久化，下次启动恢复上次选择
+- **默认工作区 mino**：内置 openmino 预设工作区，首次启动自动复制到用户目录
+- **Settings 默认工作区配置**：通用设置新增默认工作区选择，自定义 CustomSelect 替换原生 select
+- **Windows setup 补充 mino 克隆**：`setup_windows.ps1` 与 macOS `setup.sh` 对齐
+
+### Changed
+- **Launcher 右侧面板精简**：移除快捷功能区块，工作区卡片精简为可点击双列紧凑卡片
+  - 移除 Provider 选择器、启动按钮、三点菜单
+  - 整卡点击启动，右键上下文菜单移除工作区
+  - 工作区列表从单列改为双列 grid 布局
+- **视觉统一与细节打磨**
+  - Launcher 左右区域背景色统一，分割线改为不到顶的浮动线
+  - Settings 侧边栏分割线同步改为浮动线
+  - 品牌标题字号调小、字间距加宽，Slogan 更新为中文
+  - MCP 工具菜单开关样式对齐设置页（accent 暖色 + 白色滑块）
+  - Provider/MCP 静态卡片移除无效 hover 阴影
+- **日志面板改版**：过滤器三组重构、新增导出功能、默认隐藏 stream/analytics
+
+### Removed
+- 移除 Launcher 死代码：subscriptionStatus 无用 API 调用、onOpenSettings 死 prop、QuickAccess 组件
+
+---
+
 ## [0.1.15] - 2026-02-13
 
 ### Added

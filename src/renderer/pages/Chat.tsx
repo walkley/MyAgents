@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, History, Plus, PanelRightOpen } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -28,6 +28,7 @@ import {
   updateProjectMcpServers,
 } from '@/config/configService';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
 interface ChatProps {
@@ -36,9 +37,13 @@ interface ChatProps {
   onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
   onSwitchSession?: (sessionId: string) => void;
+  /** Initial message from Launcher for auto-send on workspace open */
+  initialMessage?: InitialMessage;
+  /** Called after initialMessage has been consumed */
+  onInitialMessageConsumed?: () => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -74,6 +79,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     queuedMessages,
     cancelQueuedMessage,
     forceExecuteQueuedMessage,
+    isConnected,
   } = useTabState();
   const toast = useToast();
 
@@ -98,6 +104,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
+
+  // Startup overlay state (for auto-send from Launcher)
+  const [showStartupOverlay, setShowStartupOverlay] = useState(!!initialMessage);
 
   // Ref for input focus
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -146,6 +155,82 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
     setWorkspaceConfigInitialTab(tab);
     setShowWorkspaceConfig(true);
   }, []);
+
+  // Auto-send initial message from Launcher
+  const initialMessageConsumedRef = useRef(false);
+  const onInitialMessageConsumedRef = useRef(onInitialMessageConsumed);
+  onInitialMessageConsumedRef.current = onInitialMessageConsumed;
+
+  useEffect(() => {
+    if (!initialMessage || initialMessageConsumedRef.current) return;
+    // Wait for SSE connection (sidecar reachable) instead of non-pending sessionId.
+    // The sessionId upgrades from pending only after the first message is processed,
+    // but the first message IS the auto-send — so checking isPendingSessionId would deadlock.
+    if (!isActive || !sessionId || !isConnected) return;
+
+    initialMessageConsumedRef.current = true;
+
+    const autoSend = async () => {
+      try {
+        // 1. Sync MCP configuration
+        if (initialMessage.mcpEnabledServers?.length) {
+          const allServers = await getAllMcpServers();
+          const globalEnabled = await getEnabledMcpServerIds();
+          const effective = allServers.filter(s =>
+            globalEnabled.includes(s.id) && initialMessage.mcpEnabledServers!.includes(s.id)
+          );
+          await apiPost('/api/mcp/set', { servers: effective });
+        }
+
+        // 2. Compute effective values BEFORE setState (avoid stale closure)
+        const effectivePermission = initialMessage.permissionMode ?? permissionMode;
+        const effectiveModel = initialMessage.model ?? selectedModel;
+
+        // 3. Update local UI state to reflect Launcher choices
+        if (initialMessage.permissionMode) setPermissionMode(initialMessage.permissionMode);
+        if (initialMessage.model) setSelectedModel(initialMessage.model);
+
+        // 4. Build providerEnv locally from providerId (never stored in Tab state for security)
+        const provider = initialMessage.providerId
+          ? providers.find(p => p.id === initialMessage.providerId) ?? currentProvider
+          : currentProvider;
+        const providerEnv = provider && provider.type !== 'subscription' ? {
+          baseUrl: provider.config.baseUrl,
+          apiKey: apiKeys[provider.id],
+          authType: provider.authType,
+        } : undefined;
+
+        // 5. Send message
+        setIsLoading(true);
+        scrollToBottom();
+        await sendMessage(
+          initialMessage.text,
+          initialMessage.images,
+          effectivePermission,
+          effectiveModel,
+          providerEnv
+        );
+
+        // 6. Hide overlay
+        setShowStartupOverlay(false);
+        onInitialMessageConsumedRef.current?.();
+      } catch (err) {
+        console.error('[Chat] Auto-send failed:', err);
+        setShowStartupOverlay(false);
+        onInitialMessageConsumedRef.current?.();
+        toast.error('发送失败，请重试');
+      }
+    };
+    void autoSend();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMessage, isActive, sessionId, isConnected]);
+
+  // Safety timeout for startup overlay (30s)
+  useEffect(() => {
+    if (!showStartupOverlay) return;
+    const t = setTimeout(() => setShowStartupOverlay(false), 30000);
+    return () => clearTimeout(t);
+  }, [showStartupOverlay]);
 
   // Cron task management hook
   const {
@@ -874,6 +959,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession }: ChatProp
             message="松手将文件加入工作区"
             subtitle="非图片文件将复制到 myagents_files 并自动引用"
           />
+
+          {/* Startup overlay when launching from Launcher with initial message */}
+          {showStartupOverlay && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-sm">
+              <div className="flex flex-col items-center gap-3">
+                <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
+                <p className="text-sm text-[var(--ink-muted)]">正在启动工作区...</p>
+              </div>
+            </div>
+          )}
 
           {agentError && (
             <div className="flex-shrink-0 border-b border-[var(--line)] bg-[#f5e4d9]/80 px-4 py-2 text-[11px] text-[var(--ink)]">

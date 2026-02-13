@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyAgents",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "identifier": "com.myagents.app",
   "build": {
     "frontendDist": "../dist",
@@ -55,7 +55,8 @@
       "../src-tauri/resources/server-dist.js": "server-dist.js",
       "../src-tauri/resources/claude-agent-sdk": "claude-agent-sdk",
       "../src/shared": "shared",
-      "../bundled-skills": "bundled-skills"
+      "../bundled-skills": "bundled-skills",
+      "../mino": "mino"
     },
     "externalBin": [
       "binaries/bun"

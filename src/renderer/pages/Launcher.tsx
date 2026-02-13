@@ -5,32 +5,35 @@
  */
 
 import { FolderOpen, Loader2, Plus } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
-import { apiGetJson } from '@/api/apiFetch';
+import { type ImageAttachment } from '@/components/SimpleChatInput';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import { BrandSection, QuickAccess, RecentTasks, WorkspaceCard } from '@/components/launcher';
+import { BrandSection, RecentTasks, WorkspaceCard } from '@/components/launcher';
 import { useConfig } from '@/hooks/useConfig';
-import { type Project, type Provider } from '@/config/types';
+import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
+import {
+    getAllMcpServers,
+    getEnabledMcpServerIds,
+} from '@/config/configService';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import type { SessionMetadata } from '@/api/sessionClient';
-
-import type { SubscriptionStatus } from '@/types/subscription';
+import type { InitialMessage } from '@/types/tab';
 
 interface LauncherProps {
-    onLaunchProject: (project: Project, provider: Provider, sessionId?: string) => void;
+    onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
     isStarting?: boolean;
     startError?: string | null;
-    /** Callback to open Settings tab with optional initial section */
-    onOpenSettings?: (initialSection?: string) => void;
 }
 
-export default function Launcher({ onLaunchProject, isStarting, startError: _startError, onOpenSettings }: LauncherProps) {
+export default function Launcher({ onLaunchProject, isStarting, startError: _startError }: LauncherProps) {
     const toast = useToast();
+    const toastRef = useRef(toast);
+    toastRef.current = toast;
     const {
         config,
         projects,
@@ -38,60 +41,137 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         isLoading,
         error: _error,
         addProject,
-        updateProject,
         removeProject,
         touchProject,
         apiKeys,
+        providerVerifyStatus,
         refreshProviderData,
+        updateConfig,
     } = useConfig();
     const [_addError, setAddError] = useState<string | null>(null);
-    const [activeMenuProjectId, setActiveMenuProjectId] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
     const [showLogs, setShowLogs] = useState(false);
-    const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
     const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
 
-    // Check subscription status on mount
+    // ===== Launcher-specific state for BrandSection =====
+
+    // Fallback chain: defaultWorkspacePath → mino project → first project → null
+    const resolveDefaultWorkspace = useCallback((projs: Project[]): Project | null => {
+        if (config.defaultWorkspacePath) {
+            const def = projs.find(p => p.path === config.defaultWorkspacePath);
+            if (def) return def;
+        }
+        // Fallback: find mino project by path suffix
+        const mino = projs.find(p => p.path.replace(/\\/g, '/').endsWith('/mino'));
+        if (mino) return mino;
+        return projs[0] ?? null;
+    }, [config.defaultWorkspacePath]);
+
+    const [selectedWorkspace, setSelectedWorkspace] = useState<Project | null>(() =>
+        resolveDefaultWorkspace(projects)
+    );
+
+    // Sync selectedWorkspace when projects change (e.g., after first project is added)
     useEffect(() => {
-        let retryCount = 0;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        let isMounted = true;
-        const maxRetries = 3;
-        const retryDelay = 1000;
+        setSelectedWorkspace(prev => {
+            // If current selection is still valid, keep it
+            if (prev && projects.find(p => p.id === prev.id)) return prev;
+            // Otherwise re-derive from fallback chain
+            return resolveDefaultWorkspace(projects);
+        });
+    }, [projects, resolveDefaultWorkspace]);
 
-        const checkSubscription = () => {
-            apiGetJson<SubscriptionStatus>('/api/subscription/status')
-                .then((status) => {
-                    if (isMounted) setSubscriptionStatus(status);
-                })
-                .catch((err) => {
-                    if (!isMounted) return;
-                    if (retryCount < maxRetries) {
-                        retryCount++;
-                        timeoutId = setTimeout(checkSubscription, retryDelay);
-                    } else {
-                        console.error('[Launcher] Failed to check subscription:', err);
-                        setSubscriptionStatus({ available: false });
-                    }
-                });
+    const [launcherPermissionMode, setLauncherPermissionMode] = useState<PermissionMode>(config.defaultPermissionMode);
+    const [launcherProviderId, setLauncherProviderId] = useState<string | undefined>();
+    const [launcherSelectedModel, setLauncherSelectedModel] = useState<string | undefined>();
+
+    // MCP state
+    const [launcherMcpServers, setLauncherMcpServers] = useState<McpServerDefinition[]>([]);
+    const [launcherGlobalMcpEnabled, setLauncherGlobalMcpEnabled] = useState<string[]>([]);
+    const [launcherWorkspaceMcpEnabled, setLauncherWorkspaceMcpEnabled] = useState<string[]>([]);
+
+    // Derive provider for launcher
+    const launcherProvider = useMemo(() => {
+        const id = launcherProviderId ?? selectedWorkspace?.providerId ?? config.defaultProviderId;
+        return providers.find(p => p.id === id) ?? providers[0];
+    }, [launcherProviderId, selectedWorkspace, config.defaultProviderId, providers]);
+
+    // Load MCP servers when workspace changes
+    useEffect(() => {
+        const load = async () => {
+            try {
+                const servers = await getAllMcpServers();
+                const enabled = await getEnabledMcpServerIds();
+                setLauncherMcpServers(servers);
+                setLauncherGlobalMcpEnabled(enabled);
+                setLauncherWorkspaceMcpEnabled(selectedWorkspace?.mcpEnabledServers ?? []);
+            } catch (err) {
+                console.warn('[Launcher] Failed to load MCP servers:', err);
+            }
         };
+        void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedWorkspace?.id]);
 
-        checkSubscription();
-
-        return () => {
-            isMounted = false;
-            if (timeoutId) clearTimeout(timeoutId);
-        };
+    // Handle workspace MCP toggle
+    const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
+        setLauncherWorkspaceMcpEnabled(prev =>
+            enabled ? [...prev, serverId] : prev.filter(id => id !== serverId)
+        );
     }, []);
+
+    // Restore launcherLastUsed settings once config finishes loading from disk.
+    // useState initializers run before async config load completes (config = DEFAULT_CONFIG
+    // at that point), so we must sync saved values via effect after isLoading becomes false.
+    const lastUsedAppliedRef = useRef(false);
+    useEffect(() => {
+        if (isLoading || lastUsedAppliedRef.current) return;
+        lastUsedAppliedRef.current = true;
+        const lastUsed = config.launcherLastUsed;
+        if (!lastUsed) return;
+        if (lastUsed.permissionMode) setLauncherPermissionMode(lastUsed.permissionMode);
+        if (lastUsed.providerId) setLauncherProviderId(lastUsed.providerId);
+        if (lastUsed.model) setLauncherSelectedModel(lastUsed.model);
+        if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
+    }, [isLoading, config.launcherLastUsed]);
+
+    // Handle send from BrandSection
+    const handleBrandSend = useCallback(async (text: string, images?: ImageAttachment[]) => {
+        if (!selectedWorkspace) {
+            toastRef.current.error('请先选择工作区');
+            return;
+        }
+
+        const initialMessage: InitialMessage = {
+            text,
+            images,
+            permissionMode: launcherPermissionMode,
+            model: launcherSelectedModel,
+            providerId: launcherProvider?.id,
+            mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
+        };
+
+        // Persist launcher settings for next app launch
+        updateConfig({
+            launcherLastUsed: {
+                providerId: launcherProvider?.id,
+                model: launcherSelectedModel,
+                permissionMode: launcherPermissionMode,
+                mcpEnabledServers: launcherWorkspaceMcpEnabled,
+            },
+        }).catch(err => console.warn('[Launcher] Failed to save launcherLastUsed:', err));
+
+        setLaunchingProjectId(selectedWorkspace.id);
+        touchProject(selectedWorkspace.id).catch(() => {});
+        onLaunchProject(selectedWorkspace, launcherProvider, undefined, initialMessage);
+    }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
+        launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
+        touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
     const [pathDialogOpen, setPathDialogOpen] = useState(false);
     const [pendingFolderName, setPendingFolderName] = useState('');
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
-
-    const handleUpdateProject = async (updated: Project) => {
-        await updateProject(updated);
-    };
 
     const handleLaunch = (project: Project, sessionId?: string) => {
         setLaunchingProjectId(project.id);
@@ -218,19 +298,36 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             <main className="launcher-layout flex-1 overflow-hidden">
                 {/* Left: Brand Section */}
                 <section className="launcher-brand relative flex items-center justify-center overflow-hidden">
-                    <BrandSection />
+                    <BrandSection
+                        projects={projects}
+                        selectedProject={selectedWorkspace}
+                        defaultWorkspacePath={config.defaultWorkspacePath}
+                        onSelectWorkspace={setSelectedWorkspace}
+                        onAddFolder={handleAddProject}
+                        onSend={handleBrandSend}
+                        isStarting={launchingProjectId === selectedWorkspace?.id && isStarting}
+                        provider={launcherProvider}
+                        providers={providers}
+                        selectedModel={launcherSelectedModel}
+                        onProviderChange={setLauncherProviderId}
+                        onModelChange={setLauncherSelectedModel}
+                        permissionMode={launcherPermissionMode}
+                        onPermissionModeChange={setLauncherPermissionMode}
+                        apiKeys={apiKeys}
+                        providerVerifyStatus={providerVerifyStatus}
+                        workspaceMcpEnabled={launcherWorkspaceMcpEnabled}
+                        globalMcpEnabled={launcherGlobalMcpEnabled}
+                        mcpServers={launcherMcpServers}
+                        onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+                        onRefreshProviders={refreshProviderData}
+                    />
                 </section>
 
                 {/* Right: Workspaces Section */}
-                <section className="launcher-workspaces flex flex-col overflow-hidden border-l border-[var(--line)]">
+                <section className="launcher-workspaces flex flex-col overflow-hidden">
                     {/* Recent Tasks */}
                     <div className="flex-shrink-0 px-6 pt-6">
                         <RecentTasks projects={projects} onOpenTask={handleOpenTask} />
-                    </div>
-
-                    {/* Quick Access */}
-                    <div className="flex-shrink-0 px-6">
-                        <QuickAccess onOpenSettings={onOpenSettings} />
                     </div>
 
                     {/* Workspaces Header */}
@@ -287,25 +384,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                                 </button>
                             </div>
                         ) : (
-                            <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
                                 {projects.map((project) => (
                                     <WorkspaceCard
                                         key={project.id}
                                         project={project}
-                                        providers={providers}
-                                        apiKeys={apiKeys}
-                                        defaultProviderId={config.defaultProviderId}
                                         onLaunch={(p) => handleLaunch(p)}
-                                        onUpdateProject={handleUpdateProject}
                                         onRemove={handleRemoveProject}
-                                        isMenuOpen={activeMenuProjectId === project.id}
-                                        onMenuToggle={(open) =>
-                                            setActiveMenuProjectId(open ? project.id : null)
-                                        }
                                         isLoading={launchingProjectId === project.id && isStarting}
-                                        subscriptionAvailable={subscriptionStatus?.available}
-                                        onOpenSettings={onOpenSettings}
-                                        onRefreshProviders={refreshProviderData}
                                     />
                                 ))}
                             </div>

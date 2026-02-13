@@ -1,4 +1,4 @@
-import { Check, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -6,6 +6,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { track } from '@/analytics';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
+import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
@@ -41,6 +42,7 @@ import {
 } from '@/utils/developerMode';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
@@ -198,6 +200,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         updateConfig,
         providers,
         projects,
+        addProject,
         updateProject,
         addCustomProvider,
         updateCustomProvider,
@@ -1206,7 +1209,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
             />
 
             {/* Left sidebar */}
-            <div className="w-52 shrink-0 border-r border-[var(--line)] p-6">
+            <div className="settings-sidebar w-52 shrink-0 p-6">
                 <div className="mb-6 flex items-center justify-between">
                     <h1 className="text-xl font-semibold text-[var(--ink)]">设置</h1>
                     {config.showDevTools && (
@@ -1317,7 +1320,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                             {allProviders.map((provider) => (
                                 <div
                                     key={provider.id}
-                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
                                 >
                                     {/* Provider header */}
                                     <div className="mb-4 flex items-start justify-between gap-2">
@@ -1471,7 +1474,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                 return (
                                     <div
                                         key={server.id}
-                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
                                     >
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
@@ -1628,6 +1631,58 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                 </div>
                             </div>
 
+                            {/* Default Workspace */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">默认工作区</h3>
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">启动页默认使用的工作区路径</p>
+                                    </div>
+                                    <CustomSelect
+                                        value={config.defaultWorkspacePath ?? ''}
+                                        options={[
+                                            { value: '', label: '无' },
+                                            ...projects.map(p => ({
+                                                value: p.path,
+                                                label: shortenPathForDisplay(p.path),
+                                                icon: <FolderOpen className="h-3.5 w-3.5" />,
+                                            })),
+                                        ]}
+                                        onChange={async (val) => {
+                                            if (val === '') {
+                                                await updateConfig({ defaultWorkspacePath: undefined });
+                                            } else {
+                                                await updateConfig({ defaultWorkspacePath: val });
+                                                toast.success('已设置默认工作区');
+                                            }
+                                        }}
+                                        placeholder="无"
+                                        triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
+                                        className="w-[240px]"
+                                        footerAction={{
+                                            label: '选择文件夹...',
+                                            icon: <Plus className="h-3.5 w-3.5" />,
+                                            onClick: async () => {
+                                                try {
+                                                    const { open } = await import('@tauri-apps/plugin-dialog');
+                                                    const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
+                                                    if (selected && typeof selected === 'string') {
+                                                        if (!projects.find(p => p.path === selected)) {
+                                                            await addProject(selected);
+                                                        }
+                                                        await updateConfig({ defaultWorkspacePath: selected });
+                                                        toast.success('已设置默认工作区');
+                                                    }
+                                                } catch (err) {
+                                                    console.error('[Settings] Browse folder failed:', err);
+                                                }
+                                            },
+                                        }}
+                                    />
+                                </div>
+                            </div>
+
                             {/* Notification Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
@@ -1707,21 +1762,22 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                         {/* Protocol */}
                                         <div className="flex items-center gap-3">
                                             <label className="w-16 text-xs text-[var(--ink-muted)]">协议</label>
-                                            <select
+                                            <CustomSelect
                                                 value={config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}
-                                                onChange={(e) => {
+                                                options={[
+                                                    { value: 'http', label: 'HTTP' },
+                                                    { value: 'socks5', label: 'SOCKS5' },
+                                                ]}
+                                                onChange={(val) => {
                                                     updateConfig({
                                                         proxySettings: {
                                                             ...config.proxySettings!,
-                                                            protocol: e.target.value as 'http' | 'socks5',
+                                                            protocol: val as 'http' | 'socks5',
                                                         }
                                                     });
                                                 }}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--ink)] focus:outline-none"
-                                            >
-                                                <option value="http">HTTP</option>
-                                                <option value="socks5">SOCKS5</option>
-                                            </select>
+                                                className="flex-1"
+                                            />
                                         </div>
 
                                         {/* Host */}

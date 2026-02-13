@@ -526,7 +526,18 @@ pre code {
 
 .launcher-workspaces {
   grid-area: workspaces;
-  background: var(--paper-strong);
+  position: relative;
+}
+
+/* Floating divider between brand and workspaces */
+.launcher-workspaces::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 24px;
+  bottom: 24px;
+  width: 1px;
+  background: var(--line);
 }
 
 /* Responsive: stack vertically below 768px (use --breakpoint-mobile) */
@@ -544,9 +555,24 @@ pre code {
     border-bottom: 1px solid var(--line);
   }
 
-  .launcher-workspaces {
-    border-left: none;
+  .launcher-workspaces::before {
+    display: none;
   }
+}
+
+/* Settings sidebar floating divider */
+.settings-sidebar {
+  position: relative;
+}
+
+.settings-sidebar::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 24px;
+  bottom: 24px;
+  width: 1px;
+  background: var(--line);
 }
 
 /* ============================================
