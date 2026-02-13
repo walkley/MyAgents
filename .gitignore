@@ -65,3 +65,6 @@ specs/research/
 
 publish_release.sh
 start_dev.sh
+
+# Default workspace (cloned by setup.sh)
+/mino/

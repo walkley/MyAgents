@@ -1,5 +1,19 @@
 // Tab types for multi-tab architecture
 
+import type { ImageAttachment } from '@/components/SimpleChatInput';
+import type { PermissionMode } from '@/config/types';
+
+/** Message data passed from Launcher to Chat for auto-send on workspace open.
+ *  Security: Only stores providerId, never the API key. Chat builds providerEnv at send time. */
+export interface InitialMessage {
+    text: string;
+    images?: ImageAttachment[];
+    permissionMode?: PermissionMode;
+    model?: string;
+    providerId?: string;
+    mcpEnabledServers?: string[];
+}
+
 export interface Tab {
     id: string;
     agentDir: string | null;  // null = showing Launcher
@@ -7,6 +21,7 @@ export interface Tab {
     view: 'launcher' | 'chat' | 'settings';
     title: string;            // Display title for the tab
     isGenerating?: boolean;   // true = AI is outputting, used for close confirmation
+    initialMessage?: InitialMessage;  // Launcher → Chat auto-send message
     // Note: cronTaskId and sidecarPort are no longer stored in Tab.
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.
     // Use getSessionPort(sessionId) to get the port when needed.

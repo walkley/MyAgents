@@ -17,7 +17,7 @@ import {
   type Project,
   type Provider,
 } from '@/config/types';
-import { type Tab, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
@@ -68,6 +68,9 @@ export default function App() {
     runningTaskCount: number;
     resolve: (value: boolean) => void;
   } | null>(null);
+
+  // Per-tab launch guard — prevents concurrent launches overwriting each other's state
+  const launchingTabRef = useRef<string | null>(null);
 
   // Global Sidecar silent retry mechanism
   const mountedRef = useRef(true);
@@ -146,6 +149,28 @@ export default function App() {
     // Start Global Sidecar immediately on app launch
     // This ensures MCP and other global API calls work from any page
     void startGlobalSidecarSilent();
+
+    // Initialize bundled workspace (mino) on first launch
+    const initBundledWorkspace = async () => {
+      if (!isTauriEnvironment()) return;
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const result = await invoke<{ path: string; is_new: boolean }>('cmd_initialize_bundled_workspace');
+        if (result.is_new) {
+          const { addProject, loadAppConfig, saveAppConfig } = await import('@/config/configService');
+          await addProject(result.path);
+          const latest = await loadAppConfig();
+          if (!latest.defaultWorkspacePath) {
+            await saveAppConfig({ ...latest, defaultWorkspacePath: result.path });
+            // Notify useConfig to pick up the new defaultWorkspacePath
+            window.dispatchEvent(new Event(CUSTOM_EVENTS.CONFIG_CHANGED));
+          }
+        }
+      } catch (err) {
+        console.warn('[App] Bundled workspace init failed:', err);
+      }
+    };
+    void initBundledWorkspace();
 
     // 方案 A: Rust 统一恢复 - 监听恢复事件（仅用于日志和 UI 反馈）
     // Rust 层会自动恢复任务，前端只需要监听结果
@@ -442,9 +467,18 @@ export default function App() {
   const handleLaunchProject = useCallback(async (
     project: Project,
     _provider: Provider,
-    sessionId?: string
+    sessionId?: string,
+    initialMessage?: InitialMessage
   ) => {
     if (!activeTabId) return;
+
+    // Per-tab launch guard: prevent concurrent launches on the same tab
+    // A second launch would overwrite the first's initialMessage and kill its sidecar
+    if (launchingTabRef.current === activeTabId) {
+      console.warn(`[App] handleLaunchProject: launch already in progress for tab ${activeTabId}, ignoring`);
+      return;
+    }
+    launchingTabRef.current = activeTabId;
 
     // Track workspace_open or history_open event
     if (sessionId) {
@@ -467,6 +501,7 @@ export default function App() {
           console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
           setActiveTabId(existingTab.id);
           setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+          launchingTabRef.current = null;
           return;
         }
       }
@@ -490,6 +525,7 @@ export default function App() {
             if (tabs.length >= MAX_TABS) {
               setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
               setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+              launchingTabRef.current = null;
               return;
             }
             const newTab = createNewTab();
@@ -525,6 +561,7 @@ export default function App() {
             setActiveTabId(targetTabId);
           }
           setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
+          launchingTabRef.current = null;
           return;
         }
       }
@@ -540,6 +577,7 @@ export default function App() {
         if (tabs.length >= MAX_TABS) {
           setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
           setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+          launchingTabRef.current = null;
           return;
         }
 
@@ -599,6 +637,9 @@ export default function App() {
               sessionId: effectiveSessionId,
               view: 'chat',
               title: getFolderName(project.path),
+              // Only set initialMessage when explicitly provided (from Launcher send).
+              // Omitting undefined prevents overwriting a prior initialMessage in race conditions.
+              ...(initialMessage ? { initialMessage } : {}),
             }
             : t
         )
@@ -629,9 +670,17 @@ export default function App() {
         );
       }
     } finally {
+      launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
     }
   }, [activeTabId, tabs]);
+
+  // Clear initialMessage from a tab after it has been consumed by Chat
+  const clearInitialMessage = useCallback((tabId: string) => {
+    setTabs(prev => prev.map(t =>
+      t.id === tabId ? { ...t, initialMessage: undefined } : t
+    ));
+  }, []);
 
   /**
    * Handle session switch from within Chat (history dropdown)
@@ -1144,6 +1193,8 @@ export default function App() {
                     onBack={handleBackToLauncher}
                     onSwitchSession={(sessionId) => handleSwitchSession(tab.id, sessionId)}
                     onNewSession={() => handleNewSession(tab.id)}
+                    initialMessage={tab.initialMessage}
+                    onInitialMessageConsumed={() => clearInitialMessage(tab.id)}
                   />
                 </TabProvider>
               )}

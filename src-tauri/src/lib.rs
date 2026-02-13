@@ -94,6 +94,8 @@ pub fn run() {
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
+            // Bundled workspace initialization
+            commands::cmd_initialize_bundled_workspace,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,

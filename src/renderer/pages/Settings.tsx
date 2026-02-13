@@ -1,4 +1,4 @@
-import { Check, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -41,6 +41,7 @@ import {
 } from '@/utils/developerMode';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
@@ -198,6 +199,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         updateConfig,
         providers,
         projects,
+        addProject,
         updateProject,
         addCustomProvider,
         updateCustomProvider,
@@ -1626,6 +1628,60 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                         />
                                     </button>
                                 </div>
+                            </div>
+
+                            {/* Default Workspace */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">默认工作区</h3>
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">启动页默认使用的工作区路径</p>
+                                    </div>
+                                    <select
+                                        value={config.defaultWorkspacePath ?? ''}
+                                        onChange={async (e) => {
+                                            const selectEl = e.target;
+                                            if (selectEl.value === '__browse__') {
+                                                // Reset select to current value immediately (before async dialog)
+                                                selectEl.value = config.defaultWorkspacePath ?? '';
+                                                try {
+                                                    const { open } = await import('@tauri-apps/plugin-dialog');
+                                                    const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
+                                                    if (selected && typeof selected === 'string') {
+                                                        if (!projects.find(p => p.path === selected)) {
+                                                            await addProject(selected);
+                                                        }
+                                                        await updateConfig({ defaultWorkspacePath: selected });
+                                                        toast.success('已设置默认工作区');
+                                                    }
+                                                } catch (err) {
+                                                    console.error('[Settings] Browse folder failed:', err);
+                                                }
+                                            } else if (selectEl.value === '') {
+                                                await updateConfig({ defaultWorkspacePath: undefined });
+                                            } else {
+                                                await updateConfig({ defaultWorkspacePath: selectEl.value });
+                                                toast.success('已设置默认工作区');
+                                            }
+                                        }}
+                                        className="max-w-[240px] rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)]"
+                                    >
+                                        <option value="">无</option>
+                                        {projects.map(p => (
+                                            <option key={p.id} value={p.path}>{shortenPathForDisplay(p.path)}</option>
+                                        ))}
+                                        <option value="__browse__">选择文件夹...</option>
+                                    </select>
+                                </div>
+                                {config.defaultWorkspacePath && (
+                                    <div className="mt-3 flex items-center gap-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2">
+                                        <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
+                                        <code className="truncate font-mono text-xs text-[var(--ink-secondary)]">
+                                            {shortenPathForDisplay(config.defaultWorkspacePath)}
+                                        </code>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Notification Settings */}

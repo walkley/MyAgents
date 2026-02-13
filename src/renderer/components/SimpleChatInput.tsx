@@ -88,6 +88,8 @@ interface SimpleChatInputProps {
   onCronStop?: () => void;
   /** Callback when input text changes (for cron prompt tracking) */
   onInputChange?: (text: string) => void;
+  /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
+  mode?: 'chat' | 'launcher';
   // Queued messages props
   queuedMessages?: QueuedMessageInfo[];
   onCancelQueued?: (queueId: string) => void;
@@ -157,10 +159,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronCancel,
   onCronStop,
   onInputChange,
+  mode = 'chat',
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
 }, ref) {
+  const isLauncherMode = mode === 'launcher';
+
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
   const [inputValue, setInputValue] = useState(externalValue ?? '');
@@ -252,6 +257,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Pending user-level skill copies (SDK only reads from project .claude/skills/)
   // Use Map to track multiple concurrent copy operations and avoid race conditions
   const pendingSkillCopiesRef = useRef<Map<string, Promise<boolean>>>(new Map());
+
+  // Guard against double-fire of handleSend (e.g. rapid Enter + click)
+  const sendingRef = useRef(false);
 
   // Close all dropdown menus (plus, mode, model, provider)
   const closeAllMenus = useCallback(() => {
@@ -842,7 +850,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         currentSlashPosition = null;
         setShowSlashMenu(false);
         setSlashPosition(null);
-      } else if (addedChar === '/') {
+      } else if (addedChar === '/' && !isLauncherMode) {
         currentShowSlashMenu = true;
         currentSlashPosition = cursorPos - 1;
         setShowSlashMenu(true);
@@ -895,7 +903,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }
 
     setInputValue(newValue);
-  }, [inputValue, showFileSearch, atPosition, showSlashMenu, slashPosition]);
+  }, [inputValue, showFileSearch, atPosition, showSlashMenu, slashPosition, isLauncherMode]);
 
   // Cycle permission mode: auto → plan → fullAgency → auto
   const cyclePermissionMode = useCallback(() => {
@@ -931,33 +939,41 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     const text = inputValue.trim();
     if (!text && images.length === 0) return;
 
-    // Wait for all pending skill copies to complete (max 10s each)
-    const pendingCopies = Array.from(pendingSkillCopiesRef.current.entries());
-    if (pendingCopies.length > 0) {
-      for (const [skillName, promise] of pendingCopies) {
-        try {
-          const timeoutPromise = new Promise<boolean>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), 10000)
-          );
-          const success = await Promise.race([promise, timeoutPromise]);
-          if (!success) {
-            toastRef.current.warning(`Skill "${skillName}" 复制失败，请重试`);
+    // Prevent double-fire (rapid Enter + click, or concurrent async sends)
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+
+    try {
+      // Wait for all pending skill copies to complete (max 10s each)
+      const pendingCopies = Array.from(pendingSkillCopiesRef.current.entries());
+      if (pendingCopies.length > 0) {
+        for (const [skillName, promise] of pendingCopies) {
+          try {
+            const timeoutPromise = new Promise<boolean>((_, reject) =>
+              setTimeout(() => reject(new Error('timeout')), 10000)
+            );
+            const success = await Promise.race([promise, timeoutPromise]);
+            if (!success) {
+              toastRef.current.warning(`Skill "${skillName}" 复制失败，请重试`);
+              return;
+            }
+          } catch {
+            toastRef.current.warning(`Skill "${skillName}" 复制超时，请重试`);
             return;
           }
-        } catch {
-          toastRef.current.warning(`Skill "${skillName}" 复制超时，请重试`);
-          return;
         }
       }
-    }
 
-    const result = onSend(text, images.length > 0 ? images : undefined);
-    // If onSend returns a promise, await it; if sync, use directly
-    const accepted = result instanceof Promise ? await result : result;
-    // Only clear input if not explicitly rejected (false)
-    if (accepted !== false) {
-      setInputValue('');
-      setImages([]);
+      const result = onSend(text, images.length > 0 ? images : undefined);
+      // If onSend returns a promise, await it; if sync, use directly
+      const accepted = result instanceof Promise ? await result : result;
+      // Only clear input if not explicitly rejected (false)
+      if (accepted !== false) {
+        setInputValue('');
+        setImages([]);
+      }
+    } finally {
+      sendingRef.current = false;
     }
   }, [onSend, images, inputValue]);
 
@@ -1104,26 +1120,36 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const toggleExpand = () => setIsExpanded((prev) => !prev);
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-4">
-      {/* Gradient fade overlay */}
-      <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-32"
-        style={{
-          background: 'linear-gradient(to bottom, transparent, var(--paper-strong) 60%)'
-        }}
-      />
+    <div className={isLauncherMode
+      ? 'relative flex w-full justify-center'
+      : 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-4'
+    }>
+      {/* Gradient fade overlay (chat mode only) */}
+      {!isLauncherMode && (
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-32"
+          style={{
+            background: 'linear-gradient(to bottom, transparent, var(--paper-strong) 60%)'
+          }}
+        />
+      )}
 
       {/* Input container */}
-      <div className="pointer-events-auto relative w-full max-w-3xl">
+      <div className={isLauncherMode
+        ? 'relative w-full'
+        : 'pointer-events-auto relative w-full max-w-3xl'
+      }>
         {/* Queued messages floating above the input */}
-        <QueuedMessagesPanel
-          messages={queuedMessages}
-          onCancel={(queueId) => onCancelQueued?.(queueId)}
-          onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
-        />
+        {!isLauncherMode && (
+          <QueuedMessagesPanel
+            messages={queuedMessages}
+            onCancel={(queueId) => onCancelQueued?.(queueId)}
+            onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
+          />
+        )}
 
         {/* Cron task status bar - shows when cron mode enabled but task not started (always directly above input) */}
-        {cronModeEnabled && !cronTask && cronConfig && (
+        {!isLauncherMode && cronModeEnabled && !cronTask && cronConfig && (
           <CronTaskStatusBar
             intervalMinutes={cronConfig.intervalMinutes}
             onSettings={() => onCronSettings?.()}
@@ -1137,7 +1163,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             : 'rounded-2xl'  // Normal: fully rounded
         }`}>
           {/* Cron task overlay - shows when task is running */}
-          {cronTask && cronTask.status === 'running' && (
+          {!isLauncherMode && cronTask && cronTask.status === 'running' && (
             <CronTaskOverlay
               status={cronTask.status}
               intervalMinutes={cronTask.intervalMinutes}
@@ -1193,7 +1219,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="输入消息，使用 @ 引用文件，/ 使用技能..."
+              placeholder={isLauncherMode ? '今天，想干点啥？' : '输入消息，使用 @ 引用文件，/ 使用技能...'}
               rows={1}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
@@ -1245,7 +1271,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             )}
 
             {/* /slash command popup */}
-            {showSlashMenu && (
+            {!isLauncherMode && showSlashMenu && (
               <SlashCommandMenu
                 commands={filterAndSortCommands(slashCommands, slashSearchQuery)}
                 selectedIndex={selectedSlashIndex}
@@ -1527,7 +1553,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               </div>
 
               {/* Heartbeat Loop Button */}
-              {onCronButtonClick && (
+              {!isLauncherMode && onCronButtonClick && (
                 <button
                   type="button"
                   onClick={(e) => {
