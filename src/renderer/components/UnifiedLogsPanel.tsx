@@ -56,13 +56,30 @@ const LEVEL_FILTERS: { value: LogLevel | 'all'; label: string }[] = [
     { value: 'debug', label: 'DEBUG' },
 ];
 
+// Hide filter options (multi-select)
+type HideFilter = 'stream_event' | 'analytics';
+const HIDE_FILTERS: { value: HideFilter; label: string }[] = [
+    { value: 'stream_event', label: 'Stream Event' },
+    { value: 'analytics', label: '统计日志' },
+];
+const DEFAULT_HIDE_FILTERS = new Set<HideFilter>(['stream_event', 'analytics']);
+
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
     // All logs (React + Bun + Rust) now come from sseLogs prop via TabProvider
     const [filter, setFilter] = useState<LogSource | 'all'>('all');
     const [levelFilter, setLevelFilter] = useState<LogLevel | 'all'>('all');
-    const [hideStreamEvents, setHideStreamEvents] = useState(false);
+    const [hideFilters, setHideFilters] = useState<Set<HideFilter>>(new Set(DEFAULT_HIDE_FILTERS));
     const scrollRef = useRef<HTMLDivElement>(null);
     const autoScrollRef = useRef(true);
+
+    const toggleHideFilter = useCallback((f: HideFilter) => {
+        setHideFilters(prev => {
+            const next = new Set(prev);
+            if (next.has(f)) next.delete(f);
+            else next.add(f);
+            return next;
+        });
+    }, []);
 
     // Limit logs for display and sort newest first
     // PERF: Skip expensive sort when panel is hidden — recomputes once on open
@@ -76,7 +93,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         );
     }, [sseLogs, isVisible]);
 
-    // Filter logs by source, level, and stream events
+    // Filter logs by source, level, and hide filters
     const filteredLogs = useMemo(() => {
         let logs = allLogs;
         if (filter !== 'all') {
@@ -85,15 +102,20 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         if (levelFilter !== 'all') {
             logs = logs.filter(log => log.level === levelFilter);
         }
-        // Hide stream_event logs if toggle is on
-        if (hideStreamEvents) {
+        if (hideFilters.has('stream_event')) {
             logs = logs.filter(log =>
                 !log.message.includes('type=stream_event') &&
                 !log.message.includes('"type":"stream_event"')
             );
         }
+        if (hideFilters.has('analytics')) {
+            logs = logs.filter(log =>
+                !log.message.includes('analytics.myagents.io') &&
+                !log.message.includes('/api/unified-log')
+            );
+        }
         return logs;
-    }, [allLogs, filter, levelFilter, hideStreamEvents]);
+    }, [allLogs, filter, levelFilter, hideFilters]);
 
     // Count logs by source
     const logCounts = useMemo(() => {
@@ -137,6 +159,24 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         onClearAll?.();
     }, [onClearAll]);
 
+    // Download filtered logs as .txt
+    const handleDownload = useCallback(() => {
+        const lines = filteredLogs.map(log => {
+            const time = new Date(log.timestamp).toLocaleTimeString('en-US', {
+                hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
+            });
+            const level = log.level !== 'info' ? ` [${log.level.toUpperCase()}]` : '';
+            return `${SOURCE_LABELS[log.source]} ${time}${level} ${log.message}`;
+        });
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `myagents-logs-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }, [filteredLogs]);
+
     if (!isVisible) return null;
 
     // Use portal to render at document root for true fullscreen overlay
@@ -152,24 +192,59 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
-                <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
+                <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-3">
                     <div className="flex items-center gap-4">
-                        <h2 className="text-lg font-semibold text-[var(--ink)]">
-                            统一日志 Unified Logs
-                        </h2>
+                        <h2 className="text-lg font-semibold text-[var(--ink)]">Logs</h2>
                         <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {filteredLogs.length} / {allLogs.length} 条
+                            {filteredLogs.length} / {allLogs.length}
                         </span>
                     </div>
 
-                    <div className="flex items-center gap-4">
-                        {/* Source filter */}
-                        <div className="flex gap-1">
+                    <div className="flex items-center gap-2">
+                        {/* Download button */}
+                        <button
+                            onClick={handleDownload}
+                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            title="导出日志"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                        </button>
+                        {/* Clear button */}
+                        <button
+                            onClick={handleClearAll}
+                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            title="清空日志"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                        </button>
+                        {/* Close button */}
+                        <button
+                            onClick={onClose}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            aria-label="Close"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                {/* Filter bar — 三组筛选 */}
+                <div className="flex flex-wrap items-center gap-4 border-b border-[var(--line)] px-6 py-2">
+                    {/* 范围 (单选) */}
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">范围</span>
+                        <div className="flex gap-0.5">
                             {SOURCE_FILTERS.map(({ value, label }) => (
                                 <button
                                     key={value}
                                     onClick={() => setFilter(value)}
-                                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${filter === value
+                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${filter === value
                                         ? 'bg-[var(--accent)] text-white'
                                         : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
@@ -178,52 +253,48 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                 </button>
                             ))}
                         </div>
+                    </div>
 
-                        {/* Level filter */}
-                        <div className="flex gap-1">
+                    <div className="h-4 w-px bg-[var(--line)]" />
+
+                    {/* 类型 (单选) */}
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">类型</span>
+                        <div className="flex gap-0.5">
                             {LEVEL_FILTERS.map(({ value, label }) => (
                                 <button
                                     key={value}
                                     onClick={() => setLevelFilter(value)}
-                                    className={`rounded px-2 py-1 text-xs font-medium transition-colors ${levelFilter === value
+                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${levelFilter === value
                                         ? 'bg-[var(--ink)] text-[var(--paper)]'
-                                        : 'bg-[var(--paper-strong)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
+                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
                                     {label}
                                 </button>
                             ))}
                         </div>
+                    </div>
 
-                        {/* Hide stream events toggle */}
-                        <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-[var(--paper-contrast)]">
-                            <input
-                                type="checkbox"
-                                checked={hideStreamEvents}
-                                onChange={(e) => setHideStreamEvents(e.target.checked)}
-                                className="size-3.5 rounded border-[var(--line)] accent-[var(--accent)]"
-                            />
-                            <span className="text-[var(--ink-muted)] select-none">隐藏 stream_event</span>
-                        </label>
+                    <div className="h-4 w-px bg-[var(--line)]" />
 
-                        {/* Clear button */}
-                        <button
-                            onClick={handleClearAll}
-                            className="rounded px-3 py-1 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
-                        >
-                            清空
-                        </button>
-
-                        {/* Close button */}
-                        <button
-                            onClick={onClose}
-                            className="rounded-lg p-2 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                            aria-label="Close"
-                        >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                            </svg>
-                        </button>
+                    {/* 隐藏 (多选) */}
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">隐藏</span>
+                        <div className="flex gap-1">
+                            {HIDE_FILTERS.map(({ value, label }) => (
+                                <button
+                                    key={value}
+                                    onClick={() => toggleHideFilter(value)}
+                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${hideFilters.has(value)
+                                        ? 'bg-[var(--warning)]/15 text-[var(--warning)]'
+                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
+                                        }`}
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </div>
 
