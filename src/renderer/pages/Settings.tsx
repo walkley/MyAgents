@@ -6,6 +6,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { track } from '@/analytics';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
+import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
@@ -1638,13 +1639,31 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                         <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
                                         <p className="text-xs text-[var(--ink-muted)]">启动页默认使用的工作区路径</p>
                                     </div>
-                                    <select
+                                    <CustomSelect
                                         value={config.defaultWorkspacePath ?? ''}
-                                        onChange={async (e) => {
-                                            const selectEl = e.target;
-                                            if (selectEl.value === '__browse__') {
-                                                // Reset select to current value immediately (before async dialog)
-                                                selectEl.value = config.defaultWorkspacePath ?? '';
+                                        options={[
+                                            { value: '', label: '无' },
+                                            ...projects.map(p => ({
+                                                value: p.path,
+                                                label: shortenPathForDisplay(p.path),
+                                                icon: <FolderOpen className="h-3.5 w-3.5" />,
+                                            })),
+                                        ]}
+                                        onChange={async (val) => {
+                                            if (val === '') {
+                                                await updateConfig({ defaultWorkspacePath: undefined });
+                                            } else {
+                                                await updateConfig({ defaultWorkspacePath: val });
+                                                toast.success('已设置默认工作区');
+                                            }
+                                        }}
+                                        placeholder="无"
+                                        triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
+                                        className="w-[240px]"
+                                        footerAction={{
+                                            label: '选择文件夹...',
+                                            icon: <Plus className="h-3.5 w-3.5" />,
+                                            onClick: async () => {
                                                 try {
                                                     const { open } = await import('@tauri-apps/plugin-dialog');
                                                     const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
@@ -1658,30 +1677,10 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                                 } catch (err) {
                                                     console.error('[Settings] Browse folder failed:', err);
                                                 }
-                                            } else if (selectEl.value === '') {
-                                                await updateConfig({ defaultWorkspacePath: undefined });
-                                            } else {
-                                                await updateConfig({ defaultWorkspacePath: selectEl.value });
-                                                toast.success('已设置默认工作区');
-                                            }
+                                            },
                                         }}
-                                        className="max-w-[240px] rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)]"
-                                    >
-                                        <option value="">无</option>
-                                        {projects.map(p => (
-                                            <option key={p.id} value={p.path}>{shortenPathForDisplay(p.path)}</option>
-                                        ))}
-                                        <option value="__browse__">选择文件夹...</option>
-                                    </select>
+                                    />
                                 </div>
-                                {config.defaultWorkspacePath && (
-                                    <div className="mt-3 flex items-center gap-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2">
-                                        <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
-                                        <code className="truncate font-mono text-xs text-[var(--ink-secondary)]">
-                                            {shortenPathForDisplay(config.defaultWorkspacePath)}
-                                        </code>
-                                    </div>
-                                )}
                             </div>
 
                             {/* Notification Settings */}
@@ -1763,21 +1762,22 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                         {/* Protocol */}
                                         <div className="flex items-center gap-3">
                                             <label className="w-16 text-xs text-[var(--ink-muted)]">协议</label>
-                                            <select
+                                            <CustomSelect
                                                 value={config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}
-                                                onChange={(e) => {
+                                                options={[
+                                                    { value: 'http', label: 'HTTP' },
+                                                    { value: 'socks5', label: 'SOCKS5' },
+                                                ]}
+                                                onChange={(val) => {
                                                     updateConfig({
                                                         proxySettings: {
                                                             ...config.proxySettings!,
-                                                            protocol: e.target.value as 'http' | 'socks5',
+                                                            protocol: val as 'http' | 'socks5',
                                                         }
                                                     });
                                                 }}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--ink)] focus:outline-none"
-                                            >
-                                                <option value="http">HTTP</option>
-                                                <option value="socks5">SOCKS5</option>
-                                            </select>
+                                                className="flex-1"
+                                            />
                                         </div>
 
                                         {/* Host */}
