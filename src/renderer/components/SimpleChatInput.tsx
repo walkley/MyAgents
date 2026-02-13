@@ -1506,7 +1506,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           return (
                             <div
                               key={server.id}
-                              className="flex items-center justify-between px-3 py-2 hover:bg-[var(--paper-contrast)]"
+                              className="flex items-center justify-between px-3 py-2"
                             >
                               <div className="flex-1 min-w-0">
                                 <div className="text-sm font-medium text-[var(--ink)] truncate">
@@ -1524,11 +1524,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   e.stopPropagation();
                                   onWorkspaceMcpToggle?.(server.id, !isEnabled);
                                 }}
-                                className={`relative ml-2 h-5 w-9 shrink-0 rounded-full transition-colors ${isEnabled ? 'bg-[var(--success)]' : 'bg-[var(--paper-inset)]'
+                                className={`relative ml-2 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors hover:opacity-80 focus:outline-none ${isEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                   }`}
                               >
                                 <span
-                                  className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[var(--paper-elevated)] shadow transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0'
+                                  className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
                                     }`}
                                 />
                               </button>

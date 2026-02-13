@@ -324,7 +324,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 </section>
 
                 {/* Right: Workspaces Section */}
-                <section className="launcher-workspaces flex flex-col overflow-hidden border-l border-[var(--line)]">
+                <section className="launcher-workspaces flex flex-col overflow-hidden">
                     {/* Recent Tasks */}
                     <div className="flex-shrink-0 px-6 pt-6">
                         <RecentTasks projects={projects} onOpenTask={handleOpenTask} />

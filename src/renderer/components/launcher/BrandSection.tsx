@@ -70,14 +70,11 @@ export default function BrandSection({
         <section className="flex flex-1 flex-col items-center px-12">
             {/* Upper area: Brand Name + Slogans */}
             <div className="flex flex-1 flex-col items-center justify-center">
-                <h1 className="brand-title mb-5 text-[3.5rem] font-light tracking-tight text-[var(--ink)] md:text-[4.5rem]">
+                <h1 className="brand-title mb-5 text-[2.75rem] font-light tracking-[0.04em] text-[var(--ink)] md:text-[3.5rem]">
                     MyAgents
                 </h1>
                 <p className="brand-slogan text-center text-[15px] font-light tracking-[0.06em] text-[var(--ink-secondary)] md:text-[17px]">
-                    Your Universal AI Assistant
-                </p>
-                <p className="mt-2.5 text-center text-[13px] font-normal tracking-[0.08em] text-[var(--ink-muted)]/70 md:text-[14px]">
-                    让每个人都有一个智能助手
+                    每个人都应享受智能的推背感，欢迎来到言出法随的世界
                 </p>
             </div>
 

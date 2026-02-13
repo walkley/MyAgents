@@ -72,7 +72,7 @@ export default function WorkspaceCard({
                 onClick={() => !isLoading && onLaunch(project)}
                 onContextMenu={handleContextMenu}
                 disabled={isLoading}
-                className={`group flex w-full items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3.5 text-left transition-all duration-150 ease-out hover:border-[var(--line-strong)] hover:shadow-[0_4px_12px_-4px_rgba(28,22,18,0.1)] active:scale-[0.97] ${
+                className={`group flex w-full items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3.5 text-left transition-all duration-150 ease-out hover:border-[var(--line-strong)] hover:shadow-sm active:scale-[0.97] ${
                     isLoading ? 'pointer-events-none opacity-60' : 'cursor-pointer'
                 }`}
             >

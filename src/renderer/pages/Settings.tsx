@@ -1209,7 +1209,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
             />
 
             {/* Left sidebar */}
-            <div className="w-52 shrink-0 border-r border-[var(--line)] p-6">
+            <div className="settings-sidebar w-52 shrink-0 p-6">
                 <div className="mb-6 flex items-center justify-between">
                     <h1 className="text-xl font-semibold text-[var(--ink)]">设置</h1>
                     {config.showDevTools && (
@@ -1320,7 +1320,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                             {allProviders.map((provider) => (
                                 <div
                                     key={provider.id}
-                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
                                 >
                                     {/* Provider header */}
                                     <div className="mb-4 flex items-start justify-between gap-2">
@@ -1474,7 +1474,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                                 return (
                                     <div
                                         key={server.id}
-                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 transition-all hover:shadow-sm"
+                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
                                     >
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
