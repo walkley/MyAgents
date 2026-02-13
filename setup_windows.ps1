@@ -129,7 +129,7 @@ try {
     }
 
     # Main
-    Write-Host "Step 1/6: 检查依赖" -ForegroundColor Blue
+    Write-Host "Step 1/7: 检查依赖" -ForegroundColor Blue
     $Missing = $false
 
     if (-not (Test-Dependency "Node.js" "node --version" "https://nodejs.org")) { $Missing = $true }
@@ -146,13 +146,13 @@ try {
         exit 1
     }
 
-    Write-Host "`nStep 2/6: 下载 Bun 运行时" -ForegroundColor Blue
+    Write-Host "`nStep 2/7: 下载 Bun 运行时" -ForegroundColor Blue
     Get-BunBinary
 
-    Write-Host "`nStep 3/6: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
+    Write-Host "`nStep 3/7: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
     Get-GitInstaller
 
-    Write-Host "`nStep 4/6: 安装前端依赖" -ForegroundColor Blue
+    Write-Host "`nStep 4/7: 安装前端依赖" -ForegroundColor Blue
     & bun install
     if ($LASTEXITCODE -ne 0) {
         Write-Host "前端依赖安装失败" -ForegroundColor Red
@@ -162,7 +162,7 @@ try {
     }
     Write-Host "OK - 前端依赖安装完成" -ForegroundColor Green
 
-    Write-Host "`nStep 5/6: 下载 Rust 依赖" -ForegroundColor Blue
+    Write-Host "`nStep 5/7: 下载 Rust 依赖" -ForegroundColor Blue
     Write-Host "  正在下载 Rust 依赖包，请稍候..." -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectDir "src-tauri")
     & cargo fetch
@@ -176,7 +176,28 @@ try {
     Pop-Location
     Write-Host "OK - Rust 依赖下载完成" -ForegroundColor Green
 
-    Write-Host "`nStep 6/6: 初始化完成!" -ForegroundColor Blue
+    # 准备默认工作区 (mino) — 每次拉取最新版本
+    # .git 不保留：避免 Tauri 资源打包权限问题 + rerun-if-changed 性能问题
+    Write-Host "`nStep 6/7: 准备默认工作区 (mino)" -ForegroundColor Blue
+    $MinoDir = Join-Path $ProjectDir "mino"
+    if (Test-Path $MinoDir) {
+        Remove-Item -Recurse -Force $MinoDir
+    }
+    Write-Host "  克隆 openmino 默认工作区 (最新版本)..." -ForegroundColor Cyan
+    & git clone git@github.com:hAcKlyc/openmino.git $MinoDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  mino 克隆失败" -ForegroundColor Red
+        Write-Host "`n按回车键退出..." -ForegroundColor Yellow
+        Read-Host
+        exit 1
+    }
+    $MinoGit = Join-Path $MinoDir ".git"
+    if (Test-Path $MinoGit) {
+        Remove-Item -Recurse -Force $MinoGit
+    }
+    Write-Host "OK - mino 默认工作区已就绪" -ForegroundColor Green
+
+    Write-Host "`nStep 7/7: 初始化完成!" -ForegroundColor Blue
     Write-Host "`n=========================================" -ForegroundColor Green
     Write-Host "  开发环境准备就绪!" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Green
