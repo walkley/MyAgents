@@ -1166,7 +1166,6 @@ export default function App() {
                   onLaunchProject={handleLaunchProject}
                   isStarting={isLoading}
                   startError={error}
-                  onOpenSettings={handleOpenSettings}
                 />
               ) : tab.view === 'settings' ? (
                 <Settings

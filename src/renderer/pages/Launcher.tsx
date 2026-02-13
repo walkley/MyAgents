@@ -8,13 +8,12 @@ import { FolderOpen, Loader2, Plus } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
-import { apiGetJson } from '@/api/apiFetch';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import { BrandSection, QuickAccess, RecentTasks, WorkspaceCard } from '@/components/launcher';
+import { BrandSection, RecentTasks, WorkspaceCard } from '@/components/launcher';
 import { useConfig } from '@/hooks/useConfig';
 import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import {
@@ -25,17 +24,13 @@ import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { InitialMessage } from '@/types/tab';
 
-import type { SubscriptionStatus } from '@/types/subscription';
-
 interface LauncherProps {
     onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
     isStarting?: boolean;
     startError?: string | null;
-    /** Callback to open Settings tab with optional initial section */
-    onOpenSettings?: (initialSection?: string) => void;
 }
 
-export default function Launcher({ onLaunchProject, isStarting, startError: _startError, onOpenSettings }: LauncherProps) {
+export default function Launcher({ onLaunchProject, isStarting, startError: _startError }: LauncherProps) {
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -46,7 +41,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         isLoading,
         error: _error,
         addProject,
-        updateProject,
         removeProject,
         touchProject,
         apiKeys,
@@ -55,10 +49,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         updateConfig,
     } = useConfig();
     const [_addError, setAddError] = useState<string | null>(null);
-    const [activeMenuProjectId, setActiveMenuProjectId] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
     const [showLogs, setShowLogs] = useState(false);
-    const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
     const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
 
     // ===== Launcher-specific state for BrandSection =====
@@ -176,47 +168,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         touchProject, onLaunchProject, updateConfig]);
 
-    // Check subscription status on mount
-    useEffect(() => {
-        let retryCount = 0;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        let isMounted = true;
-        const maxRetries = 3;
-        const retryDelay = 1000;
-
-        const checkSubscription = () => {
-            apiGetJson<SubscriptionStatus>('/api/subscription/status')
-                .then((status) => {
-                    if (isMounted) setSubscriptionStatus(status);
-                })
-                .catch((err) => {
-                    if (!isMounted) return;
-                    if (retryCount < maxRetries) {
-                        retryCount++;
-                        timeoutId = setTimeout(checkSubscription, retryDelay);
-                    } else {
-                        console.error('[Launcher] Failed to check subscription:', err);
-                        setSubscriptionStatus({ available: false });
-                    }
-                });
-        };
-
-        checkSubscription();
-
-        return () => {
-            isMounted = false;
-            if (timeoutId) clearTimeout(timeoutId);
-        };
-    }, []);
-
     // Path input dialog state (for browser dev mode)
     const [pathDialogOpen, setPathDialogOpen] = useState(false);
     const [pendingFolderName, setPendingFolderName] = useState('');
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
-
-    const handleUpdateProject = async (updated: Project) => {
-        await updateProject(updated);
-    };
 
     const handleLaunch = (project: Project, sessionId?: string) => {
         setLaunchingProjectId(project.id);
@@ -375,11 +330,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         <RecentTasks projects={projects} onOpenTask={handleOpenTask} />
                     </div>
 
-                    {/* Quick Access */}
-                    <div className="flex-shrink-0 px-6">
-                        <QuickAccess onOpenSettings={onOpenSettings} />
-                    </div>
-
                     {/* Workspaces Header */}
                     <div className="flex flex-shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-4">
                         <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
@@ -434,25 +384,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                                 </button>
                             </div>
                         ) : (
-                            <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
                                 {projects.map((project) => (
                                     <WorkspaceCard
                                         key={project.id}
                                         project={project}
-                                        providers={providers}
-                                        apiKeys={apiKeys}
-                                        defaultProviderId={config.defaultProviderId}
                                         onLaunch={(p) => handleLaunch(p)}
-                                        onUpdateProject={handleUpdateProject}
                                         onRemove={handleRemoveProject}
-                                        isMenuOpen={activeMenuProjectId === project.id}
-                                        onMenuToggle={(open) =>
-                                            setActiveMenuProjectId(open ? project.id : null)
-                                        }
                                         isLoading={launchingProjectId === project.id && isStarting}
-                                        subscriptionAvailable={subscriptionStatus?.available}
-                                        onOpenSettings={onOpenSettings}
-                                        onRefreshProviders={refreshProviderData}
                                     />
                                 ))}
                             </div>
