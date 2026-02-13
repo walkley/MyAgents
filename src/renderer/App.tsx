@@ -150,27 +150,9 @@ export default function App() {
     // This ensures MCP and other global API calls work from any page
     void startGlobalSidecarSilent();
 
-    // Initialize bundled workspace (mino) on first launch
-    const initBundledWorkspace = async () => {
-      if (!isTauriEnvironment()) return;
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const result = await invoke<{ path: string; is_new: boolean }>('cmd_initialize_bundled_workspace');
-        if (result.is_new) {
-          const { addProject, loadAppConfig, saveAppConfig } = await import('@/config/configService');
-          await addProject(result.path);
-          const latest = await loadAppConfig();
-          if (!latest.defaultWorkspacePath) {
-            await saveAppConfig({ ...latest, defaultWorkspacePath: result.path });
-            // Notify useConfig to pick up the new defaultWorkspacePath
-            window.dispatchEvent(new Event(CUSTOM_EVENTS.CONFIG_CHANGED));
-          }
-        }
-      } catch (err) {
-        console.warn('[App] Bundled workspace init failed:', err);
-      }
-    };
-    void initBundledWorkspace();
+    // NOTE: Bundled workspace (mino) initialization is handled by
+    // ensureBundledWorkspace() inside useConfig.load(), which runs
+    // before loadProjects() to eliminate race conditions.
 
     // 方案 A: Rust 统一恢复 - 监听恢复事件（仅用于日志和 UI 反馈）
     // Rust 层会自动恢复任务，前端只需要监听结果

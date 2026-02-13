@@ -638,3 +638,50 @@ export async function syncProviderToProjectSettings(
 
     await saveProjectSettings(projectPath, { ...settings, env });
 }
+
+// ============= Bundled Workspace (mino) =============
+
+let _bundledWorkspaceChecked = false;
+
+/**
+ * Ensure bundled workspace (mino) is copied and registered in projects.
+ * Must run BEFORE loadProjects() on first load to avoid race conditions.
+ * Idempotent: only runs once per app session.
+ */
+export async function ensureBundledWorkspace(): Promise<boolean> {
+    if (_bundledWorkspaceChecked) return false;
+    _bundledWorkspaceChecked = true;
+
+    if (isBrowserDevMode()) return false;
+
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const result = await invoke<{ path: string; is_new: boolean }>('cmd_initialize_bundled_workspace');
+
+        if (result.is_new) {
+            // First time: mino was just copied to user directory
+            await addProject(result.path);
+            const config = await loadAppConfig();
+            if (!config.defaultWorkspacePath) {
+                await saveAppConfig({ ...config, defaultWorkspacePath: result.path });
+            }
+            console.log('[configService] Bundled workspace initialized:', result.path);
+            return true;
+        }
+
+        // Mino dir exists — ensure it's registered in projects (recovery from partial init)
+        const projects = await loadProjects();
+        const normalizedResult = result.path.replace(/\\/g, '/');
+        const found = projects.some(p => p.path.replace(/\\/g, '/') === normalizedResult);
+        if (!found) {
+            await addProject(result.path);
+            console.log('[configService] Bundled workspace recovered into projects:', result.path);
+            return true;
+        }
+
+        return false;
+    } catch (err) {
+        console.warn('[configService] ensureBundledWorkspace failed:', err);
+        return false;
+    }
+}

@@ -17,6 +17,7 @@ import {
     saveProviderVerifyStatus as saveProviderVerifyStatusService,
     saveCustomProvider as saveCustomProviderService,
     deleteCustomProvider as deleteCustomProviderService,
+    ensureBundledWorkspace,
 } from '@/config/configService';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
@@ -112,6 +113,10 @@ export function useConfig(): UseConfigResult {
         setError(null);
 
         try {
+            // Ensure bundled workspace (mino) is registered before loading projects.
+            // Runs once per session; eliminates race between mino init and loadProjects.
+            await ensureBundledWorkspace();
+
             const [loadedConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
                 loadAppConfig(),
                 loadProjects(),
