@@ -457,12 +457,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       console.log('[SimpleChatInput] processDroppedFiles called with', files.length, 'files:', files.map(f => f.name));
     }
 
-    if (!apiPost) {
-      console.error('[SimpleChatInput] apiPost not available');
-      toastRef.current.error('无法处理文件：API 未就绪');
-      return;
-    }
-
     // Separate images and non-images
     const imageFiles: File[] = [];
     const otherFiles: File[] = [];
@@ -475,13 +469,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
 
-    // Handle image files with the original addImage logic
+    // Handle image files with the original addImage logic (no API needed)
     for (const file of imageFiles) {
       addImage(file);
     }
 
     // Handle non-image files - upload to myagents_files and insert @references
     if (otherFiles.length > 0) {
+      if (!apiPost) {
+        console.error('[SimpleChatInput] apiPost not available for file upload');
+        toastRef.current.error('无法上传文件：API 未就绪，请在对话页面中操作');
+        return;
+      }
       try {
         // Convert files to base64 for JSON upload (works in Tauri)
         const base64Files = await Promise.all(

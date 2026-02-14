@@ -101,8 +101,7 @@ export default function TabBar({
     const sensors = useSensors(
         useSensor(PointerSensor, {
             activationConstraint: {
-                delay: 150,
-                tolerance: 5,
+                distance: 8,
             },
         }),
         useSensor(KeyboardSensor, {
