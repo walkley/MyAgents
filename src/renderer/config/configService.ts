@@ -44,6 +44,112 @@ const CONFIG_FILE = 'config.json';
 const PROJECTS_FILE = 'projects.json';
 const PROVIDERS_DIR = 'providers';
 
+// ============= Safe File I/O Utilities =============
+// Atomic write with .bak backup and multi-source recovery chain.
+// Prevents data loss from process crashes, file system errors, or truncated writes.
+
+/**
+ * Atomically write JSON data to a file with .bak backup.
+ *
+ * Steps:
+ * 1. Write to .tmp (if interrupted here, original file is untouched)
+ * 2. Rename current file → .bak (preserves last known good version)
+ * 3. Rename .tmp → target (atomic replacement)
+ *
+ * Crash safety:
+ * - After step 1 only: .tmp has new data, original intact → load original
+ * - After step 2: .bak has old data, .tmp has new data → load .bak
+ * - After step 3: target has new data, .bak has old data → load target
+ */
+async function safeWriteJson(filePath: string, data: unknown): Promise<void> {
+    const tmpPath = filePath + '.tmp';
+    const bakPath = filePath + '.bak';
+    const content = JSON.stringify(data, null, 2);
+
+    // 1. Write new data to .tmp
+    await writeTextFile(tmpPath, content);
+
+    // 2. Backup current file → .bak (best-effort)
+    try {
+        if (await exists(filePath)) {
+            // POSIX rename replaces destination atomically;
+            // on Windows, remove first to avoid EEXIST
+            if (await exists(bakPath)) {
+                await remove(bakPath);
+            }
+            await rename(filePath, bakPath);
+        }
+    } catch (bakErr) {
+        console.warn('[configService] Failed to create .bak backup:', bakErr);
+        // Continue — saving without backup is better than not saving at all
+    }
+
+    // 3. Atomic replace: .tmp → target
+    try {
+        await rename(tmpPath, filePath);
+    } catch (renameErr) {
+        // Rollback step 2: restore .bak → main so the main file always exists
+        try {
+            if (await exists(bakPath) && !(await exists(filePath))) {
+                await rename(bakPath, filePath);
+            }
+        } catch { /* best-effort rollback */ }
+        throw renameErr;
+    }
+}
+
+/**
+ * Load and parse a JSON file with automatic recovery from .bak and .tmp.
+ *
+ * Recovery chain (in order of trust):
+ * 1. Main file — the current version
+ * 2. .bak — the previous known-good version (created by safeWriteJson)
+ * 3. .tmp — an in-progress write that may contain newer data
+ *
+ * @param filePath  Path to the main JSON file
+ * @param validate  Optional validator; return false to reject the parsed data
+ * @returns The parsed data, or null if all sources fail
+ */
+async function safeLoadJson<T>(
+    filePath: string,
+    validate?: (data: unknown) => data is T,
+): Promise<T | null> {
+    const candidates = [
+        { path: filePath, label: 'main' },
+        { path: filePath + '.bak', label: 'bak' },
+        { path: filePath + '.tmp', label: 'tmp' },
+    ];
+
+    for (const { path, label } of candidates) {
+        if (!(await exists(path))) continue;
+        try {
+            const content = await readTextFile(path);
+            const parsed = JSON.parse(content);
+            if (validate && !validate(parsed)) {
+                console.error(`[configService] ${label} file has invalid structure, skipping`);
+                continue;
+            }
+            if (label !== 'main') {
+                console.warn(`[configService] Recovered data from .${label} file, restoring...`);
+                // Restore atomically via a dedicated intermediate file
+                // (.restore instead of .tmp to avoid clobbering a .tmp that might hold newer data)
+                if (label === 'tmp') {
+                    // Recovering from .tmp itself — just promote it to main
+                    await rename(path, filePath);
+                } else {
+                    const restorePath = filePath + '.restore';
+                    await writeTextFile(restorePath, content);
+                    await rename(restorePath, filePath);
+                }
+            }
+            return parsed as T;
+        } catch (err) {
+            console.error(`[configService] ${label} file corrupted or unreadable:`, err);
+        }
+    }
+    return null;
+}
+
 let configDirPath: string | null = null;
 
 async function getConfigDir(): Promise<string> {
@@ -69,6 +175,11 @@ async function ensureConfigDir(): Promise<void> {
 }
 
 // App Config Management
+
+function isValidAppConfig(data: unknown): data is AppConfig {
+    return data !== null && typeof data === 'object' && !Array.isArray(data);
+}
+
 export async function loadAppConfig(): Promise<AppConfig> {
     // Dynamic default: showDevTools defaults to true in dev mode, false in production
     const dynamicDefault: AppConfig = {
@@ -89,9 +200,8 @@ export async function loadAppConfig(): Promise<AppConfig> {
         const dir = await getConfigDir();
         const configPath = await join(dir, CONFIG_FILE);
 
-        if (await exists(configPath)) {
-            const content = await readTextFile(configPath);
-            const loaded = JSON.parse(content);
+        const loaded = await safeLoadJson<AppConfig>(configPath, isValidAppConfig);
+        if (loaded) {
             // Merge with dynamic defaults: if showDevTools was never explicitly set,
             // it will use the environment-based default
             return { ...dynamicDefault, ...loaded };
@@ -113,7 +223,7 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const configPath = await join(dir, CONFIG_FILE);
-        await writeTextFile(configPath, JSON.stringify(config, null, 2));
+        await safeWriteJson(configPath, config);
     } catch (error) {
         console.error('[configService] Failed to save app config:', error);
         throw error;
@@ -319,6 +429,12 @@ function sortProjectsByLastOpened(projects: Project[]): Project[] {
 }
 
 // Projects Management
+function isValidProjectsArray(data: unknown): data is Project[] {
+    return Array.isArray(data) && data.every(
+        (item) => item && typeof item === 'object' && 'id' in item && 'name' in item && 'path' in item,
+    );
+}
+
 export async function loadProjects(): Promise<Project[]> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading projects from localStorage');
@@ -331,32 +447,11 @@ export async function loadProjects(): Promise<Project[]> {
         const dir = await getConfigDir();
         const projectsPath = await join(dir, PROJECTS_FILE);
 
-        if (await exists(projectsPath)) {
-            const content = await readTextFile(projectsPath);
-            console.log('[configService] Loaded projects:', content.slice(0, 100));
-            try {
-                const projects = JSON.parse(content);
-                return sortProjectsByLastOpened(projects);
-            } catch (parseError) {
-                // JSON corrupted — try recovering from .tmp (atomic write intermediate)
-                console.error('[configService] projects.json corrupted, attempting .tmp recovery:', parseError);
-                const tmpPath = projectsPath + '.tmp';
-                if (await exists(tmpPath)) {
-                    try {
-                        const tmpContent = await readTextFile(tmpPath);
-                        const recovered = JSON.parse(tmpContent);
-                        console.warn('[configService] Recovered projects from .tmp file');
-                        // Restore the good data
-                        await writeTextFile(projectsPath, tmpContent);
-                        return sortProjectsByLastOpened(recovered);
-                    } catch (tmpError) {
-                        console.error('[configService] .tmp recovery also failed:', tmpError);
-                    }
-                }
-                return [];
-            }
+        const projects = await safeLoadJson<Project[]>(projectsPath, isValidProjectsArray);
+        if (projects) {
+            return sortProjectsByLastOpened(projects);
         }
-        console.log('[configService] No projects file found, returning empty array');
+        console.log('[configService] No valid projects file found, returning empty array');
         return [];
     } catch (error) {
         console.error('[configService] Failed to load projects:', error);
@@ -374,11 +469,7 @@ export async function saveProjects(projects: Project[]): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const projectsPath = await join(dir, PROJECTS_FILE);
-        const tmpPath = projectsPath + '.tmp';
-        console.log('[configService] Saving projects to:', projectsPath);
-        // Atomic write: write to .tmp first, then rename (POSIX rename is atomic)
-        await writeTextFile(tmpPath, JSON.stringify(projects, null, 2));
-        await rename(tmpPath, projectsPath);
+        await safeWriteJson(projectsPath, projects);
         console.log('[configService] Projects saved successfully');
     } catch (error) {
         console.error('[configService] Failed to save projects:', error);
@@ -578,7 +669,7 @@ export async function saveCustomProvider(provider: Provider): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const providerPath = await join(dir, PROVIDERS_DIR, `${provider.id}.json`);
-        await writeTextFile(providerPath, JSON.stringify(provider, null, 2));
+        await safeWriteJson(providerPath, provider);
         if (isDebugMode()) {
             console.log('[configService] Saved custom provider:', provider.id);
         }
@@ -655,7 +746,7 @@ export async function saveProjectSettings(projectPath: string, settings: Project
             await mkdir(settingsDir, { recursive: true });
         }
 
-        await writeTextFile(settingsPath, JSON.stringify(settings, null, 2));
+        await safeWriteJson(settingsPath, settings);
         console.log('[configService] Saved project settings to:', settingsPath);
     } catch (error) {
         console.error('[configService] Failed to save project settings:', error);
