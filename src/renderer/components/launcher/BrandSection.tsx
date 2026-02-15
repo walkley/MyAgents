@@ -4,7 +4,7 @@
  * with floating workspace selector above it
  */
 
-import { useCallback } from 'react';
+import { memo, useCallback } from 'react';
 
 import SimpleChatInput, { type ImageAttachment } from '@/components/SimpleChatInput';
 import WorkspaceSelector from './WorkspaceSelector';
@@ -38,7 +38,7 @@ interface BrandSectionProps {
     onRefreshProviders?: () => void;
 }
 
-export default function BrandSection({
+export default memo(function BrandSection({
     projects,
     selectedProject,
     defaultWorkspacePath,
@@ -116,4 +116,4 @@ export default function BrandSection({
             </div>
         </section>
     );
-}
+});

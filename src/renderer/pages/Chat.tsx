@@ -695,6 +695,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (currentProject) {
       void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.providerId to avoid recreating on unrelated project changes
   }, [currentProject?.id, currentProject?.providerId, patchProject, providers]);
 
   // Handle model change with analytics tracking and project write-back
@@ -711,6 +712,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (currentProject) {
       void patchProject(currentProject.id, { model });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [selectedModel, currentProject?.id, patchProject]);
 
   // Handle permission mode change with project write-back
@@ -719,6 +721,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (currentProject) {
       void patchProject(currentProject.id, { permissionMode: mode });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [currentProject?.id, patchProject]);
 
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
@@ -843,6 +846,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [handleForceExecuteQueued]
   );
 
+  // Handler for selecting a session from history dropdown
+  const handleSelectSession = useCallback((id: string) => {
+    track('session_switch');
+    if (onSwitchSession) {
+      onSwitchSession(id);
+    } else {
+      if (cronState.task?.status === 'running') {
+        console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
+        return;
+      }
+      void loadSession(id);
+    }
+  }, [onSwitchSession, cronState.task?.status, loadSession]);
+
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
   // If AI is idle, falls back to resetSession (reuses Sidecar).
@@ -917,21 +934,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <SessionHistoryDropdown
                 agentDir={agentDir}
                 currentSessionId={sessionId}
-                onSelectSession={(id) => {
-                  // Note: If cron task is running, App.tsx handleSwitchSession will create a new tab
-                  track('session_switch');
-                  // Use Session singleton logic via App.tsx if available
-                  if (onSwitchSession) {
-                    onSwitchSession(id);
-                  } else {
-                    // Fallback: direct load in current Tab (only if no cron task running)
-                    if (cronState.task?.status === 'running') {
-                      console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
-                      return;
-                    }
-                    void loadSession(id);
-                  }
-                }}
+                onSelectSession={handleSelectSession}
                 onDeleteCurrentSession={handleNewSession}
                 isOpen={showHistory}
                 onClose={() => setShowHistory(false)}

@@ -3,7 +3,7 @@
  * Single-click to launch, right-click context menu for remove
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { FolderOpen, Loader2, Trash2 } from 'lucide-react';
 
 import type { Project } from '@/config/types';
@@ -26,7 +26,7 @@ interface WorkspaceCardProps {
     isLoading?: boolean;
 }
 
-export default function WorkspaceCard({
+export default memo(function WorkspaceCard({
     project,
     onLaunch,
     onRemove,
@@ -121,4 +121,4 @@ export default function WorkspaceCard({
             )}
         </>
     );
-}
+});

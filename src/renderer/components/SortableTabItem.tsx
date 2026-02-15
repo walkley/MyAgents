@@ -60,7 +60,13 @@ export default function SortableTabItem({
                     : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]/60 hover:text-[var(--ink)]'
                 }
             `}
-            onClick={onSelect}
+            onMouseDown={(e) => {
+                // Select tab immediately on pointer press (not click/release)
+                // This fires before dnd-kit's PointerSensor can intercept
+                if (e.button !== 0) return; // Left click only
+                if ((e.target as HTMLElement).closest('button')) return; // Skip close button
+                onSelect();
+            }}
             {...attributes}
         >
             {/* Tab title — drag handle is bound here, not on the entire tab */}

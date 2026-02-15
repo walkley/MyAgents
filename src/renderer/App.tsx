@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
@@ -24,14 +24,110 @@ import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 
+// ============================================================
+// MemoizedTabContent — prevents re-rendering tabs whose props haven't changed.
+// When switching tabs, only the newly active and previously active tabs re-render.
+// ============================================================
+
+interface TabContentProps {
+  tab: Tab;
+  isActive: boolean;
+  isLoading: boolean;
+  error: string | null;
+  settingsInitialSection: string | undefined;
+  // Launcher callbacks
+  onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
+  // Chat callbacks
+  onBack: () => Promise<void>;
+  onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
+  onNewSession: (tabId: string) => Promise<boolean>;
+  onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
+  onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
+  onClearInitialMessage: (tabId: string) => void;
+  // Settings callbacks
+  onSettingsSectionChange: () => void;
+  updateReady: boolean;
+  updateVersion: string | null;
+  updateChecking: boolean;
+  updateDownloading: boolean;
+  onCheckForUpdate: () => Promise<'up-to-date' | 'downloading' | 'error'>;
+  onRestartAndUpdate: () => void;
+}
+
+const MemoizedTabContent = memo(function TabContent({
+  tab, isActive, isLoading, error,
+  onLaunchProject, onBack, onSwitchSession, onNewSession,
+  onUpdateGenerating, onUpdateSessionId, onClearInitialMessage,
+  settingsInitialSection, onSettingsSectionChange,
+  updateReady, updateVersion, updateChecking, updateDownloading,
+  onCheckForUpdate, onRestartAndUpdate,
+}: TabContentProps) {
+  return (
+    <div className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}>
+      {tab.view === 'launcher' ? (
+        <Launcher
+          onLaunchProject={onLaunchProject}
+          isStarting={isLoading}
+          startError={error}
+        />
+      ) : tab.view === 'settings' ? (
+        <Settings
+          initialSection={settingsInitialSection}
+          onSectionChange={onSettingsSectionChange}
+          updateReady={updateReady}
+          updateVersion={updateVersion}
+          updateChecking={updateChecking}
+          updateDownloading={updateDownloading}
+          onCheckForUpdate={onCheckForUpdate}
+          onRestartAndUpdate={onRestartAndUpdate}
+        />
+      ) : (
+        <TabProvider
+          tabId={tab.id}
+          agentDir={tab.agentDir ?? ''}
+          sessionId={tab.sessionId}
+          isActive={isActive}
+          onGeneratingChange={(isGenerating) => onUpdateGenerating(tab.id, isGenerating)}
+          onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
+        >
+          <Chat
+            onBack={onBack}
+            onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
+            onNewSession={() => onNewSession(tab.id)}
+            initialMessage={tab.initialMessage}
+            onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
+          />
+        </TabProvider>
+      )}
+    </div>
+  );
+}, (prev, next) => {
+  // Return true = skip re-render
+  // All callbacks are stable (via tabsRef/activeTabIdRef), so we only compare data props
+  return (
+    prev.tab === next.tab &&
+    prev.isActive === next.isActive &&
+    prev.isLoading === next.isLoading &&
+    prev.error === next.error &&
+    prev.settingsInitialSection === next.settingsInitialSection &&
+    prev.updateReady === next.updateReady &&
+    prev.updateVersion === next.updateVersion &&
+    prev.updateChecking === next.updateChecking &&
+    prev.updateDownloading === next.updateDownloading
+  );
+});
+
 export default function App() {
   // Auto-update state (silent background updates)
   const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate } = useUpdater();
 
-  // Stable callback for Settings prop — avoids inline arrow creating new ref every render
+  // Stable callback for Settings prop — ref pattern ensures memo comparator correctness
+  const restartAndUpdateRef = useRef(restartAndUpdate);
+  restartAndUpdateRef.current = restartAndUpdate;
+
   const handleRestartAndUpdate = useCallback(() => {
-    void restartAndUpdate();
-  }, [restartAndUpdate]);
+    void restartAndUpdateRef.current();
+  }, []);
 
   // App config for tray behavior
   const { config, reload: reloadConfig } = useConfig();
@@ -52,6 +148,13 @@ export default function App() {
   // Multi-tab state
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
   const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+
+  // Refs for stable callback access (avoids re-creating callbacks when tabs/activeTabId change)
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
 
   // Per-tab loading state (keyed by tabId)
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
@@ -266,7 +369,7 @@ export default function App() {
   // - Rust HashMap keys are upgraded from "pending-xxx" to real session ID
   const updateTabSessionId = useCallback(async (tabId: string, newSessionId: string) => {
     // Find the current tab to get the old sessionId
-    const currentTab = tabs.find(t => t.id === tabId);
+    const currentTab = tabsRef.current.find(t => t.id === tabId);
     const oldSessionId = currentTab?.sessionId;
 
     console.log(`[App] Tab ${tabId} sessionId updating: ${oldSessionId} -> ${newSessionId}`);
@@ -282,12 +385,12 @@ export default function App() {
     setTabs(prev => prev.map(t =>
       t.id === tabId ? { ...t, sessionId: newSessionId } : t
     ));
-  }, [tabs]);
+  }, []);
 
   // Perform the actual tab close operation (pure function, no confirmation)
   // UI updates are immediate; resource cleanup runs in background (non-blocking)
   const performCloseTab = useCallback((tabId: string) => {
-    const currentTabs = tabs;
+    const currentTabs = tabsRef.current;
 
     // Double-check: tab might have been removed
     const tab = currentTabs.find(t => t.id === tabId);
@@ -314,7 +417,7 @@ export default function App() {
       const newTabs = currentTabs.filter((t) => t.id !== tabId);
 
       // If closing the active tab, switch to the last remaining tab
-      if (tabId === activeTabId && newTabs.length > 0) {
+      if (tabId === activeTabIdRef.current && newTabs.length > 0) {
         setActiveTabId(newTabs[newTabs.length - 1].id);
       }
 
@@ -377,11 +480,11 @@ export default function App() {
 
     // Fire and forget - cleanup runs in background
     void cleanupResources();
-  }, [tabs, activeTabId]);
+  }, []);
 
   // Close tab with confirmation if generating (shows custom dialog)
   const closeTabWithConfirmation = useCallback((tabId: string) => {
-    const tab = tabs.find(t => t.id === tabId);
+    const tab = tabsRef.current.find(t => t.id === tabId);
 
     // If generating, show confirmation dialog
     if (tab?.isGenerating) {
@@ -394,22 +497,26 @@ export default function App() {
 
     // Otherwise, close directly
     void performCloseTab(tabId);
-  }, [tabs, performCloseTab]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
+  }, []);
 
   // Close current active tab (for Cmd+W)
   const closeCurrentTab = useCallback(() => {
-    if (!activeTabId) return;
+    const currentActiveTabId = activeTabIdRef.current;
+    if (!currentActiveTabId) return;
 
-    const activeTab = tabs.find(t => t.id === activeTabId);
+    const currentTabs = tabsRef.current;
+    const activeTab = currentTabs.find(t => t.id === currentActiveTabId);
 
     // Special case: If only one launcher tab, do nothing
-    if (tabs.length === 1 && activeTab?.view === 'launcher') {
+    if (currentTabs.length === 1 && activeTab?.view === 'launcher') {
       return;
     }
 
     // Multiple tabs OR last tab is chat/settings: use the unified confirmation logic
-    closeTabWithConfirmation(activeTabId);
-  }, [activeTabId, tabs, closeTabWithConfirmation]);
+    closeTabWithConfirmation(currentActiveTabId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
+  }, []);
 
   // Keyboard shortcuts: Cmd+T (new tab), Cmd+W (close tab)
   useEffect(() => {
@@ -422,7 +529,7 @@ export default function App() {
       if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
         // New tab
-        if (tabs.length < MAX_TABS) {
+        if (tabsRef.current.length < MAX_TABS) {
           const newTab = createNewTab();
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);
@@ -435,7 +542,8 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [tabs, closeCurrentTab]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
+  }, []);
 
   /**
    * Launch a project with Session Singleton Architecture
@@ -452,6 +560,7 @@ export default function App() {
     sessionId?: string,
     initialMessage?: InitialMessage
   ) => {
+    const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
 
     // Per-tab launch guard: prevent concurrent launches on the same tab
@@ -478,7 +587,7 @@ export default function App() {
       // ========================================
       if (sessionId) {
         // Find if session is already open in any existing Tab
-        const existingTab = tabs.find(t => t.sessionId === sessionId);
+        const existingTab = tabsRef.current.find(t => t.sessionId === sessionId);
         if (existingTab) {
           console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
           setActiveTabId(existingTab.id);
@@ -504,7 +613,7 @@ export default function App() {
           const currentTabCronTask = await getTabCronTask(activeTabId);
           if (currentTabCronTask && currentTabCronTask.status === 'running') {
             // Current Tab has running cron task, need new Tab
-            if (tabs.length >= MAX_TABS) {
+            if (tabsRef.current.length >= MAX_TABS) {
               setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
               setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
               launchingTabRef.current = null;
@@ -556,7 +665,7 @@ export default function App() {
       if (currentTabCronTask && currentTabCronTask.status === 'running') {
         console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
-        if (tabs.length >= MAX_TABS) {
+        if (tabsRef.current.length >= MAX_TABS) {
           setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
           setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
           launchingTabRef.current = null;
@@ -576,7 +685,7 @@ export default function App() {
       console.log(`[App] Scenario 4: Normal launch - tab ${targetTabId}, project: ${project.path}, sessionId: ${sessionId}`);
 
       // If current tab has an active session, release it before launching new one
-      const currentTabForLaunch = tabs.find(t => t.id === targetTabId);
+      const currentTabForLaunch = tabsRef.current.find(t => t.id === targetTabId);
       const oldSessionForLaunch = currentTabForLaunch?.sessionId;
       if (oldSessionForLaunch) {
         const bgResult = await startBackgroundCompletion(oldSessionForLaunch);
@@ -655,7 +764,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
     }
-  }, [activeTabId, tabs]);
+  }, []);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -670,7 +779,7 @@ export default function App() {
    */
   const handleSwitchSession = useCallback(async (tabId: string, sessionId: string) => {
     // Scenario 1: Session already open in a Tab → Jump to that Tab
-    const existingTab = tabs.find(t => t.sessionId === sessionId);
+    const existingTab = tabsRef.current.find(t => t.sessionId === sessionId);
     if (existingTab) {
       console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
       setActiveTabId(existingTab.id);
@@ -683,7 +792,7 @@ export default function App() {
       console.log(`[App] handleSwitchSession Scenario 2: Session ${sessionId} has cron task ${activation.task_id}`);
 
       // Get current tab info to find agentDir
-      const currentTab = tabs.find(t => t.id === tabId);
+      const currentTab = tabsRef.current.find(t => t.id === tabId);
       if (!currentTab?.agentDir) {
         console.error('[App] Cannot switch: current tab has no agentDir');
         return;
@@ -727,14 +836,14 @@ export default function App() {
       console.log(`[App] handleSwitchSession Scenario 3: Current tab ${tabId} has cron task, creating new tab`);
 
       // Check max tabs limit
-      if (tabs.length >= MAX_TABS) {
+      if (tabsRef.current.length >= MAX_TABS) {
         console.warn('[App] Cannot create new tab: max tabs reached');
         return;
       }
 
       // Get agentDir from current tab
-      const currentTab = tabs.find(t => t.id === tabId);
-      if (!currentTab?.agentDir) {
+      const currentTabForScenario3 = tabsRef.current.find(t => t.id === tabId);
+      if (!currentTabForScenario3?.agentDir) {
         console.error('[App] Cannot switch: current tab has no agentDir');
         return;
       }
@@ -746,7 +855,7 @@ export default function App() {
 
       try {
         // Ensure Sidecar for new Tab as owner of this Session
-        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', newTab.id);
+        const result = await ensureSessionSidecar(sessionId, currentTabForScenario3.agentDir, 'tab', newTab.id);
         console.log(`[App] New tab ${newTab.id} Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
         // Update new tab state
@@ -755,10 +864,10 @@ export default function App() {
             t.id === newTab.id
               ? {
                 ...t,
-                agentDir: currentTab.agentDir,
+                agentDir: currentTabForScenario3.agentDir,
                 sessionId,
                 view: 'chat',
-                title: getFolderName(currentTab.agentDir ?? ''),
+                title: getFolderName(currentTabForScenario3.agentDir ?? ''),
               }
               : t
           )
@@ -786,13 +895,13 @@ export default function App() {
     console.log(`[App] handleSwitchSession Scenario 4: Switching tab ${tabId} to session ${sessionId}`);
 
     // Get current tab info
-    const currentTab = tabs.find(t => t.id === tabId);
-    if (!currentTab?.agentDir) {
+    const currentTabForScenario4 = tabsRef.current.find(t => t.id === tabId);
+    if (!currentTabForScenario4?.agentDir) {
       console.error('[App] Cannot switch: current tab has no agentDir');
       return;
     }
 
-    const oldSessionId = currentTab.sessionId;
+    const oldSessionId = currentTabForScenario4.sessionId;
 
     try {
       // First, cancel any background completion on the TARGET session (user reconnecting)
@@ -810,8 +919,8 @@ export default function App() {
           await deactivateSession(oldSessionId);
 
           // Create/reuse Sidecar for the target session
-          const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-          await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+          const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
+          await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
           console.log(`[App] Created new Sidecar for session ${sessionId} on port ${result.port}`);
         } else {
           // AI is idle → check if target session already has a sidecar (e.g., from BG completion)
@@ -824,8 +933,8 @@ export default function App() {
             await stopSseProxy(tabId);
             await releaseSessionSidecar(oldSessionId, 'tab', tabId);
             await deactivateSession(oldSessionId);
-            const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-            await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+            const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
+            await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
           } else {
             // No existing sidecar for target → hot-swap via upgradeSessionId (efficient, no new process)
             const upgraded = await upgradeSessionId(oldSessionId, sessionId);
@@ -834,26 +943,26 @@ export default function App() {
               await deactivateSession(oldSessionId);
               const port = await getSessionPort(sessionId);
               if (port !== null) {
-                await activateSession(sessionId, tabId, null, port, currentTab.agentDir, false);
+                await activateSession(sessionId, tabId, null, port, currentTabForScenario4.agentDir, false);
                 console.log(`[App] Session ${sessionId} took over Sidecar from ${oldSessionId} on port ${port}`);
               } else {
                 console.warn(`[App] Port not found after upgrade, creating new Sidecar`);
-                const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-                await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+                const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
+                await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
               }
             } else {
               console.log(`[App] Sidecar upgrade failed, creating new Sidecar for session ${sessionId}`);
               await deactivateSession(oldSessionId);
-              const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-              await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+              const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
+              await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
             }
           }
         }
       } else {
         // No old Session → Create new Sidecar
         console.log(`[App] No previous session, creating new Sidecar for session ${sessionId}`);
-        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', tabId);
-        await activateSession(sessionId, tabId, null, result.port, currentTab.agentDir, false);
+        const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
+        await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
       }
 
       // Update UI state - TabProvider will detect sessionId change and call loadSession()
@@ -868,13 +977,14 @@ export default function App() {
     } catch (error) {
       console.error('[App] Failed to switch session:', error);
     }
-  }, [tabs]);
+  }, []);
 
   const handleBackToLauncher = useCallback(async () => {
+    const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
 
     // Get current tab to access sessionId
-    const currentTab = tabs.find(t => t.id === activeTabId);
+    const currentTab = tabsRef.current.find(t => t.id === activeTabId);
 
     // Step 1: Try to start background completion if AI is running
     if (currentTab?.sessionId) {
@@ -923,7 +1033,7 @@ export default function App() {
           : t
       )
     );
-  }, [activeTabId, tabs]);
+  }, []);
 
   /**
    * Handle "New Session" from Chat component.
@@ -931,7 +1041,7 @@ export default function App() {
    * Returns true if handled (Chat should NOT call resetSession), false if AI is idle (Chat falls back to resetSession).
    */
   const handleNewSession = useCallback(async (tabId: string): Promise<boolean> => {
-    const currentTab = tabs.find(t => t.id === tabId);
+    const currentTab = tabsRef.current.find(t => t.id === tabId);
     if (!currentTab?.sessionId || !currentTab?.agentDir) {
       return false;
     }
@@ -972,7 +1082,7 @@ export default function App() {
       console.error('[App] handleNewSession failed:', error);
       return false;
     }
-  }, [tabs]);
+  }, []);
 
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
@@ -980,16 +1090,19 @@ export default function App() {
 
   const handleCloseTab = useCallback((tabId: string) => {
     // Special case: If only one launcher tab, do nothing
-    const tab = tabs.find(t => t.id === tabId);
-    if (tabs.length === 1 && tab?.view === 'launcher') {
+    const currentTabs = tabsRef.current;
+    const tab = currentTabs.find(t => t.id === tabId);
+    if (currentTabs.length === 1 && tab?.view === 'launcher') {
       return;
     }
 
     closeTabWithConfirmation(tabId);
-  }, [tabs, closeTabWithConfirmation]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
+  }, []);
 
   const handleNewTab = useCallback(() => {
-    if (tabs.length >= MAX_TABS) {
+    const currentLength = tabsRef.current.length;
+    if (currentLength >= MAX_TABS) {
       console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
       return;
     }
@@ -998,8 +1111,8 @@ export default function App() {
     setActiveTabId(newTab.id);
 
     // Track tab_new event
-    track('tab_new', { tab_count: tabs.length + 1 });
-  }, [tabs.length]);
+    track('tab_new', { tab_count: currentLength + 1 });
+  }, []);
 
   // Handle tab reordering via drag and drop
   const handleReorderTabs = useCallback((activeId: string, overId: string) => {
@@ -1021,7 +1134,8 @@ export default function App() {
     setSettingsInitialSection(initialSection);
 
     // Check if there's already a Settings tab
-    const existingSettingsTab = tabs.find((t) => t.view === 'settings');
+    const currentTabs = tabsRef.current;
+    const existingSettingsTab = currentTabs.find((t) => t.view === 'settings');
     if (existingSettingsTab) {
       // Switch to existing Settings tab
       setActiveTabId(existingSettingsTab.id);
@@ -1029,7 +1143,7 @@ export default function App() {
     }
 
     // Create new Settings tab
-    if (tabs.length >= MAX_TABS) {
+    if (currentTabs.length >= MAX_TABS) {
       console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
       return;
     }
@@ -1046,7 +1160,7 @@ export default function App() {
     setActiveTabId(newTab.id);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, [tabs]);
+  }, []);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
@@ -1057,7 +1171,8 @@ export default function App() {
     return () => {
       window.removeEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     };
-  }, [handleOpenSettings]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callback stabilized via tabsRef
+  }, []);
 
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
@@ -1065,7 +1180,7 @@ export default function App() {
       const { targetTabId, sessionId } = event.detail;
       console.log(`[App] Jump to tab ${targetTabId} for session ${sessionId}`);
       // Check if target Tab exists
-      const targetTab = tabs.find(t => t.id === targetTabId);
+      const targetTab = tabsRef.current.find(t => t.id === targetTabId);
       if (targetTab) {
         setActiveTabId(targetTabId);
       } else {
@@ -1076,12 +1191,17 @@ export default function App() {
     return () => {
       window.removeEventListener(CUSTOM_EVENTS.JUMP_TO_TAB, handleJumpToTab as EventListener);
     };
-  }, [tabs]);
+  }, []);
 
   // Note: CRON_TASK_STOPPED event listener removed
   // With Session-centric Sidecar (Owner model), stopping a cron task only releases
   // the CronTask owner. If Tab still owns the Sidecar, it continues running.
   // No SSE reconnection or Sidecar restart is needed.
+
+  // Stable callback for Settings onSectionChange — avoids inline arrow creating new ref every render
+  const handleSettingsSectionChange = useCallback(() => {
+    setSettingsInitialSection(undefined);
+  }, []);
 
   // System tray event handling (minimize to tray, exit confirmation)
   useTrayEvents({
@@ -1132,56 +1252,30 @@ export default function App() {
 
       {/* Tab content - only Chat views need TabProvider for sidecar communication */}
       <div className="relative flex-1 overflow-hidden">
-        {tabs.map((tab) => {
-          const isLoading = loadingTabs[tab.id] ?? false;
-          const error = tabErrors[tab.id] ?? null;
-          const isActive = tab.id === activeTabId;
-
-          return (
-            <div
-              key={tab.id}
-              className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}
-            >
-              {/* Launcher and Settings use Global Sidecar - no TabProvider needed */}
-              {tab.view === 'launcher' ? (
-                <Launcher
-                  onLaunchProject={handleLaunchProject}
-                  isStarting={isLoading}
-                  startError={error}
-                />
-              ) : tab.view === 'settings' ? (
-                <Settings
-                  initialSection={settingsInitialSection}
-                  onSectionChange={() => setSettingsInitialSection(undefined)}
-                  updateReady={updateReady}
-                  updateVersion={updateVersion}
-                  updateChecking={updateChecking}
-                  updateDownloading={updateDownloading}
-                  onCheckForUpdate={checkForUpdate}
-                  onRestartAndUpdate={handleRestartAndUpdate}
-                />
-              ) : (
-                /* Chat views use Tab Sidecar - wrapped in TabProvider */
-                <TabProvider
-                  tabId={tab.id}
-                  agentDir={tab.agentDir ?? ''}
-                  sessionId={tab.sessionId}
-                  isActive={isActive}
-                  onGeneratingChange={(isGenerating) => updateTabGenerating(tab.id, isGenerating)}
-                  onSessionIdChange={(newSessionId) => updateTabSessionId(tab.id, newSessionId)}
-                >
-                  <Chat
-                    onBack={handleBackToLauncher}
-                    onSwitchSession={(sessionId) => handleSwitchSession(tab.id, sessionId)}
-                    onNewSession={() => handleNewSession(tab.id)}
-                    initialMessage={tab.initialMessage}
-                    onInitialMessageConsumed={() => clearInitialMessage(tab.id)}
-                  />
-                </TabProvider>
-              )}
-            </div>
-          );
-        })}
+        {tabs.map((tab) => (
+          <MemoizedTabContent
+            key={tab.id}
+            tab={tab}
+            isActive={tab.id === activeTabId}
+            isLoading={loadingTabs[tab.id] ?? false}
+            error={tabErrors[tab.id] ?? null}
+            onLaunchProject={handleLaunchProject}
+            onBack={handleBackToLauncher}
+            onSwitchSession={handleSwitchSession}
+            onNewSession={handleNewSession}
+            onUpdateGenerating={updateTabGenerating}
+            onUpdateSessionId={updateTabSessionId}
+            onClearInitialMessage={clearInitialMessage}
+            settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
+            onSettingsSectionChange={handleSettingsSectionChange}
+            updateReady={updateReady}
+            updateVersion={updateVersion}
+            updateChecking={updateChecking}
+            updateDownloading={updateDownloading}
+            onCheckForUpdate={checkForUpdate}
+            onRestartAndUpdate={handleRestartAndUpdate}
+          />
+        ))}
       </div>
 
       {/* Close confirmation dialog */}

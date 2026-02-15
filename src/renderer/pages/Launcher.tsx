@@ -173,7 +173,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [pendingFolderName, setPendingFolderName] = useState('');
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
 
-    const handleLaunch = (project: Project, sessionId?: string) => {
+    const handleLaunch = useCallback((project: Project, sessionId?: string) => {
         setLaunchingProjectId(project.id);
         const providerId = project.providerId ?? config.defaultProviderId;
         const provider = providers.find((p) => p.id === providerId) ?? providers[0];
@@ -182,11 +182,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             console.warn('[Launcher] Failed to update lastOpened:', err);
         });
         onLaunchProject(project, provider, sessionId);
-    };
+    }, [config.defaultProviderId, providers, touchProject, onLaunchProject]);
 
-    const handleOpenTask = (session: SessionMetadata, project: Project) => {
+    const handleOpenTask = useCallback((session: SessionMetadata, project: Project) => {
         handleLaunch(project, session.id);
-    };
+    }, [handleLaunch]);
 
     const handleAddProject = async () => {
         setAddError(null);
@@ -389,7 +389,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                                     <WorkspaceCard
                                         key={project.id}
                                         project={project}
-                                        onLaunch={(p) => handleLaunch(p)}
+                                        onLaunch={handleLaunch}
                                         onRemove={handleRemoveProject}
                                         isLoading={launchingProjectId === project.id && isStarting}
                                     />

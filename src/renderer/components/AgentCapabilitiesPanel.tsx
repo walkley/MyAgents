@@ -11,7 +11,7 @@
  * - Right-click Skills/Commands: settings
  */
 import { Bot, ChevronDown, ChevronRight, Sparkles, Terminal } from 'lucide-react';
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
@@ -94,7 +94,7 @@ function ItemTooltip({ scope, description, children }: {
     );
 }
 
-export default function AgentCapabilitiesPanel({
+export default memo(function AgentCapabilitiesPanel({
     enabledAgents,
     enabledSkills,
     enabledCommands,
@@ -322,4 +322,4 @@ export default function AgentCapabilitiesPanel({
             )}
         </div>
     );
-}
+});
