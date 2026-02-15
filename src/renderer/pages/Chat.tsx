@@ -888,7 +888,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
       void loadSession(id);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- cronStateRef is a ref (stable)
   }, [onSwitchSession, loadSession]);
 
   // Internal handler for starting a new session

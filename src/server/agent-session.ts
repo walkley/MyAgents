@@ -2703,6 +2703,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     resolveTermination = resolve;
   });
 
+  // Declared outside try so finally can clean up
+  let startupTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
     // Determine resume: explicit resumeSessionId takes priority, then safety-net flag.
@@ -2832,10 +2835,40 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
 
+    // Startup timeout: if no SDK message arrives within 60s, abort
+    const STARTUP_TIMEOUT_MS = 60_000;
+    let firstMessageReceived = false;
+
+    startupTimeoutId = setTimeout(() => {
+        if (!firstMessageReceived && !shouldAbortSession) {
+            console.error(`[agent] Startup timeout: no SDK message in ${STARTUP_TIMEOUT_MS / 1000}s`);
+            shouldAbortSession = true;
+            if (!isPreWarming) {
+                broadcast('chat:agent-error', {
+                    message: 'Agent 启动超时，请重试。如果持续出现，请检查网络连接和 API 配置。'
+                });
+                broadcast('chat:message-error', 'Agent 启动超时');
+            }
+            // Setting shouldAbortSession alone is NOT enough — the for-await loop
+            // blocks on querySession.next() and the flag check (line ~2911) only runs
+            // AFTER a message arrives. We must call interrupt() to force the SDK
+            // subprocess to exit, which completes the async generator and unblocks for-await.
+            if (querySession) {
+                querySession.interrupt().catch(err => {
+                    console.warn('[agent] Startup timeout: interrupt failed:', err);
+                });
+            }
+        }
+    }, STARTUP_TIMEOUT_MS);
+
     let messageCount = 0;
 
     for await (const sdkMessage of querySession) {
       messageCount++;
+      if (!firstMessageReceived) {
+          firstMessageReceived = true;
+          clearTimeout(startupTimeoutId);
+      }
       console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}`);
       try {
         const line = `${new Date().toISOString()} ${JSON.stringify(sdkMessage)}`;
@@ -3404,6 +3437,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       setSessionState('error');
     }
   } finally {
+    clearTimeout(startupTimeoutId);
     const wasPreWarming = isPreWarming;
     isPreWarming = false;
     isProcessing = false;
