@@ -84,7 +84,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const toast = useToast();
 
   // Get config to find current project provider
-  const { config, projects, providers, updateProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
+  const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
   const currentProvider = currentProject?.providerId
     ? providers.find((p) => p.id === currentProject.providerId)
@@ -97,9 +97,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
   const [workspaceRefreshKey, _setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    currentProject?.permissionMode ?? 'auto'
+  );
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
-    currentProvider?.primaryModel
+    currentProject?.model ?? currentProvider?.primaryModel
   );
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
@@ -576,8 +578,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
   }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
 
-  // Sync selectedModel when provider changes
+  // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
+  const providerInitRef = useRef(true);
   useEffect(() => {
+    if (providerInitRef.current) {
+      providerInitRef.current = false;
+      return;
+    }
     if (currentProvider?.primaryModel) {
       setSelectedModel(currentProvider.primaryModel);
     }
@@ -683,13 +690,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Track provider_switch event
     track('provider_switch', { provider_id: providerId });
 
-    // Update project's provider (via useConfig)
+    // Update project's provider and reset model to new provider's primary model
+    const newProvider = providers.find(p => p.id === providerId);
     if (currentProject) {
-      void updateProject({ ...currentProject, providerId });
+      void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
-  }, [currentProject, updateProject]);
+  }, [currentProject?.id, currentProject?.providerId, patchProject, providers]);
 
-  // Handle model change with analytics tracking
+  // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
     // Skip if selecting the same model
     if (selectedModel === model) {
@@ -700,7 +708,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-  }, [selectedModel]);
+    if (currentProject) {
+      void patchProject(currentProject.id, { model });
+    }
+  }, [selectedModel, currentProject?.id, patchProject]);
+
+  // Handle permission mode change with project write-back
+  const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
+    setPermissionMode(mode);
+    if (currentProject) {
+      void patchProject(currentProject.id, { permissionMode: mode });
+    }
+  }, [currentProject?.id, patchProject]);
 
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
   // This avoids re-rendering Chat on every keystroke.
@@ -1030,7 +1049,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
             permissionMode={permissionMode}
-            onPermissionModeChange={setPermissionMode}
+            onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}

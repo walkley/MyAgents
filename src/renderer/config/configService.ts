@@ -416,6 +416,24 @@ export async function updateProject(project: Project): Promise<void> {
     }
 }
 
+/**
+ * Partially update a project by merging only the specified fields into the disk version.
+ * Unlike updateProject (full replacement), this is safe against stale React state —
+ * fields not included in `updates` are preserved from the disk version.
+ *
+ * Returns the merged project, or null if not found.
+ */
+export async function patchProject(projectId: string, updates: Partial<Omit<Project, 'id'>>): Promise<Project | null> {
+    const projects = await loadProjects();
+    const index = projects.findIndex((p) => p.id === projectId);
+    if (index >= 0) {
+        projects[index] = { ...projects[index], ...updates };
+        await saveProjects(projects);
+        return projects[index];
+    }
+    return null;
+}
+
 export async function removeProject(projectId: string): Promise<void> {
     const projects = await loadProjects();
     const filtered = projects.filter((p) => p.id !== projectId);
