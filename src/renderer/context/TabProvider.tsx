@@ -19,7 +19,7 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { TabContext, TabApiContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { TabContext, TabApiContext, TabActiveContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -88,7 +88,7 @@ interface TabProviderProps {
     tabId: string;
     agentDir: string;
     sessionId?: string | null;
-    /** @deprecated Currently unused - reserved for future optimization (lazy rendering) */
+    /** Whether this Tab is currently visible — fed into TabActiveContext for useTabActive() consumers */
     isActive?: boolean;
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
@@ -1619,7 +1619,6 @@ export default function TabProvider({
         systemInitInfo,
         agentError,
         systemStatus,
-        isActive: isActive ?? false,
         pendingPermission,
         pendingAskUserQuestion,
         toolCompleteCount,
@@ -1652,7 +1651,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, isActive, pendingPermission, pendingAskUserQuestion, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, toolCompleteCount, queuedMessages, isConnected,
         appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
@@ -1668,11 +1667,15 @@ export default function TabProvider({
         apiDelete: apiDeleteJson,
     }), [tabId, agentDir, apiGetJson, postJson, apiPutJson, apiDeleteJson]);
 
+    const isActiveValue = isActive ?? false;
+
     return (
-        <TabApiContext.Provider value={apiContextValue}>
-            <TabContext.Provider value={contextValue}>
-                {children}
-            </TabContext.Provider>
-        </TabApiContext.Provider>
+        <TabActiveContext.Provider value={isActiveValue}>
+            <TabApiContext.Provider value={apiContextValue}>
+                <TabContext.Provider value={contextValue}>
+                    {children}
+                </TabContext.Provider>
+            </TabApiContext.Provider>
+        </TabActiveContext.Provider>
     );
 }

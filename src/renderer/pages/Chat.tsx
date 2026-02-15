@@ -12,7 +12,7 @@ import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } fro
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
-import { useTabState } from '@/context/TabContext';
+import { useTabState, useTabActive } from '@/context/TabContext';
 import { useAutoScroll } from '@/hooks/useAutoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
@@ -56,7 +56,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
-    isActive,
     pendingPermission,
     pendingAskUserQuestion,
     toolCompleteCount,
@@ -81,6 +80,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     forceExecuteQueuedMessage,
     isConnected,
   } = useTabState();
+  const isActive = useTabActive();
   const toast = useToast();
 
   // Get config to find current project provider

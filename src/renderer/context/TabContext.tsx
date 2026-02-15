@@ -44,9 +44,6 @@ export interface TabState {
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
 
-    // Tab active state (for focus management)
-    isActive: boolean;
-
     // Permission prompt state
     pendingPermission: PermissionRequest | null;
 
@@ -132,7 +129,6 @@ const defaultContextValue: TabContextValue = {
     systemInitInfo: null,
     agentError: null,
     systemStatus: null,
-    isActive: false,
     pendingPermission: null,
     pendingAskUserQuestion: null,
     toolCompleteCount: 0,
@@ -195,6 +191,17 @@ const defaultApiContextValue: TabApiContextValue = {
 
 export const TabApiContext = createContext<TabApiContextValue>(defaultApiContextValue);
 
+// ─── TabActiveContext (isolated from main context to prevent re-render cascade) ───
+
+/**
+ * Separate context for Tab active state.
+ * isActive changes on every Tab switch. If it were in the main TabContext,
+ * switching tabs would rebuild the entire context object and force ALL
+ * useTabState() consumers (Chat, MessageList, SimpleChatInput…) to re-render.
+ * Isolating it means only useTabActive() subscribers re-render on tab switch.
+ */
+export const TabActiveContext = createContext<boolean>(false);
+
 // ─── Hooks ───
 
 /**
@@ -240,4 +247,13 @@ export function useTabApi(): TabApiContextValue {
 export function useTabApiOptional(): TabApiContextValue | null {
     const context = useContext(TabApiContext);
     return context.tabId ? context : null;
+}
+
+/**
+ * Hook to access Tab active state (whether this Tab is currently visible).
+ * Isolated from main context so Tab switches don't trigger re-renders
+ * in all useTabState() consumers.
+ */
+export function useTabActive(): boolean {
+    return useContext(TabActiveContext);
 }
