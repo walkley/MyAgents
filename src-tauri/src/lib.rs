@@ -82,6 +82,7 @@ pub fn run() {
             commands::cmd_start_global_sidecar,
             commands::cmd_get_global_server_url,
             commands::cmd_stop_all_sidecars,
+            commands::cmd_shutdown_for_update,
             // SSE proxy commands (multi-instance)
             sse_proxy::start_sse_proxy,
             sse_proxy::stop_sse_proxy,

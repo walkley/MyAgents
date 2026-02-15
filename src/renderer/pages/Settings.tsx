@@ -375,6 +375,13 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
 
         try {
             const { invoke } = await import('@tauri-apps/api/core');
+            // Shut down all child processes first to prevent file-lock errors
+            // (Windows NSIS installer fails if bun.exe is still held by SDK/MCP processes)
+            try {
+                await invoke('cmd_shutdown_for_update');
+            } catch (err) {
+                console.warn('[Settings] Pre-restart cleanup failed:', err);
+            }
             await invoke('restart_app');
         } catch (err) {
             console.error('[Settings] Restart failed:', err);
