@@ -63,7 +63,10 @@ const MemoizedTabContent = memo(function TabContent({
   onCheckForUpdate, onRestartAndUpdate,
 }: TabContentProps) {
   return (
-    <div className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}>
+    <div
+      className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}
+      style={isActive ? undefined : { contentVisibility: 'hidden' }}
+    >
       {tab.view === 'launcher' ? (
         <Launcher
           onLaunchProject={onLaunchProject}

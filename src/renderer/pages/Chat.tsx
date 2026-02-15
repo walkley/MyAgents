@@ -90,6 +90,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     ? providers.find((p) => p.id === currentProject.providerId)
     : providers[0]; // Default to first provider
 
+  // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
+  // Prevents useCallback from creating new references when these objects change,
+  // which would defeat SimpleChatInput's memo.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  const currentProviderRef = useRef(currentProvider);
+  currentProviderRef.current = currentProvider;
+  const apiKeysRef = useRef(apiKeys);
+  apiKeysRef.current = apiKeys;
+
   // PERFORMANCE: inputValue is now managed internally by SimpleChatInput
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
@@ -280,6 +290,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Register for SSE cron:task-exit-requested events via TabContext
     onCronTaskExitRequestedRef: onCronTaskExitRequested,
   });
+
+  // PERFORMANCE: Ref-stabilize cronState for handleSendMessage
+  const cronStateRef = useRef(cronState);
+  cronStateRef.current = cronState;
 
   // Sync cron task's sessionId when session is created after task creation
   // This handles two cases:
@@ -736,7 +750,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Queue limit: max 5 queued messages
     const isAiBusy = isLoading || sessionState === 'running';
     if (isAiBusy && queuedMessages.length >= 5) {
-      toast.warning('最多排队 5 条消息');
+      toastRef.current.warning('最多排队 5 条消息');
       return false;
     }
 
@@ -753,16 +767,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // TabProvider.sendMessage passes attachments which will be merged with the replay message
 
     try {
-      // Build provider env from current provider config
+      // Build provider env from current provider config (read from refs for stability)
       // For subscription type, don't send providerEnv (use SDK's default auth)
-      const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
-        baseUrl: currentProvider.config.baseUrl,
-        apiKey: apiKeys[currentProvider.id], // Get from stored apiKeys, not provider object
-        authType: currentProvider.authType,
+      const provider = currentProviderRef.current;
+      const keys = apiKeysRef.current;
+      const providerEnv = provider && provider.type !== 'subscription' ? {
+        baseUrl: provider.config.baseUrl,
+        apiKey: keys[provider.id], // Get from stored apiKeys, not provider object
+        authType: provider.authType,
       } : undefined;
 
       // If cron mode is enabled and task hasn't started yet, start the task
-      if (cronState.isEnabled && !cronState.task && cronState.config) {
+      const cron = cronStateRef.current;
+      if (cron.isEnabled && !cron.task && cron.config) {
         // Start the cron task - pass prompt directly to avoid React state timing issues
         // The prompt is passed as a parameter because updateCronConfig() is async
         // and the state wouldn't be updated before startCronTask() is called
@@ -787,8 +804,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         setSessionState('idle');
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom, setMessages, setIsLoading, setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, toast, currentProvider, apiKeys, cronState, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
 
   // Cancel a queued message and restore its text (and images if any) to the input box
   const handleCancelQueued = useCallback(async (queueId: string) => {
@@ -846,19 +863,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [handleForceExecuteQueued]
   );
 
+  // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
+  const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
+    void respondPermission(decision);
+  }, [respondPermission]);
+
+  const handleAskUserQuestionSubmit = useCallback((_requestId: string, answers: Record<string, string>) => {
+    void respondAskUserQuestion(answers);
+  }, [respondAskUserQuestion]);
+
+  const handleAskUserQuestionCancel = useCallback(() => {
+    void respondAskUserQuestion(null);
+  }, [respondAskUserQuestion]);
+
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
     track('session_switch');
     if (onSwitchSession) {
       onSwitchSession(id);
     } else {
-      if (cronState.task?.status === 'running') {
+      if (cronStateRef.current.task?.status === 'running') {
         console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
         return;
       }
       void loadSession(id);
     }
-  }, [onSwitchSession, cronState.task?.status, loadSession]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- cronStateRef is a ref (stable)
+  }, [onSwitchSession, loadSession]);
 
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
@@ -1029,10 +1060,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               containerRef={messagesContainerRef}
               bottomPadding={140}
               pendingPermission={pendingPermission}
-              onPermissionDecision={(decision) => void respondPermission(decision)}
+              onPermissionDecision={handlePermissionDecision}
               pendingAskUserQuestion={pendingAskUserQuestion}
-              onAskUserQuestionSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
-              onAskUserQuestionCancel={() => void respondAskUserQuestion(null)}
+              onAskUserQuestionSubmit={handleAskUserQuestionSubmit}
+              onAskUserQuestionCancel={handleAskUserQuestionCancel}
               systemStatus={systemStatus}
             />
           </FileActionProvider>

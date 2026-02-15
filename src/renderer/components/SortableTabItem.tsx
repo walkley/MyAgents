@@ -7,6 +7,7 @@
  * clicks on the close button.
  */
 
+import { memo } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { X } from 'lucide-react';
@@ -16,15 +17,17 @@ import { type Tab, getFolderName } from '@/types/tab';
 interface SortableTabItemProps {
     tab: Tab;
     isActive: boolean;
-    onSelect: () => void;
-    onClose: () => void;
+    /** Stable callback — receives tabId so parent doesn't need inline closures */
+    onSelectTab: (tabId: string) => void;
+    /** Stable callback — receives tabId so parent doesn't need inline closures */
+    onCloseTab: (tabId: string) => void;
 }
 
-export default function SortableTabItem({
+export default memo(function SortableTabItem({
     tab,
     isActive,
-    onSelect,
-    onClose,
+    onSelectTab,
+    onCloseTab,
 }: SortableTabItemProps) {
     const {
         attributes,
@@ -65,7 +68,7 @@ export default function SortableTabItem({
                 // This fires before dnd-kit's PointerSensor can intercept
                 if (e.button !== 0) return; // Left click only
                 if ((e.target as HTMLElement).closest('button')) return; // Skip close button
-                onSelect();
+                onSelectTab(tab.id);
             }}
             {...attributes}
         >
@@ -89,7 +92,7 @@ export default function SortableTabItem({
                 `}
                 onClick={(e) => {
                     e.stopPropagation();
-                    onClose();
+                    onCloseTab(tab.id);
                 }}
                 title="关闭标签页"
             >
@@ -102,4 +105,4 @@ export default function SortableTabItem({
             )}
         </div>
     );
-}
+});
