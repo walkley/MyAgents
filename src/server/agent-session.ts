@@ -2692,6 +2692,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   resetAbortFlag();
   isProcessing = true;
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
+  let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   streamIndexToToolId.clear();
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
   if (!preWarm) {
@@ -2844,6 +2845,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     startupTimeoutId = setTimeout(() => {
         if (!firstMessageReceived && !shouldAbortSession) {
             console.error(`[agent] Startup timeout: no SDK message in ${STARTUP_TIMEOUT_MS / 1000}s`);
+            abortedByTimeout = true;
             shouldAbortSession = true;
             if (!isPreWarming) {
                 broadcast('chat:agent-error', {
@@ -3481,14 +3483,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // server-side session (e.g., expired session from a previous app launch).
         resumeSessionId = undefined;
 
-        if (!shouldAbortSession) {
+        if (!shouldAbortSession || abortedByTimeout) {
           // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
-          // SDK "No conversation found" errors arrive as result messages (not exceptions),
-          // so this is the only path that increments preWarmFailCount for such failures.
+          // Timeout aborts ARE genuine failures (SDK subprocess couldn't start in 60s),
+          // unlike config-change aborts which are intentional restarts.
           preWarmFailCount++;
-          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}`);
+          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}${abortedByTimeout ? ' (timeout)' : ''}`);
         } else {
-          console.log('[agent] pre-warm aborted before system_init, cleared resumeSessionId');
+          console.log('[agent] pre-warm aborted by config change, cleared resumeSessionId');
         }
       }
 
