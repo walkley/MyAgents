@@ -186,16 +186,24 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   }, [inputValue, onInputChange]);
 
   // Check if a provider is available:
-  // - Subscription type: always available
+  // - Subscription type: must be verified with an account email
   // - API type: must have key AND verification status must be 'valid' (or not yet verified)
   const isProviderAvailable = (p: Provider): boolean => {
-    if (p.type === 'subscription') return true;
+    if (p.type === 'subscription') {
+      const verifyResult = providerVerifyStatus[p.id];
+      return verifyResult?.status === 'valid' && !!verifyResult?.accountEmail;
+    }
     const hasKey = !!apiKeys[p.id];
     if (!hasKey) return false;
     // If verified and invalid, not available. If not verified yet or valid, available.
     const verifyResult = providerVerifyStatus[p.id];
     return verifyResult?.status !== 'invalid';
   };
+
+  // Ref for current provider availability — used in handleKeyDown without adding deps
+  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider) : false;
+  const isCurrentProviderAvailableRef = useRef(isCurrentProviderAvailable);
+  isCurrentProviderAvailableRef.current = isCurrentProviderAvailable;
 
   // Get Tab-scoped API functions (for @file search and file operations)
   const tabApiContext = useTabApiOptional();
@@ -1113,7 +1121,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      if (inputValue.trim() || images.length > 0) {
+      if ((inputValue.trim() || images.length > 0) && isCurrentProviderAvailableRef.current) {
         handleSend();
       }
     }
@@ -1654,7 +1662,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                     ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
                                     : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
                                   }`}
-                                title={!available ? '请在设置面板配置您的 API-Key' : undefined}
+                                title={!available
+                                  ? (p.type === 'subscription' ? '请在设置页面验证订阅状态' : '请在设置面板配置您的 API-Key')
+                                  : undefined}
                               >
                                 <span className="font-medium">{p.name}</span>
                                 <span className="text-[9px] text-[var(--ink-muted)] bg-[var(--paper-contrast)] px-1 py-0.5 rounded">
@@ -1728,9 +1738,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 <button
                   type="button"
                   onClick={handleSend}
-                  disabled={!inputValue.trim() && images.length === 0}
+                  disabled={!isCurrentProviderAvailable || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-strong)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title="发送"
+                  title={!isCurrentProviderAvailable ? '请前往设置页面设置模型供应商' : '发送'}
                 >
                   <Send className="h-4 w-4" />
                 </button>
