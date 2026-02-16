@@ -3467,8 +3467,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     resolveTermination!();
 
     if (wasPreWarming) {
-      // The SDK subprocess has exited, so the sessionId is no longer "in use".
-      sessionIdUsedByQuery = false;
+      // Only reset sessionIdUsedByQuery for sessions that were never established.
+      // When messages exist, the SDK has this session registered in persistent storage
+      // (from a prior successful query), and future queries MUST use `resume`.
+      // Resetting unconditionally causes retries to use `sessionId` → "already in use".
+      if (messages.length === 0) {
+        sessionIdUsedByQuery = false;
+      }
 
       if (!preWarmStartedOk) {
         // Pre-warm never received system_init — session didn't start successfully.
