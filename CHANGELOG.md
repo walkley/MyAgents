@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.17] - 2026-02-16
+
+### Added
+- **工作区记住模型和权限模式**：每个工作区独立保存最近使用的 model 和 permissionMode，切换时自动恢复
+
+### Performance
+- **Tab 切换性能深度优化**：隔离 isActive 到独立 TabActiveContext，content-visibility 延迟渲染，组件 memo + ref 稳定化，消除切换时全量重渲染
+
+### Fixed
+- **启动页图片粘贴报错** + Tab 栏单击不选中
+- **首次启动卡死**：projects.json 损坏恢复 + 日志重复修复
+- **Windows 更新重启 bun 进程未清理**：kill_process 改用 taskkill /T /F 杀进程树，新增 shutdown_for_update 阻塞等待所有进程退出，Settings 页更新按钮同步修复
+- **JSON 持久化加固**：所有 JSON 配置文件统一使用原子写入（.tmp → .bak → rename），三级恢复链（.json → .bak → .tmp）+ 结构校验，防止进程崩溃导致数据丢失
+
+---
+
 ## [0.1.16] - 2026-02-14
 
 ### Added
