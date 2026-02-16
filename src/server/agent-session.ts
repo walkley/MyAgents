@@ -2740,12 +2740,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
         // MCP is explicitly configured via mcpServers, not SDK auto-discovery
         settingSources: buildSettingSources(),
-        // Permission mode mapping:
-        // - fullAgency → bypassPermissions (no confirmation needed)
-        // - other modes → default (enables canUseTool callback for user confirmation)
-        permissionMode: currentPermissionMode === 'fullAgency' ? 'bypassPermissions' : 'default',
-        // Only needed when using bypassPermissions
-        ...(currentPermissionMode === 'fullAgency' ? { allowDangerouslySkipPermissions: true } : {}),
+        // Permission mode mapping (uses mapToSdkPermissionMode):
+        // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
+        // - plan → plan
+        // - fullAgency → bypassPermissions (skip all checks)
+        // - custom → default (all tools go through canUseTool)
+        permissionMode: sdkPermissionMode,
+        // allowDangerouslySkipPermissions is required when using bypassPermissions
+        ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
         model: currentModel, // Use currently selected model
         pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
         executable: 'bun',
@@ -2766,7 +2768,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
           ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
         // Custom permission handling - check rules and prompt user for unknown tools
-        // Only effective when permissionMode is 'default'
+        // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
         canUseTool: async (toolName, input, options) => {
           console.debug(`[permission] canUseTool checking: ${toolName}`);
 
