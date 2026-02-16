@@ -7,6 +7,7 @@ import {
     writeTextFile,
     readDir,
     remove,
+    rename,
 } from '@tauri-apps/plugin-fs';
 import { homeDir, join, basename } from '@tauri-apps/api/path';
 
@@ -27,10 +28,127 @@ import {
 } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 
+// 异步互斥锁 — 序列化 projects.json 的读-改-写操作，防止并发损坏
+let projectsLock: Promise<void> = Promise.resolve();
+
+function withProjectsLock<T>(fn: () => Promise<T>): Promise<T> {
+    let release: () => void;
+    const next = new Promise<void>(resolve => { release = resolve; });
+    const prev = projectsLock;
+    projectsLock = next;
+    return prev.then(fn).finally(() => release!());
+}
+
 const CONFIG_DIR_NAME = '.myagents';
 const CONFIG_FILE = 'config.json';
 const PROJECTS_FILE = 'projects.json';
 const PROVIDERS_DIR = 'providers';
+
+// ============= Safe File I/O Utilities =============
+// Atomic write with .bak backup and multi-source recovery chain.
+// Prevents data loss from process crashes, file system errors, or truncated writes.
+
+/**
+ * Atomically write JSON data to a file with .bak backup.
+ *
+ * Steps:
+ * 1. Write to .tmp (if interrupted here, original file is untouched)
+ * 2. Rename current file → .bak (preserves last known good version)
+ * 3. Rename .tmp → target (atomic replacement)
+ *
+ * Crash safety:
+ * - After step 1 only: .tmp has new data, original intact → load original
+ * - After step 2: .bak has old data, .tmp has new data → load .bak
+ * - After step 3: target has new data, .bak has old data → load target
+ */
+async function safeWriteJson(filePath: string, data: unknown): Promise<void> {
+    const tmpPath = filePath + '.tmp';
+    const bakPath = filePath + '.bak';
+    const content = JSON.stringify(data, null, 2);
+
+    // 1. Write new data to .tmp
+    await writeTextFile(tmpPath, content);
+
+    // 2. Backup current file → .bak (best-effort)
+    try {
+        if (await exists(filePath)) {
+            // POSIX rename replaces destination atomically;
+            // on Windows, remove first to avoid EEXIST
+            if (await exists(bakPath)) {
+                await remove(bakPath);
+            }
+            await rename(filePath, bakPath);
+        }
+    } catch (bakErr) {
+        console.warn('[configService] Failed to create .bak backup:', bakErr);
+        // Continue — saving without backup is better than not saving at all
+    }
+
+    // 3. Atomic replace: .tmp → target
+    try {
+        await rename(tmpPath, filePath);
+    } catch (renameErr) {
+        // Rollback step 2: restore .bak → main so the main file always exists
+        try {
+            if (await exists(bakPath) && !(await exists(filePath))) {
+                await rename(bakPath, filePath);
+            }
+        } catch { /* best-effort rollback */ }
+        throw renameErr;
+    }
+}
+
+/**
+ * Load and parse a JSON file with automatic recovery from .bak and .tmp.
+ *
+ * Recovery chain (in order of trust):
+ * 1. Main file — the current version
+ * 2. .bak — the previous known-good version (created by safeWriteJson)
+ * 3. .tmp — an in-progress write that may contain newer data
+ *
+ * @param filePath  Path to the main JSON file
+ * @param validate  Optional validator; return false to reject the parsed data
+ * @returns The parsed data, or null if all sources fail
+ */
+async function safeLoadJson<T>(
+    filePath: string,
+    validate?: (data: unknown) => data is T,
+): Promise<T | null> {
+    const candidates = [
+        { path: filePath, label: 'main' },
+        { path: filePath + '.bak', label: 'bak' },
+        { path: filePath + '.tmp', label: 'tmp' },
+    ];
+
+    for (const { path, label } of candidates) {
+        if (!(await exists(path))) continue;
+        try {
+            const content = await readTextFile(path);
+            const parsed = JSON.parse(content);
+            if (validate && !validate(parsed)) {
+                console.error(`[configService] ${label} file has invalid structure, skipping`);
+                continue;
+            }
+            if (label !== 'main') {
+                console.warn(`[configService] Recovered data from .${label} file, restoring...`);
+                // Restore atomically via a dedicated intermediate file
+                // (.restore instead of .tmp to avoid clobbering a .tmp that might hold newer data)
+                if (label === 'tmp') {
+                    // Recovering from .tmp itself — just promote it to main
+                    await rename(path, filePath);
+                } else {
+                    const restorePath = filePath + '.restore';
+                    await writeTextFile(restorePath, content);
+                    await rename(restorePath, filePath);
+                }
+            }
+            return parsed as T;
+        } catch (err) {
+            console.error(`[configService] ${label} file corrupted or unreadable:`, err);
+        }
+    }
+    return null;
+}
 
 let configDirPath: string | null = null;
 
@@ -57,6 +175,11 @@ async function ensureConfigDir(): Promise<void> {
 }
 
 // App Config Management
+
+function isValidAppConfig(data: unknown): data is AppConfig {
+    return data !== null && typeof data === 'object' && !Array.isArray(data);
+}
+
 export async function loadAppConfig(): Promise<AppConfig> {
     // Dynamic default: showDevTools defaults to true in dev mode, false in production
     const dynamicDefault: AppConfig = {
@@ -77,9 +200,8 @@ export async function loadAppConfig(): Promise<AppConfig> {
         const dir = await getConfigDir();
         const configPath = await join(dir, CONFIG_FILE);
 
-        if (await exists(configPath)) {
-            const content = await readTextFile(configPath);
-            const loaded = JSON.parse(content);
+        const loaded = await safeLoadJson<AppConfig>(configPath, isValidAppConfig);
+        if (loaded) {
             // Merge with dynamic defaults: if showDevTools was never explicitly set,
             // it will use the environment-based default
             return { ...dynamicDefault, ...loaded };
@@ -101,7 +223,7 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const configPath = await join(dir, CONFIG_FILE);
-        await writeTextFile(configPath, JSON.stringify(config, null, 2));
+        await safeWriteJson(configPath, config);
     } catch (error) {
         console.error('[configService] Failed to save app config:', error);
         throw error;
@@ -262,13 +384,15 @@ export async function getMcpServerEnv(serverId: string): Promise<Record<string, 
  * Update workspace-level MCP enabled servers
  */
 export async function updateProjectMcpServers(projectId: string, enabledServerIds: string[]): Promise<void> {
-    const projects = await loadProjects();
-    const index = projects.findIndex(p => p.id === projectId);
-    if (index >= 0) {
-        projects[index] = { ...projects[index], mcpEnabledServers: enabledServerIds };
-        await saveProjects(projects);
-        console.log('[configService] Project MCP servers updated:', projectId, enabledServerIds);
-    }
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
+        const index = projects.findIndex(p => p.id === projectId);
+        if (index >= 0) {
+            projects[index] = { ...projects[index], mcpEnabledServers: enabledServerIds };
+            await saveProjects(projects);
+            console.log('[configService] Project MCP servers updated:', projectId, enabledServerIds);
+        }
+    });
 }
 
 /**
@@ -305,6 +429,12 @@ function sortProjectsByLastOpened(projects: Project[]): Project[] {
 }
 
 // Projects Management
+function isValidProjectsArray(data: unknown): data is Project[] {
+    return Array.isArray(data) && data.every(
+        (item) => item && typeof item === 'object' && 'id' in item && 'name' in item && 'path' in item,
+    );
+}
+
 export async function loadProjects(): Promise<Project[]> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading projects from localStorage');
@@ -317,13 +447,11 @@ export async function loadProjects(): Promise<Project[]> {
         const dir = await getConfigDir();
         const projectsPath = await join(dir, PROJECTS_FILE);
 
-        if (await exists(projectsPath)) {
-            const content = await readTextFile(projectsPath);
-            console.log('[configService] Loaded projects:', content.slice(0, 100));
-            const projects = JSON.parse(content);
+        const projects = await safeLoadJson<Project[]>(projectsPath, isValidProjectsArray);
+        if (projects) {
             return sortProjectsByLastOpened(projects);
         }
-        console.log('[configService] No projects file found, returning empty array');
+        console.log('[configService] No valid projects file found, returning empty array');
         return [];
     } catch (error) {
         console.error('[configService] Failed to load projects:', error);
@@ -341,8 +469,7 @@ export async function saveProjects(projects: Project[]): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const projectsPath = await join(dir, PROJECTS_FILE);
-        console.log('[configService] Saving projects to:', projectsPath);
-        await writeTextFile(projectsPath, JSON.stringify(projects, null, 2));
+        await safeWriteJson(projectsPath, projects);
         console.log('[configService] Projects saved successfully');
     } catch (error) {
         console.error('[configService] Failed to save projects:', error);
@@ -358,68 +485,94 @@ export async function addProject(path: string): Promise<Project> {
         return mockAddProject(path);
     }
 
-    const projects = await loadProjects();
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
 
-    // Check if project already exists
-    const existing = projects.find((p) => p.path === path);
-    if (existing) {
-        console.log('[configService] Project already exists, updating lastOpened');
-        // Update lastOpened
-        existing.lastOpened = new Date().toISOString();
-        // Fix name if it looks like a full path (historical bug on Windows)
-        // Name should be just the folder name, not the full path
-        if (existing.name && (existing.name.includes('/') || existing.name.includes('\\'))) {
-            const parts = existing.name.replace(/\\/g, '/').split('/').filter(Boolean);
-            existing.name = parts[parts.length - 1] || existing.name;
-            console.log('[configService] Fixed project name from path to:', existing.name);
+        // Check if project already exists
+        const existing = projects.find((p) => p.path === path);
+        if (existing) {
+            console.log('[configService] Project already exists, updating lastOpened');
+            // Update lastOpened
+            existing.lastOpened = new Date().toISOString();
+            // Fix name if it looks like a full path (historical bug on Windows)
+            // Name should be just the folder name, not the full path
+            if (existing.name && (existing.name.includes('/') || existing.name.includes('\\'))) {
+                const parts = existing.name.replace(/\\/g, '/').split('/').filter(Boolean);
+                existing.name = parts[parts.length - 1] || existing.name;
+                console.log('[configService] Fixed project name from path to:', existing.name);
+            }
+            await saveProjects(projects);
+            return existing;
         }
+
+        // Create new project - use Tauri's basename for cross-platform path handling
+        let name: string;
+        try {
+            name = await basename(path);
+            // Validate basename result
+            if (!name || name.trim().length === 0) {
+                throw new Error('Empty basename result');
+            }
+        } catch (err) {
+            console.warn('[configService] basename() failed, using fallback:', err);
+            // Fallback: robust manual path parsing
+            const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+            name = parts[parts.length - 1] || 'Unknown';
+        }
+
+        const newProject: Project = {
+            id: crypto.randomUUID(),
+            name,
+            path,
+            lastOpened: new Date().toISOString(),
+            providerId: null,
+            permissionMode: null,
+        };
+
+        console.log('[configService] Creating new project:', newProject);
+        projects.push(newProject);
         await saveProjects(projects);
-        return existing;
-    }
-
-    // Create new project - use Tauri's basename for cross-platform path handling
-    let name: string;
-    try {
-        name = await basename(path);
-        // Validate basename result
-        if (!name || name.trim().length === 0) {
-            throw new Error('Empty basename result');
-        }
-    } catch (err) {
-        console.warn('[configService] basename() failed, using fallback:', err);
-        // Fallback: robust manual path parsing
-        const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
-        name = parts[parts.length - 1] || 'Unknown';
-    }
-
-    const newProject: Project = {
-        id: crypto.randomUUID(),
-        name,
-        path,
-        lastOpened: new Date().toISOString(),
-        providerId: null,
-        permissionMode: null,
-    };
-
-    console.log('[configService] Creating new project:', newProject);
-    projects.push(newProject);
-    await saveProjects(projects);
-    return newProject;
+        return newProject;
+    });
 }
 
 export async function updateProject(project: Project): Promise<void> {
-    const projects = await loadProjects();
-    const index = projects.findIndex((p) => p.id === project.id);
-    if (index >= 0) {
-        projects[index] = project;
-        await saveProjects(projects);
-    }
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
+        const index = projects.findIndex((p) => p.id === project.id);
+        if (index >= 0) {
+            projects[index] = project;
+            await saveProjects(projects);
+        }
+    });
+}
+
+/**
+ * Partially update a project by merging only the specified fields into the disk version.
+ * Unlike updateProject (full replacement), this is safe against stale React state —
+ * fields not included in `updates` are preserved from the disk version.
+ *
+ * Returns the merged project, or null if not found.
+ */
+export async function patchProject(projectId: string, updates: Partial<Omit<Project, 'id'>>): Promise<Project | null> {
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
+        const index = projects.findIndex((p) => p.id === projectId);
+        if (index >= 0) {
+            projects[index] = { ...projects[index], ...updates };
+            await saveProjects(projects);
+            return projects[index];
+        }
+        return null;
+    });
 }
 
 export async function removeProject(projectId: string): Promise<void> {
-    const projects = await loadProjects();
-    const filtered = projects.filter((p) => p.id !== projectId);
-    await saveProjects(filtered);
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
+        const filtered = projects.filter((p) => p.id !== projectId);
+        await saveProjects(filtered);
+    });
 }
 
 /**
@@ -427,21 +580,23 @@ export async function removeProject(projectId: string): Promise<void> {
  * Returns the updated project or null if not found
  */
 export async function touchProject(projectId: string): Promise<Project | null> {
-    const projects = await loadProjects();
-    const index = projects.findIndex((p) => p.id === projectId);
-    if (index < 0) {
-        console.warn('[configService] touchProject: project not found:', projectId);
-        return null;
-    }
+    return withProjectsLock(async () => {
+        const projects = await loadProjects();
+        const index = projects.findIndex((p) => p.id === projectId);
+        if (index < 0) {
+            console.warn('[configService] touchProject: project not found:', projectId);
+            return null;
+        }
 
-    const updatedProject = {
-        ...projects[index],
-        lastOpened: new Date().toISOString(),
-    };
-    projects[index] = updatedProject;
-    await saveProjects(projects);
-    console.log('[configService] Project touched:', projectId);
-    return updatedProject;
+        const updatedProject = {
+            ...projects[index],
+            lastOpened: new Date().toISOString(),
+        };
+        projects[index] = updatedProject;
+        await saveProjects(projects);
+        console.log('[configService] Project touched:', projectId);
+        return updatedProject;
+    });
 }
 
 // Custom Providers Management
@@ -514,7 +669,7 @@ export async function saveCustomProvider(provider: Provider): Promise<void> {
         await ensureConfigDir();
         const dir = await getConfigDir();
         const providerPath = await join(dir, PROVIDERS_DIR, `${provider.id}.json`);
-        await writeTextFile(providerPath, JSON.stringify(provider, null, 2));
+        await safeWriteJson(providerPath, provider);
         if (isDebugMode()) {
             console.log('[configService] Saved custom provider:', provider.id);
         }
@@ -591,7 +746,7 @@ export async function saveProjectSettings(projectPath: string, settings: Project
             await mkdir(settingsDir, { recursive: true });
         }
 
-        await writeTextFile(settingsPath, JSON.stringify(settings, null, 2));
+        await safeWriteJson(settingsPath, settings);
         console.log('[configService] Saved project settings to:', settingsPath);
     } catch (error) {
         console.error('[configService] Failed to save project settings:', error);

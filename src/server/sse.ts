@@ -170,13 +170,17 @@ export function createSseClient(onClose: (client: SseClient) => void): {
   console.log(`[sse] client connected id=${client.id} total=${clients.size}`);
 
   // Send cached log history to newly connected client (Ring Buffer for early logs)
+  // Only replay logs from BEFORE this client connected — logs after connectTime
+  // are already delivered by live broadcast (client was added to `clients` above).
+  const connectTime = new Date().toISOString();
   try {
     import('./logger').then(({ getLogHistory }) => {
       const history = getLogHistory();
-      if (history.length > 0) {
+      const replayEntries = history.filter(e => e.timestamp < connectTime);
+      if (replayEntries.length > 0) {
         // Small delay to ensure connection is stable
         setTimeout(() => {
-          history.forEach(entry => {
+          replayEntries.forEach(entry => {
             client?.send('chat:log', entry);
           });
         }, 200);

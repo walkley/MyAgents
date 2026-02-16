@@ -12,7 +12,7 @@ import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } fro
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
-import { useTabState } from '@/context/TabContext';
+import { useTabState, useTabActive } from '@/context/TabContext';
 import { useAutoScroll } from '@/hooks/useAutoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
@@ -56,7 +56,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
-    isActive,
     pendingPermission,
     pendingAskUserQuestion,
     toolCompleteCount,
@@ -81,14 +80,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     forceExecuteQueuedMessage,
     isConnected,
   } = useTabState();
+  const isActive = useTabActive();
   const toast = useToast();
 
   // Get config to find current project provider
-  const { config, projects, providers, updateProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
+  const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
   const currentProvider = currentProject?.providerId
     ? providers.find((p) => p.id === currentProject.providerId)
     : providers[0]; // Default to first provider
+
+  // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
+  // Prevents useCallback from creating new references when these objects change,
+  // which would defeat SimpleChatInput's memo.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  const currentProviderRef = useRef(currentProvider);
+  currentProviderRef.current = currentProvider;
+  const apiKeysRef = useRef(apiKeys);
+  apiKeysRef.current = apiKeys;
 
   // PERFORMANCE: inputValue is now managed internally by SimpleChatInput
   // to avoid re-rendering Chat (and MessageList) on every keystroke
@@ -97,9 +107,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
   const [workspaceRefreshKey, _setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    currentProject?.permissionMode ?? 'auto'
+  );
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
-    currentProvider?.primaryModel
+    currentProject?.model ?? currentProvider?.primaryModel
   );
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
@@ -278,6 +290,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Register for SSE cron:task-exit-requested events via TabContext
     onCronTaskExitRequestedRef: onCronTaskExitRequested,
   });
+
+  // PERFORMANCE: Ref-stabilize cronState for handleSendMessage
+  const cronStateRef = useRef(cronState);
+  cronStateRef.current = cronState;
 
   // Sync cron task's sessionId when session is created after task creation
   // This handles two cases:
@@ -576,8 +592,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
   }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled]);
 
-  // Sync selectedModel when provider changes
+  // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
+  const providerInitRef = useRef(true);
   useEffect(() => {
+    if (providerInitRef.current) {
+      providerInitRef.current = false;
+      return;
+    }
     if (currentProvider?.primaryModel) {
       setSelectedModel(currentProvider.primaryModel);
     }
@@ -683,13 +704,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Track provider_switch event
     track('provider_switch', { provider_id: providerId });
 
-    // Update project's provider (via useConfig)
+    // Update project's provider and reset model to new provider's primary model
+    const newProvider = providers.find(p => p.id === providerId);
     if (currentProject) {
-      void updateProject({ ...currentProject, providerId });
+      void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
-  }, [currentProject, updateProject]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.providerId to avoid recreating on unrelated project changes
+  }, [currentProject?.id, currentProject?.providerId, patchProject, providers]);
 
-  // Handle model change with analytics tracking
+  // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
     // Skip if selecting the same model
     if (selectedModel === model) {
@@ -700,7 +723,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     track('model_switch', { model });
 
     setSelectedModel(model);
-  }, [selectedModel]);
+    if (currentProject) {
+      void patchProject(currentProject.id, { model });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
+  }, [selectedModel, currentProject?.id, patchProject]);
+
+  // Handle permission mode change with project write-back
+  const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
+    setPermissionMode(mode);
+    if (currentProject) {
+      void patchProject(currentProject.id, { permissionMode: mode });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
+  }, [currentProject?.id, patchProject]);
 
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
   // This avoids re-rendering Chat on every keystroke.
@@ -714,7 +750,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Queue limit: max 5 queued messages
     const isAiBusy = isLoading || sessionState === 'running';
     if (isAiBusy && queuedMessages.length >= 5) {
-      toast.warning('最多排队 5 条消息');
+      toastRef.current.warning('最多排队 5 条消息');
       return false;
     }
 
@@ -731,16 +767,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // TabProvider.sendMessage passes attachments which will be merged with the replay message
 
     try {
-      // Build provider env from current provider config
+      // Build provider env from current provider config (read from refs for stability)
       // For subscription type, don't send providerEnv (use SDK's default auth)
-      const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
-        baseUrl: currentProvider.config.baseUrl,
-        apiKey: apiKeys[currentProvider.id], // Get from stored apiKeys, not provider object
-        authType: currentProvider.authType,
+      const provider = currentProviderRef.current;
+      const keys = apiKeysRef.current;
+      const providerEnv = provider && provider.type !== 'subscription' ? {
+        baseUrl: provider.config.baseUrl,
+        apiKey: keys[provider.id], // Get from stored apiKeys, not provider object
+        authType: provider.authType,
       } : undefined;
 
       // If cron mode is enabled and task hasn't started yet, start the task
-      if (cronState.isEnabled && !cronState.task && cronState.config) {
+      const cron = cronStateRef.current;
+      if (cron.isEnabled && !cron.task && cron.config) {
         // Start the cron task - pass prompt directly to avoid React state timing issues
         // The prompt is passed as a parameter because updateCronConfig() is async
         // and the state wouldn't be updated before startCronTask() is called
@@ -765,8 +804,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         setSessionState('idle');
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollToBottom, setMessages, setIsLoading, setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, toast, currentProvider, apiKeys, cronState, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
 
   // Cancel a queued message and restore its text (and images if any) to the input box
   const handleCancelQueued = useCallback(async (queueId: string) => {
@@ -823,6 +862,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     (queueId: string) => { void handleForceExecuteQueued(queueId); },
     [handleForceExecuteQueued]
   );
+
+  // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
+  const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
+    void respondPermission(decision);
+  }, [respondPermission]);
+
+  const handleAskUserQuestionSubmit = useCallback((_requestId: string, answers: Record<string, string>) => {
+    void respondAskUserQuestion(answers);
+  }, [respondAskUserQuestion]);
+
+  const handleAskUserQuestionCancel = useCallback(() => {
+    void respondAskUserQuestion(null);
+  }, [respondAskUserQuestion]);
+
+  // Handler for selecting a session from history dropdown
+  const handleSelectSession = useCallback((id: string) => {
+    track('session_switch');
+    if (onSwitchSession) {
+      onSwitchSession(id);
+    } else {
+      if (cronStateRef.current.task?.status === 'running') {
+        console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
+        return;
+      }
+      void loadSession(id);
+    }
+  }, [onSwitchSession, loadSession]);
 
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
@@ -898,21 +964,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <SessionHistoryDropdown
                 agentDir={agentDir}
                 currentSessionId={sessionId}
-                onSelectSession={(id) => {
-                  // Note: If cron task is running, App.tsx handleSwitchSession will create a new tab
-                  track('session_switch');
-                  // Use Session singleton logic via App.tsx if available
-                  if (onSwitchSession) {
-                    onSwitchSession(id);
-                  } else {
-                    // Fallback: direct load in current Tab (only if no cron task running)
-                    if (cronState.task?.status === 'running') {
-                      console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
-                      return;
-                    }
-                    void loadSession(id);
-                  }
-                }}
+                onSelectSession={handleSelectSession}
                 onDeleteCurrentSession={handleNewSession}
                 isOpen={showHistory}
                 onClose={() => setShowHistory(false)}
@@ -1007,10 +1059,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               containerRef={messagesContainerRef}
               bottomPadding={140}
               pendingPermission={pendingPermission}
-              onPermissionDecision={(decision) => void respondPermission(decision)}
+              onPermissionDecision={handlePermissionDecision}
               pendingAskUserQuestion={pendingAskUserQuestion}
-              onAskUserQuestionSubmit={(_requestId, answers) => void respondAskUserQuestion(answers)}
-              onAskUserQuestionCancel={() => void respondAskUserQuestion(null)}
+              onAskUserQuestionSubmit={handleAskUserQuestionSubmit}
+              onAskUserQuestionCancel={handleAskUserQuestionCancel}
               systemStatus={systemStatus}
             />
           </FileActionProvider>
@@ -1030,7 +1082,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
             permissionMode={permissionMode}
-            onPermissionModeChange={setPermissionMode}
+            onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}

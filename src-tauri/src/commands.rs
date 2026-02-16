@@ -13,6 +13,8 @@ use crate::sidecar::{
     // New multi-instance exports
     start_tab_sidecar, stop_tab_sidecar, get_tab_server_url, get_tab_sidecar_status,
     start_global_sidecar, stop_all_sidecars, GLOBAL_SIDECAR_ID,
+    // Update shutdown
+    shutdown_for_update,
 };
 use crate::logger;
 
@@ -216,6 +218,17 @@ pub async fn cmd_stop_all_sidecars(
 ) -> Result<(), String> {
     logger::info(&app_handle, "[sidecar] Stopping all instances".to_string());
     stop_all_sidecars(&state)
+}
+
+/// Command: Shutdown for update — blocks until all child processes are fully terminated.
+/// Must be called before relaunch() to prevent NSIS installer file-lock errors on Windows.
+#[tauri::command]
+pub async fn cmd_shutdown_for_update(
+    app_handle: AppHandle,
+    state: State<'_, ManagedSidecar>,
+) -> Result<(), String> {
+    logger::info(&app_handle, "[sidecar] Shutdown for update requested".to_string());
+    shutdown_for_update(&state)
 }
 
 // ============= Utility Functions =============

@@ -7,7 +7,7 @@
  * - Hides + button when at MAX_TABS
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
     DndContext,
     closestCenter,
@@ -36,7 +36,7 @@ interface TabBarProps {
     onReorderTabs: (activeId: string, overId: string) => void;
 }
 
-export default function TabBar({
+export default memo(function TabBar({
     tabs,
     activeTabId,
     onSelectTab,
@@ -101,8 +101,7 @@ export default function TabBar({
     const sensors = useSensors(
         useSensor(PointerSensor, {
             activationConstraint: {
-                delay: 150,
-                tolerance: 5,
+                distance: 8,
             },
         }),
         useSensor(KeyboardSensor, {
@@ -162,8 +161,8 @@ export default function TabBar({
                                     key={tab.id}
                                     tab={tab}
                                     isActive={tab.id === activeTabId}
-                                    onSelect={() => onSelectTab(tab.id)}
-                                    onClose={() => onCloseTab(tab.id)}
+                                    onSelectTab={onSelectTab}
+                                    onCloseTab={onCloseTab}
                                 />
                             ))}
                         </div>
@@ -183,4 +182,4 @@ export default function TabBar({
             )}
         </div>
     );
-}
+});

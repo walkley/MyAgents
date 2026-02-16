@@ -6,7 +6,7 @@
  * is delayed (e.g., macOS permission dialogs)
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Clock, FolderOpen, MessageSquare, RefreshCw } from 'lucide-react';
 
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
@@ -43,7 +43,7 @@ function SectionHeader() {
     );
 }
 
-export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) {
+export default memo(function RecentTasks({ projects, onOpenTask }: RecentTasksProps) {
     const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([]);
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -249,4 +249,4 @@ export default function RecentTasks({ projects, onOpenTask }: RecentTasksProps) 
             </div>
         </div>
     );
-}
+});

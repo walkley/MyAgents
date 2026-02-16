@@ -8,6 +8,7 @@ import {
     removeProject as removeProjectService,
     saveAppConfig,
     updateProject as updateProjectService,
+    patchProject as patchProjectService,
     touchProject as touchProjectService,
     getAllProviders,
     loadApiKeys as loadApiKeysService,
@@ -40,6 +41,8 @@ interface UseConfigResult {
     projects: Project[];
     addProject: (path: string) => Promise<Project>;
     updateProject: (project: Project) => Promise<void>;
+    /** Partially update a project — only merges specified fields, safe against stale React state */
+    patchProject: (projectId: string, updates: Partial<Omit<Project, 'id'>>) => Promise<void>;
     removeProject: (projectId: string) => Promise<void>;
     touchProject: (projectId: string) => Promise<void>;
 
@@ -167,6 +170,13 @@ export function useConfig(): UseConfigResult {
     const updateProject = useCallback(async (project: Project) => {
         await updateProjectService(project);
         setProjects((prev) => prev.map((p) => (p.id === project.id ? project : p)));
+    }, []);
+
+    const patchProject = useCallback(async (projectId: string, updates: Partial<Omit<Project, 'id'>>) => {
+        const updated = await patchProjectService(projectId, updates);
+        if (updated) {
+            setProjects((prev) => prev.map((p) => (p.id === projectId ? updated : p)));
+        }
     }, []);
 
     const removeProject = useCallback(async (projectId: string) => {
@@ -312,6 +322,7 @@ export function useConfig(): UseConfigResult {
         projects,
         addProject,
         updateProject,
+        patchProject,
         removeProject,
         touchProject,
         providers,

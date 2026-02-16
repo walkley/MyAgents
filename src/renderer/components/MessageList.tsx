@@ -112,7 +112,7 @@ const StatusTimer = memo(function StatusTimer({ message }: { message: string }) 
   );
 });
 
-export default function MessageList({
+const MessageList = memo(function MessageList({
   messages,
   isLoading,
   containerRef,
@@ -178,4 +178,6 @@ export default function MessageList({
       <div className="scroll-anchor h-px" aria-hidden="true" />
     </div>
   );
-}
+});
+
+export default MessageList;

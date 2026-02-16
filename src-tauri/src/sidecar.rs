@@ -787,14 +787,14 @@ pub struct LegacySidecarConfig {
 
 // ============= Core Functions =============
 
-/// Kill a child process gracefully (non-blocking)
+/// Kill a child process (non-blocking)
 ///
-/// This function sends SIGTERM to the process and spawns a background thread
-/// to wait for graceful shutdown. If the process doesn't exit within the timeout,
-/// the background thread will force kill it.
+/// - Unix: sends SIGTERM, then spawns a background thread to wait for graceful
+///   shutdown and escalate to SIGKILL if the process doesn't exit in time.
+/// - Windows: uses `taskkill /T /F` to immediately kill the entire process tree
+///   (including SDK subprocess and MCP servers). No background wait needed.
 ///
-/// The function returns immediately after sending SIGTERM, making it suitable
-/// for use in Drop implementations without blocking the UI.
+/// Returns immediately, making it suitable for use in Drop implementations.
 fn kill_process(child: &mut Child) -> std::io::Result<()> {
     let pid = child.id();
 
@@ -806,7 +806,26 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        let _ = child.kill();
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // taskkill /T kills the entire process tree (including SDK subprocess and MCP servers)
+        // taskkill /F forces termination
+        let result = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(output) => {
+                if !output.status.success() {
+                    // taskkill failed (process may have already exited), fallback to child.kill()
+                    let _ = child.kill();
+                }
+            }
+            Err(_) => {
+                // taskkill command not available, fallback
+                let _ = child.kill();
+            }
+        }
     }
 
     // Spawn a background thread to wait for graceful shutdown
@@ -837,8 +856,9 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
             }
             #[cfg(windows)]
             {
-                // On Windows, we can't easily check if process exited without the Child handle
-                // Just wait for the timeout and then assume it's dead
+                // taskkill /T /F already synchronously terminated the process tree,
+                // no need for background polling on Windows
+                return;
             }
 
             if start.elapsed() > timeout {
@@ -2118,6 +2138,54 @@ pub fn stop_all_sidecars(manager: &ManagedSidecarManager) -> Result<(), String> 
     // when the parent bun sidecar is killed
     cleanup_child_processes();
 
+    Ok(())
+}
+
+/// Shutdown for update — block until all child processes are fully terminated.
+/// Unlike stop_all_sidecars (which is non-blocking), this function waits for
+/// all bun/SDK/MCP processes to exit, preventing NSIS installer file-lock errors on Windows.
+pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String> {
+    log::info!("[sidecar] Shutdown for update: stopping all processes...");
+
+    // 1. Stop all sidecar instances (via Drop → kill_process → taskkill /T /F)
+    stop_all_sidecars(manager)?;
+
+    // 2. Wait for all related processes to truly exit
+    #[cfg(windows)]
+    {
+        let max_wait = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        loop {
+            let has_sidecar = has_windows_processes(SIDECAR_MARKER);
+            let has_sdk = has_windows_processes("claude-agent-sdk");
+            let has_mcp = has_windows_processes(".myagents\\mcp\\");
+
+            if !has_sidecar && !has_sdk && !has_mcp {
+                log::info!("[sidecar] All processes terminated in {:?}", start.elapsed());
+                break;
+            }
+
+            if start.elapsed() > max_wait {
+                log::warn!("[sidecar] Update shutdown timeout, force killing remaining...");
+                kill_windows_processes_by_pattern(SIDECAR_MARKER);
+                kill_windows_processes_by_pattern("claude-agent-sdk");
+                kill_windows_processes_by_pattern(".myagents\\mcp\\");
+                // Brief wait to confirm termination
+                thread::sleep(Duration::from_secs(1));
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // Unix: SIGKILL is reliable, just allow a brief settling period
+    #[cfg(unix)]
+    {
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    log::info!("[sidecar] Shutdown for update complete");
     Ok(())
 }
 

@@ -223,6 +223,46 @@ useEffect(() => {
 }, []);
 ```
 
+### 规则 5：memo + ref 稳定化模式（渲染列表优化）
+
+当父组件用 `state.map()` 渲染子组件列表时，state 变化会重渲染所有子组件。若子组件很重（如 Chat），需用 `memo` + ref 稳定化回调实现精准重渲染：
+
+**三步范式**：
+
+```typescript
+// Step 1: Ref 同步——回调通过 ref 读取最新 state，依赖数组为空
+const stateRef = useRef(state);
+stateRef.current = state;
+
+const stableCallback = useCallback(() => {
+    // 使用 stateRef.current 而非 state
+    const item = stateRef.current.find(...);
+}, []);  // 永远稳定
+
+// Step 2: memo 子组件——自定义 comparator 只比较数据 props（回调已稳定，无需比较）
+const MemoChild = memo(function Child(props) { ... }, (prev, next) => {
+    return prev.data === next.data && prev.isActive === next.isActive;
+    // 回调 props 不比较，因为已通过 Step 1 保证稳定
+});
+
+// Step 3: 仅传递与该子组件相关的数据 props（避免无关 prop 变化触发重渲染）
+{items.map(item => (
+    <MemoChild
+        key={item.id}
+        data={item}
+        isActive={item.id === activeId}
+        // ✅ 只传给 settings 子组件才需要的 prop
+        settingsProp={item.type === 'settings' ? settingValue : undefined}
+        onAction={stableCallback}  // 引用永远不变
+    />
+))}
+```
+
+**关键约束**：
+- 自定义 comparator 跳过回调检查的前提是 **所有回调 props 确实稳定**（`[]` 依赖）。若某个回调依赖了不稳定值（如来自 hook 的函数），必须用 ref 包一层
+- `setTabs(prev => prev.map(...))` 会保留未变更 item 的对象引用，使 `prev.data === next.data` 生效
+- 仅影响特定子组件类型的 prop，用条件表达式限制传递范围
+
 ---
 
 ## Config 持久化规范
@@ -264,6 +304,7 @@ const savePresetCustomModels = useCallback(async (providerId, models) => {
 | Context value 不用 useMemo | 消费者无限重渲染 | `useMemo` 包装 |
 | useEffect 依赖 hook 返回值 | 引用不稳定致循环 | `useRef` 或移除依赖 |
 | useEffect 依赖 inline callback | 无限循环 | `useRef` 稳定 |
+| memo comparator 跳过回调检查但回调不稳定 | 子组件静默使用过期回调 | 确保所有回调 `[]` 依赖，不稳定源用 ref 包一层 |
 | 不清理定时器 | 内存泄漏 | cleanup 函数 |
 | 依赖 npm/npx/Node.js | 用户可能未安装 | 内置 bun |
 | 配置变更不 resume session | AI 失忆 | 先设 `resumeSessionId` |

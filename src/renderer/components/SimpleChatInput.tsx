@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Image, Loader, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
-import { memo, useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
+import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
@@ -254,6 +254,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
   const [slashPosition, setSlashPosition] = useState<number | null>(null);
 
+  // Compute filtered slash commands once per render (used in both handleKeyDown and JSX)
+  const filteredSlashCommands = useMemo(
+    () => filterAndSortCommands(slashCommands, slashSearchQuery),
+    [slashCommands, slashSearchQuery]
+  );
+
   // Pending user-level skill copies (SDK only reads from project .claude/skills/)
   // Use Map to track multiple concurrent copy operations and avoid race conditions
   const pendingSkillCopiesRef = useRef<Map<string, Promise<boolean>>>(new Map());
@@ -457,12 +463,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       console.log('[SimpleChatInput] processDroppedFiles called with', files.length, 'files:', files.map(f => f.name));
     }
 
-    if (!apiPost) {
-      console.error('[SimpleChatInput] apiPost not available');
-      toastRef.current.error('无法处理文件：API 未就绪');
-      return;
-    }
-
     // Separate images and non-images
     const imageFiles: File[] = [];
     const otherFiles: File[] = [];
@@ -475,13 +475,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
 
-    // Handle image files with the original addImage logic
+    // Handle image files with the original addImage logic (no API needed)
     for (const file of imageFiles) {
       addImage(file);
     }
 
     // Handle non-image files - upload to myagents_files and insert @references
     if (otherFiles.length > 0) {
+      if (!apiPost) {
+        console.error('[SimpleChatInput] apiPost not available for file upload');
+        toastRef.current.error('无法上传文件：API 未就绪，请在对话页面中操作');
+        return;
+      }
       try {
         // Convert files to base64 for JSON upload (works in Tauri)
         const base64Files = await Promise.all(
@@ -1034,10 +1039,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // If no file reference in undo stack, let browser handle default undo
     }
 
-    // Use centralized filter/sort function for slash commands
-    const filteredSlashCommands = filterAndSortCommands(slashCommands, slashSearchQuery);
-
-    // Slash menu navigation
+    // Slash menu navigation (filteredSlashCommands computed via useMemo at component level)
     if (showSlashMenu && filteredSlashCommands.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -1116,7 +1118,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, slashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect]);
+  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect]);
+
+  // Handler for selecting a slash command from the menu
+  const handleSlashSelect = useCallback((cmd: SlashCommand) => {
+    if (slashPosition !== null) {
+      handleSkillSelect(cmd);
+      const before = inputValue.slice(0, slashPosition);
+      const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
+      setInputValue(`${before}/${cmd.name} ${after}`);
+      setShowSlashMenu(false);
+      setSlashPosition(null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
+  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect]);
 
   const toggleExpand = () => setIsExpanded((prev) => !prev);
 
@@ -1274,20 +1289,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             {/* /slash command popup */}
             {!isLauncherMode && showSlashMenu && (
               <SlashCommandMenu
-                commands={filterAndSortCommands(slashCommands, slashSearchQuery)}
+                commands={filteredSlashCommands}
                 selectedIndex={selectedSlashIndex}
-                isEmpty={slashSearchQuery.length > 0 && filterAndSortCommands(slashCommands, slashSearchQuery).length === 0}
-                onSelect={(cmd) => {
-                  if (slashPosition !== null) {
-                    // Trigger skill copy if user-level skill
-                    handleSkillSelect(cmd);
-                    const before = inputValue.slice(0, slashPosition);
-                    const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
-                    setInputValue(`${before}/${cmd.name} ${after}`);
-                    setShowSlashMenu(false);
-                    setSlashPosition(null);
-                  }
-                }}
+                isEmpty={slashSearchQuery.length > 0 && filteredSlashCommands.length === 0}
+                onSelect={handleSlashSelect}
               />
             )}
 

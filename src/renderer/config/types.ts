@@ -130,6 +130,7 @@ export interface Project {
   // Project-specific settings (null means use default)
   providerId: string | null;
   permissionMode: PermissionMode | null;
+  model?: string | null;
   // Custom permission rules for 'custom' mode
   customPermissions?: {
     allow: string[];

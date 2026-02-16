@@ -135,6 +135,15 @@ export function useUpdater(): UseUpdaterResult {
             track('update_install');
         }
 
+        // Shut down all child processes first to prevent file-lock errors
+        // (Windows NSIS installer fails if bun.exe is still held by SDK/MCP processes)
+        try {
+            await invoke('cmd_shutdown_for_update');
+        } catch (err) {
+            console.warn('[useUpdater] Pre-restart cleanup failed:', err);
+            // Continue anyway — startup cleanup_stale_sidecars will handle leftovers
+        }
+
         try {
             await relaunch();
         } catch (err) {
