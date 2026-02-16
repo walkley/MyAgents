@@ -160,11 +160,10 @@ export type ProviderEnv = {
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
-// SDK session ID to resume from (set by switchToSession)
-let resumeSessionId: string | undefined = undefined;
-// Tracks whether sessionId has been used in a query() call.
-// Once used, all subsequent calls MUST use `resume` (SDK rejects reusing a session ID).
-let sessionIdUsedByQuery = false;
+// SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
+// 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
+// Pre-warm 永不修改此标志 — 从结构上消除超时/重试导致的状态错误。
+let sessionRegistered = false;
 
 // ===== System Prompt Configuration =====
 // Supports three modes:
@@ -384,11 +383,7 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   // If MCP changed and session is running, restart with resume to apply new config
   if (mcpChanged && querySession) {
     if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
-    // Save current SDK session_id for resume so conversation context is preserved
-    if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    }
+    // sessionRegistered 已正确反映 resume 状态，无需额外设置
     shouldAbortSession = true;
   }
 
@@ -422,10 +417,7 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
   // If agents changed and session is running, restart with resume
   if (agentsChanged && querySession) {
     if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
-    if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    }
+    // sessionRegistered 已正确反映 resume 状态，无需额外设置
     shouldAbortSession = true;
   }
 
@@ -2035,8 +2027,7 @@ export async function resetSession(): Promise<void> {
   hasInitialPrompt = false; // Reset so first message creates a new session in SessionStore
 
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
-  resumeSessionId = undefined;
-  sessionIdUsedByQuery = false; // New session ID, not yet used
+  sessionRegistered = false;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
@@ -2098,7 +2089,7 @@ export function initializeAgent(nextAgentDir: string, initialPrompt?: string | n
  * 
  * Key behavior:
  * - Preserves target sessionId so messages are saved to the same session
- * - Sets resumeSessionId if available so SDK continues conversation context
+ * - Sets sessionRegistered if sdkSessionId exists so SDK continues conversation context
  * - If no sdkSessionId exists (old session), starts fresh but keeps same session ID
  */
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
@@ -2141,7 +2132,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Reset all runtime state
   shouldAbortSession = false;
   isProcessing = false;
-  sessionIdUsedByQuery = false; // New session context
+  sessionRegistered = false; // New session context, will re-set from sessionMeta below
   setSessionState('idle');
   messages.length = 0;
   messageQueue.length = 0;
@@ -2207,19 +2198,15 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing messages`);
   }
 
-  // Set SDK session ID for resume (if available)
-  if (sessionMeta.unifiedSession && sessionMeta.sdkSessionId) {
-    // 统一后的 session：sdkSessionId === id，直接用 id
-    resumeSessionId = sessionMeta.id;
-    console.log(`[agent] switchToSession: will resume unified session ${resumeSessionId}`);
-  } else if (sessionMeta.sdkSessionId) {
-    // 统一前的旧 session：用存储的 SDK ID
-    resumeSessionId = sessionMeta.sdkSessionId;
-    console.log(`[agent] switchToSession: will resume pre-unified SDK session ${resumeSessionId}`);
+  // Set sessionRegistered based on whether SDK has this session
+  if (sessionMeta.sdkSessionId) {
+    // SDK 已注册此 session，后续 query 必须用 resume
+    sessionRegistered = true;
+    console.log(`[agent] switchToSession: will resume session ${sessionId}`);
   } else {
-    // 无 SDK ID 的老旧 session 或从未 query 过的 session
-    resumeSessionId = undefined;
-    console.warn(`[agent] switchToSession: no SDK session_id available, will start fresh`);
+    // 从未 query 过的 session，用 sessionId 创建
+    sessionRegistered = false;
+    console.warn(`[agent] switchToSession: no SDK session_id, will start fresh`);
   }
 
   // Update agentDir from session
@@ -2233,7 +2220,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Session already exists, skip first-message session creation logic
   hasInitialPrompt = true;
 
-  console.log(`[agent] switchToSession: ready, agentDir=${agentDir}, hasResume=${!!resumeSessionId}`);
+  console.log(`[agent] switchToSession: ready, agentDir=${agentDir}, sessionRegistered=${sessionRegistered}`);
 
   // Pre-warm with resumed session so subprocess + MCP are ready before user types
   schedulePreWarm();
@@ -2333,27 +2320,15 @@ export async function enqueueUserMessage(
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
     const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
     if (switchingFromThirdPartyToAnthropic) {
-      resumeSessionId = undefined;
-      console.log('[agent] Starting fresh session (no resume): third-party → Anthropic official (signature incompatible)');
-    } else if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    } else {
-      // systemInitInfo not available — pre-warm was never fully initialized.
-      // Two sub-cases require different handling:
-      //   a) Historical session (messages exist on disk): the session ID is valid and
-      //      exists in the SDK's storage. We MUST use `resume` to continue it.
-      //   b) Brand new session (no messages): the SDK CLI may not have saved this
-      //      session. Use `sessionId` to create fresh, avoiding "No conversation found".
-      resumeSessionId = undefined;
-      if (messages.length === 0) {
-        sessionIdUsedByQuery = false;
-        console.log('[agent] Starting fresh session: no system_init, no messages (new session)');
-      } else {
-        // Keep sessionIdUsedByQuery=true so startStreamingSession uses `resume: sessionId`
-        console.log(`[agent] Resuming historical session: no system_init, but ${messages.length} messages exist`);
-      }
+      // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
+      sessionRegistered = false;
+      sessionId = randomUUID();
+      hasInitialPrompt = false;   // 确保新 session 创建 metadata
+      messages.length = 0;        // 清除旧 provider 不兼容的消息
+      systemInitInfo = null;      // 清除旧 init info
+      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
+    // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = providerEnv; // undefined for subscription, object for API
@@ -2709,22 +2684,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
-    // Determine resume: explicit resumeSessionId takes priority, then safety-net flag.
-    // Once a sessionId has been used in any query(), the SDK rejects it for new sessions —
-    // all subsequent calls must use `resume`. This handles: queue restarts, provider changes
-    // before system_init arrives, and restored historical sessions.
-    const resumeFrom = resumeSessionId ?? (sessionIdUsedByQuery ? sessionId : undefined);
-    // Only clear resumeSessionId for non-pre-warm sessions.
-    // During pre-warm, preserve it so a retry after failure can still resume.
-    if (!preWarm) {
-      resumeSessionId = undefined;
-    }
+    // 单一变量决策：sessionRegistered 为 true 则 resume，否则创建新 session
+    const resumeFrom = sessionRegistered ? sessionId : undefined;
+    // sessionRegistered 不在此处修改 — 等待 system_init 确认
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
     console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
-
-    // Mark that this sessionId has been used in a query — subsequent calls must use `resume`
-    sessionIdUsedByQuery = true;
 
     querySession = query({
       prompt: messageGenerator(),
@@ -2886,12 +2851,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         systemInitInfo = nextSystemInit;
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
+          sessionRegistered = true;  // SDK 确认注册，后续必须 resume
           broadcast('chat:system-init', { info: systemInitInfo, sessionId });
         } else {
-          // Pre-warm succeeded — subprocess + MCP ready
+          // Pre-warm 不设 sessionRegistered — 这是核心设计约束
+          // Pre-warm 的 system_init 只意味着 subprocess 准备好了，
+          // 但 SDK 不会在没有用户消息的情况下持久化 session
           preWarmStartedOk = true;
           preWarmFailCount = 0;
-          resumeSessionId = undefined; // Session started successfully, safe to clear
           console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
         }
 
@@ -3447,12 +3414,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     isProcessing = false;
     querySession = null;
 
-    // Each query() call processes ONE user message (single-yield generator pattern).
-    // After successful completion, set resumeSessionId so subsequent query() calls
-    // use `resume` instead of `sessionId` (the SDK rejects reusing a session ID).
-    if (!wasPreWarming && !shouldAbortSession && sessionState !== 'error' && systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-    }
+    // sessionRegistered 已在 system_init handler 中设置，无需重复
 
     // Check if there are queued messages to process next.
     const shouldRestart = !wasPreWarming && !shouldAbortSession
@@ -3469,28 +3431,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     resolveTermination!();
 
     if (wasPreWarming) {
-      // Only reset sessionIdUsedByQuery for sessions that were never established.
-      // When messages exist, the SDK has this session registered in persistent storage
-      // (from a prior successful query), and future queries MUST use `resume`.
-      // Resetting unconditionally causes retries to use `sessionId` → "already in use".
-      if (messages.length === 0) {
-        sessionIdUsedByQuery = false;
-      }
+      // sessionRegistered 不修改 — pre-warm 永不触碰此标志
 
       if (!preWarmStartedOk) {
-        // Pre-warm never received system_init — session didn't start successfully.
-        // Clear stale resumeSessionId to prevent infinite retry with a non-existent
-        // server-side session (e.g., expired session from a previous app launch).
-        resumeSessionId = undefined;
-
         if (!shouldAbortSession || abortedByTimeout) {
           // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
           // Timeout aborts ARE genuine failures (SDK subprocess couldn't start in 60s),
           // unlike config-change aborts which are intentional restarts.
           preWarmFailCount++;
-          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}${abortedByTimeout ? ' (timeout)' : ''}`);
+          console.warn(`[agent] pre-warm failed, failCount=${preWarmFailCount}${abortedByTimeout ? ' (timeout)' : ''}`);
         } else {
-          console.log('[agent] pre-warm aborted by config change, cleared resumeSessionId');
+          console.log('[agent] pre-warm aborted by config change');
         }
       }
 
@@ -3500,9 +3451,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         schedulePreWarm();
       }
     } else if (shouldRestart) {
-      // Process next queued message by starting a new session with resume
-      // (resumeSessionId already set above)
-      console.log(`[agent] Queue has ${messageQueue.length} pending message(s), restarting session with resume=${resumeSessionId}`);
+      // Process next queued message by starting a new session
+      console.log(`[agent] Queue has ${messageQueue.length} pending message(s), restarting session (sessionRegistered=${sessionRegistered})`);
       startStreamingSession().catch((error) => {
         console.error('[agent] failed to restart session for queued message:', error);
         setSessionState('idle');
