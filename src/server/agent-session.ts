@@ -168,10 +168,62 @@ let sessionRegistered = false;
 
 // 时间回溯：对话截断后，下次 query 需携带 resumeSessionAt 截断 SDK 对话历史
 let pendingResumeSessionAt: string | undefined;
-// 时间回溯：延迟到 pre-warm 的 system_init 时执行 rewindFiles
-let pendingRewindUuid: string | undefined;
 // 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
 let rewindPromise: Promise<unknown> | null = null;
+
+// ===== 持久 Session 门控 =====
+// 消息交付：事件驱动替代轮询，generator 阻塞在 waitForMessage 直到新消息到达
+let messageResolver: ((item: MessageQueueItem | null) => void) | null = null;
+// 回合同步：等待 result 后才 yield 下一条消息
+let resolveTurnComplete: (() => void) | null = null;
+
+/** 唤醒 generator — 投递消息或 null（退出信号） */
+function wakeGenerator(item: MessageQueueItem | null): void {
+  if (messageResolver) {
+    const resolve = messageResolver;
+    messageResolver = null;
+    resolve(item);
+  } else if (item) {
+    messageQueue.push(item);
+  }
+}
+
+/** generator 等待下一条消息（事件驱动，无轮询） */
+function waitForMessage(): Promise<MessageQueueItem | null> {
+  if (shouldAbortSession) return Promise.resolve(null);
+  if (messageQueue.length > 0) return Promise.resolve(messageQueue.shift()!);
+  return new Promise(resolve => { messageResolver = resolve; });
+}
+
+/** result handler 调用：解锁 generator 进入下一轮 */
+function signalTurnComplete(): void {
+  if (resolveTurnComplete) {
+    const resolve = resolveTurnComplete;
+    resolveTurnComplete = null;
+    resolve();
+  }
+}
+
+/** generator 等待当前回合 AI 回复完成 */
+function waitForTurnComplete(): Promise<void> {
+  if (shouldAbortSession) return Promise.resolve();
+  return new Promise(resolve => { resolveTurnComplete = resolve; });
+}
+
+/** 中止持久 session：唤醒所有被阻塞的 Promise */
+function abortPersistentSession(): void {
+  shouldAbortSession = true;
+  // 唤醒被阻塞的 generator（waitForMessage）
+  if (messageResolver) {
+    const resolve = messageResolver;
+    messageResolver = null;
+    resolve(null);
+  }
+  // 唤醒被阻塞的 generator（waitForTurnComplete）
+  signalTurnComplete();
+  // 强制 subprocess 产出消息/错误，解除 for-await 阻塞
+  querySession?.interrupt().catch(() => {});
+}
 
 // ===== System Prompt Configuration =====
 // Supports three modes:
@@ -392,7 +444,7 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   if (mcpChanged && querySession) {
     if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
     // sessionRegistered 已正确反映 resume 状态，无需额外设置
-    shouldAbortSession = true;
+    abortPersistentSession();
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -426,7 +478,7 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
   if (agentsChanged && querySession) {
     if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
     // sessionRegistered 已正确反映 resume 状态，无需额外设置
-    shouldAbortSession = true;
+    abortPersistentSession();
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1643,9 +1695,14 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
+  // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
+  // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
+  streamIndexToToolId.clear();
+  toolResultIndexToId.clear();
+  childToolToParent.clear();
+  clearCronTaskContext();
+
   // Only transition to idle if no queued messages waiting.
-  // When queue has messages, the session will restart in the finally block
-  // to process the next one — keep 'running' to avoid UI flicker.
   if (messageQueue.length === 0) {
     setSessionState('idle');
   }
@@ -1666,6 +1723,11 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
+  // 跨回合状态清理（与 handleMessageComplete 保持一致）
+  streamIndexToToolId.clear();
+  toolResultIndexToId.clear();
+  childToolToParent.clear();
+
   // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
   if (messageQueue.length === 0) {
     setSessionState('idle');
@@ -2000,10 +2062,10 @@ export async function resetSession(): Promise<void> {
   console.log('[agent] resetSession: starting new conversation');
 
   // 1. Properly terminate the SDK session (same pattern as switchToSession)
-  // Must set shouldAbortSession so the messageGenerator exits its polling loop
+  // Must abort persistent session so the generator exits and subprocess terminates
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] resetSession: terminating existing SDK session');
-    shouldAbortSession = true;
+    abortPersistentSession();
     messageQueue.length = 0; // Clear queue so old session doesn't pick up stale messages
 
     // Wait for the session to fully terminate
@@ -2038,7 +2100,8 @@ export async function resetSession(): Promise<void> {
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   sessionRegistered = false;
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
-  pendingRewindUuid = undefined;
+  messageResolver = null;
+  resolveTurnComplete = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
@@ -2121,11 +2184,11 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   }
 
   // Properly terminate the old session if one is running
-  // Must set shouldAbortSession so the messageGenerator exits its polling loop
+  // Must abort persistent session so the generator exits and subprocess terminates
   // Otherwise the old session continues processing messages with stale settings
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] switchToSession: aborting current session');
-    shouldAbortSession = true;
+    abortPersistentSession();
     messageQueue.length = 0; // Clear queue before waiting so old session doesn't pick up stale messages
     if (sessionTerminationPromise) {
       await sessionTerminationPromise;
@@ -2145,7 +2208,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   isProcessing = false;
   sessionRegistered = false; // New session context, will re-set from sessionMeta below
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
-  pendingRewindUuid = undefined;
+  messageResolver = null;
+  resolveTurnComplete = null;
   setSessionState('idle');
   messages.length = 0;
   messageQueue.length = 0;
@@ -2352,7 +2416,7 @@ export async function enqueueUserMessage(
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = providerEnv; // undefined for subscription, object for API
     // Terminate current session - it will restart automatically when processing the message
-    shouldAbortSession = true;
+    abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
     // This prevents race conditions where old session continues processing
     if (sessionTerminationPromise) {
@@ -2522,23 +2586,26 @@ export async function enqueueUserMessage(
   // Persist messages to disk after adding user message
   persistMessagesToStorage();
 
-  if (!isSessionActive()) {
-    console.log('[agent] starting session (idle -> running)');
-    startStreamingSession().catch((error) => {
-      console.error('[agent] failed to start session', error);
-    });
-  }
-
-  // Push to queue — generator will pick it up asynchronously.
-  // No need to await: user message is already in messages[], broadcast, and persisted.
-  // This allows the HTTP response to return immediately so the frontend can clear the input.
-  messageQueue.push({
+  const queueItem: MessageQueueItem = {
     id: queueId,
     message: { role: 'user', content: contentBlocks },
     messageText: trimmed,
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
-  });
+  };
+
+  if (!isSessionActive()) {
+    // 无活跃 session（pre-warm 失败或首次启动）→ 先入队再启动 session
+    console.log('[agent] starting session (idle -> running)');
+    messageQueue.push(queueItem);
+    startStreamingSession().catch((error) => {
+      console.error('[agent] failed to start session', error);
+    });
+  } else {
+    // Session 已在运行（generator 在 waitForMessage 中等待）→ 直接投递
+    wakeGenerator(queueItem);
+  }
+
   return { queued: false };
 }
 
@@ -2675,145 +2742,8 @@ export function getQueueStatus(): Array<{ id: string; messagePreview: string }> 
 }
 
 /**
- * 通过临时 SDK session 执行文件回溯。
- * resume 会触发消息 replay，借此捕获之前缺失的 sdkUuid，
- * 然后调用 rewindFiles 回退文件状态。
- */
-async function executeRewind(targetMessageId: string): Promise<boolean> {
-  const env = buildClaudeSessionEnv();
-  const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
-  const REWIND_TIMEOUT_MS = 30_000;
-
-  const tempQuery = query({
-    prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
-      // 空 generator：不发送用户消息，只借助 session 调用 rewindFiles
-    })(),
-    options: {
-      resume: sessionId,
-      enableFileCheckpointing: true,
-      maxThinkingTokens: 32_000,
-      settingSources: buildSettingSources(),
-      permissionMode: sdkPermissionMode,
-      ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
-      model: currentModel,
-      pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
-      executable: 'bun',
-      env,
-      cwd: agentDir,
-    },
-  });
-
-  let rewound = false;
-  let timedOut = false;
-  let initReceived = false;
-  // Track next unassigned user message index for forward-order replay matching
-  let nextUserMatchIdx = 0;
-
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    tempQuery.close();
-  }, REWIND_TIMEOUT_MS);
-
-  try {
-    for await (const sdkMessage of tempQuery) {
-      // 1. Handle system_init
-      const init = parseSystemInitInfo(sdkMessage);
-      if (init) {
-        initReceived = true;
-        sessionRegistered = true;
-        if (init.session_id) {
-          updateSessionMetadata(sessionId, {
-            sdkSessionId: init.session_id,
-            unifiedSession: init.session_id === sessionId,
-          });
-        }
-
-        // If target already has sdkUuid (from earlier tracking), call rewindFiles immediately
-        const existingUuid = messages.find(m => m.id === targetMessageId)?.sdkUuid;
-        if (existingUuid) {
-          try {
-            const result = await tempQuery.rewindFiles(existingUuid);
-            console.log('[agent] rewindFiles result:', JSON.stringify(result));
-            rewound = result.canRewind;
-            if (!result.canRewind) {
-              console.warn('[agent] rewindFiles cannot rewind:', result.error);
-            }
-          } catch (err) {
-            console.error('[agent] rewindFiles error:', err);
-          }
-          break;
-        }
-        // Otherwise continue iterating to capture UUIDs from replay
-        continue;
-      }
-
-      // 2. Capture user UUIDs from replay messages (replay comes in order after system_init)
-      if (initReceived && sdkMessage.type === 'user'
-        && !(sdkMessage as { isSynthetic?: boolean }).isSynthetic
-        && sdkMessage.uuid) {
-        // Forward search: match replay messages to our messages in order
-        for (let i = nextUserMatchIdx; i < messages.length; i++) {
-          if (messages[i].role === 'user' && !messages[i].sdkUuid) {
-            messages[i].sdkUuid = sdkMessage.uuid;
-            broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
-            nextUserMatchIdx = i + 1;
-
-            // Found target — call rewindFiles
-            if (messages[i].id === targetMessageId) {
-              try {
-                const result = await tempQuery.rewindFiles(sdkMessage.uuid);
-                console.log('[agent] rewindFiles result:', JSON.stringify(result));
-                rewound = result.canRewind;
-                if (!result.canRewind) {
-                  console.warn('[agent] rewindFiles cannot rewind:', result.error);
-                }
-              } catch (err) {
-                console.error('[agent] rewindFiles error:', err);
-              }
-              break; // inner for
-            }
-            break; // inner for — one match per replay message
-          }
-        }
-        // If we've called rewindFiles, exit the outer loop
-        if (rewound || messages.find(m => m.id === targetMessageId)?.sdkUuid) {
-          break;
-        }
-      }
-
-      // 3. Also capture assistant UUIDs from replay
-      if (initReceived && sdkMessage.type === 'assistant' && sdkMessage.uuid) {
-        for (let i = 0; i < messages.length; i++) {
-          if (messages[i].role === 'assistant' && !messages[i].sdkUuid) {
-            messages[i].sdkUuid = sdkMessage.uuid;
-            broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
-            break;
-          }
-        }
-      }
-
-      // 4. Result message means session ended — no more replays
-      if ((sdkMessage as { type: string }).type === 'result') {
-        break;
-      }
-    }
-  } catch (err) {
-    if (timedOut) {
-      console.error(`[agent] executeRewind timed out after ${REWIND_TIMEOUT_MS}ms`);
-    } else {
-      throw err;
-    }
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  console.log(`[agent] executeRewind completed, rewound=${rewound}`);
-  return rewound;
-}
-
-/**
- * 时间回溯：截断对话历史 + 立即回退文件状态。
- * 前端在确认后调用此函数。
+ * 时间回溯：截断对话历史 + 即时回退文件状态。
+ * 持久 session 下 subprocess 存活，可直接调用 rewindFiles（无需临时 session）。
  */
 export async function rewindSession(userMessageId: string): Promise<{
   success: boolean;
@@ -2821,41 +2751,40 @@ export async function rewindSession(userMessageId: string): Promise<{
   content?: string;
   attachments?: MessageWire['attachments'];
 }> {
-  // 用 rewindPromise 标记正在回溯，阻止 enqueueUserMessage 并发写入
   const doRewind = async () => {
     // 1. 找到目标 user message
     const targetIndex = messages.findIndex(m => m.id === userMessageId && m.role === 'user');
     if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
     const targetMessage = messages[targetIndex];
+    if (!targetMessage.sdkUuid) return { success: false as const, error: 'Message has no SDK UUID' };
 
-    // 2. 终止当前活跃 session
-    if (querySession || isProcessing) {
-      shouldAbortSession = true;
-      messageQueue.length = 0;
-      if (sessionTerminationPromise) {
-        try { await sessionTerminationPromise; } catch { /* ignore */ }
-      }
-    }
-    shouldAbortSession = false;
-
-    // 3. 文件回溯
-    if (targetMessage.sdkUuid) {
-      // 快速路径：UUID 已知，延迟到 pre-warm 的 system_init 时执行 rewindFiles
-      // 省去创建临时 SDK session 的 3-8s 开销
-      pendingRewindUuid = targetMessage.sdkUuid;
-      console.log(`[agent] rewind: deferring rewindFiles to pre-warm, uuid=${targetMessage.sdkUuid}`);
-    } else {
-      // 慢速路径（罕见）：UUID 未知，需要创建临时 session 从 replay 中捕获
-      console.log('[agent] rewind: no sdkUuid, falling back to executeRewind');
+    // 2. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
+    if (querySession) {
       try {
-        await executeRewind(targetMessage.id);
+        const result = await querySession.rewindFiles(targetMessage.sdkUuid);
+        console.log('[agent] rewindFiles result:', JSON.stringify(result));
+        if (!result.canRewind) {
+          console.warn('[agent] rewindFiles cannot rewind:', result.error);
+        }
       } catch (err) {
-        console.error('[agent] executeRewind failed:', err);
+        console.error('[agent] rewindFiles error:', err);
         // 文件回溯失败不阻断消息截断
       }
     }
 
-    // 4. 找到目标前的最后一个 assistant（用于下次 query 的 resumeSessionAt）
+    // 3. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
+    abortPersistentSession();
+    messageQueue.length = 0;
+    if (sessionTerminationPromise) {
+      try { await sessionTerminationPromise; } catch { /* ignore */ }
+    }
+    shouldAbortSession = false;
+
+    // 4. 收集被删消息内容（恢复到输入框）
+    const removedContent = typeof targetMessage.content === 'string' ? targetMessage.content : '';
+    const removedAttachments = targetMessage.attachments;
+
+    // 5. 找到目标前的最后一个 assistant UUID
     let lastAssistantUuid: string | undefined;
     for (let i = targetIndex - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
@@ -2864,13 +2793,11 @@ export async function rewindSession(userMessageId: string): Promise<{
       }
     }
 
-    // 5. 截断消息、收集被删消息内容
-    const removedContent = typeof targetMessage.content === 'string' ? targetMessage.content : '';
-    const removedAttachments = targetMessage.attachments;
+    // 6. 截断消息
     messages.length = targetIndex;
     persistMessagesToStorage();
 
-    // 6. 设置下次 query 的对话截断点
+    // 7. 设置下次 query 的对话截断点
     if (lastAssistantUuid) {
       pendingResumeSessionAt = lastAssistantUuid;
     } else {
@@ -2879,7 +2806,7 @@ export async function rewindSession(userMessageId: string): Promise<{
       sessionId = randomUUID();
     }
 
-    // 7. 预热下次 session
+    // 8. 预热下次 session
     schedulePreWarm();
 
     return { success: true as const, content: removedContent, attachments: removedAttachments };
@@ -3124,20 +3051,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
 
-        // 延迟执行的 rewindFiles — 搭载到 pre-warm/正常 query 的 system_init
-        if (pendingRewindUuid && querySession) {
-          const uuid = pendingRewindUuid;
-          pendingRewindUuid = undefined;
-          try {
-            const result = await querySession.rewindFiles(uuid);
-            console.log('[agent] deferred rewindFiles result:', JSON.stringify(result));
-            if (!result.canRewind) {
-              console.warn('[agent] deferred rewindFiles cannot rewind:', result.error);
-            }
-          } catch (err) {
-            console.error('[agent] deferred rewindFiles error:', err);
-          }
-        }
       }
 
       // Handle system status (e.g., compacting)
@@ -3658,6 +3571,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           duration_ms: durationMs,
         });
         handleMessageComplete();
+        signalTurnComplete();  // 解锁 generator 进入下一轮
       }
     }
   } catch (error) {
@@ -3691,21 +3605,29 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const wasPreWarming = isPreWarming;
     isPreWarming = false;
     isProcessing = false;
+
+    // 确保 generator 退出（防止 streamInput 永远阻塞）
+    if (messageResolver) {
+      const resolve = messageResolver;
+      messageResolver = null;
+      resolve(null);
+    }
+    signalTurnComplete();
+
+    // 安全关闭 SDK session
+    const session = querySession;
     querySession = null;
+    try { session?.close(); } catch { /* subprocess 可能已退出 */ }
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 
-    // Check if there are queued messages to process next.
-    const shouldRestart = !wasPreWarming && !shouldAbortSession
-      && sessionState !== 'error' && messageQueue.length > 0;
-
     // Don't broadcast state changes from pre-warm sessions
     if (!wasPreWarming) {
-      if (sessionState !== 'error' && !shouldRestart) {
+      if (sessionState !== 'error') {
         setSessionState('idle');
       }
     }
-    // Clear cron task context after session ends
+
     clearCronTaskContext();
     resolveTermination!();
 
@@ -3714,9 +3636,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       if (!preWarmStartedOk) {
         if (!shouldAbortSession || abortedByTimeout) {
-          // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
-          // Timeout aborts ARE genuine failures (SDK subprocess couldn't start in 60s),
-          // unlike config-change aborts which are intentional restarts.
           preWarmFailCount++;
           console.warn(`[agent] pre-warm failed, failCount=${preWarmFailCount}${abortedByTimeout ? ' (timeout)' : ''}`);
         } else {
@@ -3724,92 +3643,72 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
       }
 
-      // Re-schedule: on failure (retry with fresh session) or on abort (config change).
-      // Don't re-schedule after success — subprocess+MCP already warmed, no benefit.
       if (!preWarmStartedOk || shouldAbortSession) {
         schedulePreWarm();
       }
-    } else if (shouldRestart) {
-      // Process next queued message by starting a new session
-      console.log(`[agent] Queue has ${messageQueue.length} pending message(s), restarting session (sessionRegistered=${sessionRegistered})`);
-      startStreamingSession().catch((error) => {
-        console.error('[agent] failed to restart session for queued message:', error);
-        setSessionState('idle');
-      });
+    } else if (!shouldAbortSession && sessionRegistered && sessionState !== 'error') {
+      // 非主动中止的意外退出（subprocess crash）→ 安排恢复
+      console.log('[agent] Unexpected session exit, scheduling recovery pre-warm');
+      schedulePreWarm();
     }
   }
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  // Yield exactly ONE message and return.
-  // The SDK's streamInput() iterates the generator with `for await`, writing each value
-  // to the subprocess's stdin. When the generator returns (done), streamInput() calls
-  // endInput() to close stdin (EOF), allowing the subprocess to finish and exit cleanly.
-  // For queued messages, the startStreamingSession() finally block detects remaining items
-  // and restarts the session with `resume` to process the next one sequentially.
-  console.log('[messageGenerator] Started, waiting for message');
+  // 持久 yield 模式：generator 不 return → subprocess 全程存活 → 消除每轮重启开销。
+  // while(true) 循环等待消息 → yield 到 SDK stdin → 等待 AI 回复完成 → 下一轮。
+  // 唯一退出信号：waitForMessage() 返回 null（由 abortPersistentSession 触发）。
+  console.log('[messageGenerator] Started (persistent mode)');
 
-  // Wait for one message in queue
-  while (messageQueue.length === 0) {
+  while (true) {
+    // 等待队列中的消息（事件驱动，无轮询）
+    const item = await waitForMessage();
+    if (!item) {
+      console.log('[messageGenerator] Received null — exiting (abort or session end)');
+      return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
+    }
+
+    // 排队消息的延迟渲染（原逻辑不变）
+    if (item.wasQueued) {
+      const userMessage: MessageWire = {
+        id: String(messageSequence++),
+        role: 'user',
+        content: item.messageText,
+        timestamp: new Date().toISOString(),
+        attachments: item.attachments,
+      };
+      messages.push(userMessage);
+      persistMessagesToStorage();
+      resetTurnUsage();
+      currentTurnStartTime = Date.now();
+      broadcast('queue:started', {
+        queueId: item.id,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+      });
+    }
+
+    // Yield 消息到 SDK stdin
+    isStreamingMessage = true;
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}`);
+    yield {
+      type: 'user' as const,
+      message: item.message,
+      parent_tool_use_id: null,
+      session_id: getSessionId()
+    };
+    item.resolve();
+
+    // 等待本轮 AI 回复完成（result 消息到达后解锁）
+    await waitForTurnComplete();
     if (shouldAbortSession) {
-      console.log('[messageGenerator] Abort flag set while waiting, returning');
+      console.log('[messageGenerator] Abort flag set after turn complete, exiting');
       return;
     }
-    await new Promise<void>(resolve => setTimeout(resolve, 100));
   }
-
-  if (shouldAbortSession) {
-    console.log('[messageGenerator] Abort flag set after wait, returning');
-    return;
-  }
-
-  const item = messageQueue.shift();
-  if (!item) return;
-
-  // For queued items: the user message was NOT added to messages[] at enqueue time.
-  // Now that execution is starting, push it to backend state and persist,
-  // but do NOT broadcast chat:message-replay — instead send message data via queue:started.
-  // This lets the frontend control rendering timing and avoids the user message
-  // appearing in the message list while the previous AI response is still visually streaming.
-  if (item.wasQueued) {
-    const userMessage: MessageWire = {
-      id: String(messageSequence++),
-      role: 'user',
-      content: item.messageText,
-      timestamp: new Date().toISOString(),
-      attachments: item.attachments,
-    };
-    messages.push(userMessage);
-    persistMessagesToStorage();
-
-    resetTurnUsage();
-    currentTurnStartTime = Date.now();
-    // Include user message data so the frontend can render it.
-    // Attachments are included so the frontend has a reliable source for image rendering
-    // (especially for cron-triggered queued messages where frontend queuedMessages may lack image data).
-    broadcast('queue:started', {
-      queueId: item.id,
-      userMessage: {
-        id: userMessage.id,
-        role: userMessage.role,
-        content: userMessage.content,
-        timestamp: userMessage.timestamp,
-        attachments: userMessage.attachments,
-      },
-    });
-  }
-
-  // Mark as streaming BEFORE yielding to SDK, so any new messages arriving
-  // during SDK processing will be queued.
-  isStreamingMessage = true;
-  console.log(`[messageGenerator] Yielding message to SDK, wasQueued=${item.wasQueued}`);
-  yield {
-    type: 'user' as const,
-    message: item.message,
-    parent_tool_use_id: null,
-    session_id: getSessionId()
-  };
-  item.resolve();
-  console.log('[messageGenerator] Message yielded, generator returning (single-yield pattern)');
-  // Generator returns → SDK's streamInput loop exits → endInput() closes stdin → subprocess processes and exits
 }
