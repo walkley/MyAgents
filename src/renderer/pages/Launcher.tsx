@@ -42,6 +42,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         error: _error,
         addProject,
         removeProject,
+        patchProject,
         touchProject,
         apiKeys,
         providerVerifyStatus,
@@ -71,13 +72,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         resolveDefaultWorkspace(projects)
     );
 
-    // Sync selectedWorkspace when projects change (e.g., after first project is added)
+    // Sync selectedWorkspace when projects change (e.g., after first project is added,
+    // or after patchProject updates a project's settings from Chat tab)
     useEffect(() => {
         setSelectedWorkspace(prev => {
-            // If current selection is still valid, keep it
-            if (prev && projects.find(p => p.id === prev.id)) return prev;
-            // Otherwise re-derive from fallback chain
-            return resolveDefaultWorkspace(projects);
+            if (!prev) return resolveDefaultWorkspace(projects);
+            // Always use the latest project data (not stale prev reference)
+            // so that settings changed in Chat via patchProject are reflected
+            const updated = projects.find(p => p.id === prev.id);
+            return updated ?? resolveDefaultWorkspace(projects);
         });
     }, [projects, resolveDefaultWorkspace]);
 
@@ -113,12 +116,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedWorkspace?.id]);
 
-    // Handle workspace MCP toggle
+    // Handle workspace MCP toggle — persist to project config via patchProject (updates disk + React state)
     const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
-        setLauncherWorkspaceMcpEnabled(prev =>
-            enabled ? [...prev, serverId] : prev.filter(id => id !== serverId)
-        );
-    }, []);
+        setLauncherWorkspaceMcpEnabled(prev => {
+            const newEnabled = enabled ? [...prev, serverId] : prev.filter(id => id !== serverId);
+            if (selectedWorkspace) {
+                void patchProject(selectedWorkspace.id, { mcpEnabledServers: newEnabled });
+            }
+            return newEnabled;
+        });
+    }, [selectedWorkspace?.id, patchProject]);
 
     // Restore launcherLastUsed settings once config finishes loading from disk.
     // useState initializers run before async config load completes (config = DEFAULT_CONFIG
@@ -134,6 +141,40 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (lastUsed.model) setLauncherSelectedModel(lastUsed.model);
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
     }, [isLoading, config.launcherLastUsed]);
+
+    // Sync launcher settings from selected workspace's per-project config.
+    // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
+    // Priority: project setting > global default (launcherLastUsed is global, not per-workspace)
+    // Depends on individual fields (not just .id) so it re-runs when Chat's patchProject updates them.
+    useEffect(() => {
+        if (isLoading || !selectedWorkspace) return;
+        setLauncherPermissionMode(selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
+        setLauncherSelectedModel(selectedWorkspace.model ?? undefined);
+        setLauncherProviderId(selectedWorkspace.providerId ?? undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific project fields, not object ref
+    }, [isLoading, selectedWorkspace?.id, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, config.defaultPermissionMode]);
+
+    // Write-back handlers: persist Launcher setting changes to the selected project
+    const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
+        setLauncherPermissionMode(mode);
+        if (selectedWorkspace) {
+            void patchProject(selectedWorkspace.id, { permissionMode: mode });
+        }
+    }, [selectedWorkspace?.id, patchProject]);
+
+    const handleLauncherModelChange = useCallback((model: string | undefined) => {
+        setLauncherSelectedModel(model);
+        if (selectedWorkspace) {
+            void patchProject(selectedWorkspace.id, { model: model ?? null });
+        }
+    }, [selectedWorkspace?.id, patchProject]);
+
+    const handleLauncherProviderChange = useCallback((providerId: string | undefined) => {
+        setLauncherProviderId(providerId);
+        if (selectedWorkspace) {
+            void patchProject(selectedWorkspace.id, { providerId: providerId ?? null });
+        }
+    }, [selectedWorkspace?.id, patchProject]);
 
     // Handle send from BrandSection
     const handleBrandSend = useCallback(async (text: string, images?: ImageAttachment[]) => {
@@ -309,10 +350,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         provider={launcherProvider}
                         providers={providers}
                         selectedModel={launcherSelectedModel}
-                        onProviderChange={setLauncherProviderId}
-                        onModelChange={setLauncherSelectedModel}
+                        onProviderChange={handleLauncherProviderChange}
+                        onModelChange={handleLauncherModelChange}
                         permissionMode={launcherPermissionMode}
-                        onPermissionModeChange={setLauncherPermissionMode}
+                        onPermissionModeChange={handleLauncherPermissionModeChange}
                         apiKeys={apiKeys}
                         providerVerifyStatus={providerVerifyStatus}
                         workspaceMcpEnabled={launcherWorkspaceMcpEnabled}
