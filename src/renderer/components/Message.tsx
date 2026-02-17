@@ -130,8 +130,8 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
       <div className="group/user relative flex justify-end px-1 select-none"
            data-role="user" data-message-id={message.id}>
         {/* 气泡 + 时间戳 */}
-        <div className="flex flex-col items-end">
-          <article className="relative max-w-[min(34rem,calc(100%-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
+        <div className="flex w-full flex-col items-end">
+          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
             {/* Images first (above text) - compact mode for 5 per row */}
             {hasAttachments && (
               <div className={hasText ? 'mb-2' : ''}>
