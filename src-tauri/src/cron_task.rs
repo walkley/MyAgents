@@ -537,17 +537,17 @@ impl CronTaskManager {
 
                 // Execute directly via Sidecar with timeout to prevent indefinite hanging
                 let execution_result = tokio::time::timeout(
-                    Duration::from_secs(660), // 11 minutes timeout
+                    Duration::from_secs(3600), // 60 minutes timeout
                     execute_task_directly(&handle, &task, is_first)
                 ).await;
 
                 let execution_result = match execution_result {
                     Ok(result) => result,
                     Err(_) => {
-                        log::error!("[CronTask] Task {} execution timed out after 11 minutes", task_id_owned);
+                        log::error!("[CronTask] Task {} execution timed out after 60 minutes", task_id_owned);
                         let _ = handle.emit("cron:debug", serde_json::json!({
                             "taskId": task_id_owned,
-                            "message": "Execution timed out after 11 minutes",
+                            "message": "Execution timed out after 60 minutes",
                             "error": true
                         }));
                         Err("Execution timed out".to_string())

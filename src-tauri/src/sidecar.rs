@@ -2617,7 +2617,7 @@ pub async fn execute_cron_task<R: Runtime>(
 
     // Create HTTP client with generous timeout (cron tasks can take long)
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(660)) // 11 minutes (slightly more than Sidecar's 10 min timeout)
+        .timeout(Duration::from_secs(3660)) // 61 minutes (slightly more than cron task's 60 min timeout)
         .tcp_nodelay(true)
         .no_proxy() // Disable proxy for localhost
         .build()

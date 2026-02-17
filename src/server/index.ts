@@ -1070,8 +1070,8 @@ async function main() {
           console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)
-          // Timeout: 10 minutes max execution time
-          const completed = await waitForSessionIdle(600000, 1000);
+          // Timeout: 60 minutes max execution time (matches Rust cron_task timeout)
+          const completed = await waitForSessionIdle(3600000, 1000);
 
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
