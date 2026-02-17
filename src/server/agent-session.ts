@@ -3348,9 +3348,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       } else if (sdkMessage.type === 'assistant') {
         // Track SDK assistant UUID for resumeSessionAt / rewindFiles
         const currentAssistant = ensureAssistantMessage();
-        if (sdkMessage.uuid && !currentAssistant.sdkUuid) {
+        // 始终更新为最新的 UUID — SDK 一个回合可能输出多条 assistant 消息
+        // （thinking → text），resumeSessionAt 需要最后一条的 UUID 才能保留完整回答
+        if (sdkMessage.uuid) {
           currentAssistant.sdkUuid = sdkMessage.uuid;
-          broadcast('chat:message-sdk-uuid', { messageId: currentAssistant.id, sdkUuid: sdkMessage.uuid });
         }
         const assistantMessage = sdkMessage.message;
         // Main turn token usage is extracted from result message (more reliable across providers)
