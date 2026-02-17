@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useToast } from '@/components/Toast';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
@@ -25,7 +26,6 @@ import { type PermissionMode, type McpServerDefinition } from '@/config/types';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
-  updateProjectMcpServers,
 } from '@/config/configService';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
@@ -119,6 +119,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Startup overlay state (for auto-send from Launcher)
   const [showStartupOverlay, setShowStartupOverlay] = useState(!!initialMessage);
+
+  // Time rewind state
+  const [rewindTarget, setRewindTarget] = useState<{
+    messageId: string;
+    content: string;
+    attachments?: import('@/types/chat').MessageAttachment[];
+  } | null>(null);
+  const [rewindStatus, setRewindStatus] = useState<string | null>(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  // Refs for one-time project settings sync (see effect after provider change effect)
+  const hadInitialMessage = useRef(!!initialMessage);
+  const projectSyncedRef = useRef(false);
 
   // Ref for input focus
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -565,7 +579,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [currentProject?.mcpEnabledServers]);
 
-  // Handle workspace MCP toggle
+  // Handle workspace MCP toggle — persist via patchProject (updates disk + React state)
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
@@ -573,9 +587,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
-    // Update project config
+    // Persist to project config (patchProject updates disk AND projects React state,
+    // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
     if (currentProject) {
-      await updateProjectMcpServers(currentProject.id, newEnabled);
+      void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
     }
 
     // Get the effective MCP servers and send to backend
@@ -603,6 +618,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       setSelectedModel(currentProvider.primaryModel);
     }
   }, [currentProvider?.id, currentProvider?.primaryModel]);
+
+  // One-time sync: apply project-stored settings after useConfig finishes async load.
+  // useState initializers run with currentProject=undefined (useConfig loads asynchronously),
+  // so project settings must be re-applied once currentProject becomes available.
+  // Placed AFTER provider change effect so project model takes priority in same render cycle.
+  // Skipped when initialMessage is provided (BrandSection path applies its own settings).
+  useEffect(() => {
+    if (!currentProject || projectSyncedRef.current || hadInitialMessage.current) return;
+    projectSyncedRef.current = true;
+    // permissionMode: null means "use global default" (per Project type contract)
+    setPermissionMode(currentProject.permissionMode ?? config.defaultPermissionMode);
+    if (currentProject.model) {
+      setSelectedModel(currentProject.model);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
+  }, [currentProject?.id]);
 
   // Sync selectedModel to backend so pre-warm uses the correct model.
   // Without this, backend currentModel stays undefined until the first message,
@@ -876,6 +907,63 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void respondAskUserQuestion(null);
   }, [respondAskUserQuestion]);
 
+  // Stable callback for time rewind — uses ref for messages to keep reference stable
+  const handleRewind = useCallback((messageId: string) => {
+    const msgs = messagesRef.current;
+    const msg = msgs.find(m => m.id === messageId);
+    if (!msg) return;
+    setRewindTarget({
+      messageId,
+      content: typeof msg.content === 'string' ? msg.content : '',
+      attachments: msg.attachments,
+    });
+  }, []); // [] — 通过 ref 读取 messages，引用永远稳定
+
+  const handleRewindConfirm = useCallback(() => {
+    if (!rewindTarget) return;
+    const { messageId, content, attachments } = rewindTarget;
+
+    // 1. 立即关闭对话框 + 乐观更新 UI
+    setRewindTarget(null);
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === messageId);
+      return idx >= 0 ? prev.slice(0, idx) : prev;
+    });
+    if (content) {
+      chatInputRef.current?.setValue(content);
+    }
+    const imageAttachments = attachments?.filter(a =>
+      a.isImage || a.mimeType?.startsWith('image/')
+    );
+    if (imageAttachments?.length) {
+      const restoredImages: ImageAttachment[] = imageAttachments.map(a => ({
+        id: a.id,
+        file: new File([], a.name),
+        preview: a.previewUrl || '',
+      }));
+      chatInputRef.current?.setImages(restoredImages);
+    }
+
+    // 2. 显示固定 loading 文案（后端 rewindPromise 会阻塞 enqueueUserMessage 防止竞态）
+    setIsLoading(true);
+    setRewindStatus('rewinding');
+    apiPost('/chat/rewind', { userMessageId: messageId })
+      .then(res => {
+        const r = res as { success?: boolean; error?: string } | undefined;
+        if (r && !r.success) {
+          toastRef.current.error('时间回溯失败：' + (r.error || '未知错误'));
+        }
+      })
+      .catch(err => {
+        console.error('[Chat] Rewind failed:', err);
+        toastRef.current.error('文件回溯失败，对话记录已回退但文件状态可能未还原');
+      })
+      .finally(() => {
+        setRewindStatus(null);
+        setIsLoading(false);
+      });
+  }, [rewindTarget, apiPost, setMessages, setIsLoading]);
+
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
     track('session_switch');
@@ -1063,7 +1151,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               pendingAskUserQuestion={pendingAskUserQuestion}
               onAskUserQuestionSubmit={handleAskUserQuestionSubmit}
               onAskUserQuestionCancel={handleAskUserQuestionCancel}
-              systemStatus={systemStatus}
+              systemStatus={rewindStatus || systemStatus}
+              isStreaming={isLoading || sessionState === 'running'}
+              onRewind={handleRewind}
             />
           </FileActionProvider>
 
@@ -1147,6 +1237,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+        />
+      )}
+
+      {/* Time Rewind Confirm Dialog */}
+      {rewindTarget && (
+        <ConfirmDialog
+          title="时间回溯"
+          message="您的「对话记录」与「文件修改状态」都将回溯到本次对话发生之前。"
+          confirmText="确认回溯"
+          cancelText="取消"
+          confirmVariant="danger"
+          onConfirm={handleRewindConfirm}
+          onCancel={() => setRewindTarget(null)}
         />
       )}
 

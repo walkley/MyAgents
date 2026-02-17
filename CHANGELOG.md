@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.18] - 2026-02-17
+
+### Added
+- **用户消息气泡 Hover 菜单**：鼠标悬停显示操作菜单（复制、时间回溯），Tooltip 提示
+- **时间回溯功能**：回溯对话到指定用户消息之前的状态，回退文件修改，被回溯的消息文本恢复到输入框
+- **Launcher 工作区设置双向同步**：工作区卡片设置面板变更实时同步到已打开的 Tab
+
+### Performance
+- **持久 Session 架构**：SDK subprocess 全程存活，消除每轮对话的 spawn → init → MCP 连接 → 历史重放开销
+  - 事件驱动 Promise 门控替代 100ms 轮询，消息交付零延迟
+  - 对话延迟不再随历史消息增长线性退化
+  - 净减少约 106 行代码（删除 `executeRewind` 等死代码）
+
+### Fixed
+- **permissionMode 映射错误**：「自主行动」（auto）和「规划模式」（plan）权限模式实际使用了 `default`，现已正确映射到 SDK 的 `acceptEdits` 和 `plan`
+- **订阅供应商误显可用**：未验证订阅的供应商不再显示为可用，发送按钮和 Enter 键增加供应商可用性守卫
+- **持久 Session 启动超时死锁**：startup timeout 改用统一中止 `abortPersistentSession()`，解除 generator Promise 门控阻塞
+- **Rewind SDK 历史未截断**：`resumeSessionAt` 在 pre-warm 中正确传递，确保 SDK 历史与前端同步截断
+- **Rewind 后 AI 重复已回答内容**：assistant `sdkUuid` 改存最后一条消息（text）而非第一条（thinking），确保 `resumeSessionAt` 保留完整回复
+- **超时链路对齐**：Cron 执行超时 11min → 60min，智谱 AI 超时 50min → 10min，Permission 等待 5min → 10min
+- **用户消息气泡宽度**：最大宽度改为容器 2/3，文字先横向扩展再换行
+
+---
+
 ## [0.1.17] - 2026-02-16
 
 ### Added

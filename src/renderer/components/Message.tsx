@@ -1,4 +1,5 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Copy, Check, Undo2 } from 'lucide-react';
 
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
@@ -9,6 +10,16 @@ import type { ContentBlock, Message as MessageType } from '@/types/chat';
 interface MessageProps {
   message: MessageType;
   isLoading?: boolean;
+  isStreaming?: boolean;       // AI 回复中时隐藏时间回溯按钮
+  onRewind?: (messageId: string) => void;
+}
+
+/**
+ * Format timestamp to "YYYY-MM-DD HH:mm:ss"
+ */
+function formatTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 /**
@@ -18,6 +29,8 @@ interface MessageProps {
 function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // Different loading state -> must re-render
   if (prev.isLoading !== next.isLoading) return false;
+  if (prev.isStreaming !== next.isStreaming) return false;
+  // onRewind 不比较 — 通过 Chat.tsx useCallback([]) + ref 保证稳定
 
   const prevMsg = prev.message;
   const nextMsg = next.message;
@@ -67,8 +80,16 @@ function formatLocalCommandOutput(content: string): string {
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
  */
-const Message = memo(function Message({ message, isLoading = false }: MessageProps) {
+const Message = memo(function Message({ message, isLoading = false, isStreaming, onRewind }: MessageProps) {
   const { openPreview } = useImagePreview();
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   if (message.role === 'user') {
     const userContent = typeof message.content === 'string' ? message.content : '';
@@ -106,25 +127,62 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     const hasText = userContent.trim().length > 0;
 
     return (
-      <div className="flex justify-end px-1 select-none" data-role="user" data-message-id={message.id}>
-        <article className="relative max-w-[min(34rem,calc(100%-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
-          {/* Images first (above text) - compact mode for 5 per row */}
-          {hasAttachments && (
-            <div className={hasText ? 'mb-2' : ''}>
-              <AttachmentPreviewList
-                attachments={attachmentItems}
-                compact
-                onPreview={openPreview}
-              />
+      <div className="group/user relative flex justify-end px-1 select-none"
+           data-role="user" data-message-id={message.id}>
+        {/* 气泡 + 时间戳 */}
+        <div className="flex w-full flex-col items-end">
+          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
+            {/* Images first (above text) - compact mode for 5 per row */}
+            {hasAttachments && (
+              <div className={hasText ? 'mb-2' : ''}>
+                <AttachmentPreviewList
+                  attachments={attachmentItems}
+                  compact
+                  onPreview={openPreview}
+                />
+              </div>
+            )}
+            {/* Text below images */}
+            {hasText && (
+              <div className="text-[var(--ink)]">
+                <Markdown preserveNewlines>{userContent}</Markdown>
+              </div>
+            )}
+          </article>
+          <span className="mr-2 mt-1 text-[11px] text-[var(--ink-muted)] opacity-0 transition-opacity group-hover/user:opacity-100">
+            {formatTimestamp(message.timestamp)}
+          </span>
+        </div>
+        {/* 右侧操作菜单 — hover 时淡入，绝对定位不占布局空间 */}
+        <div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-full pl-1 flex flex-col items-center gap-0.5 opacity-0 transition-opacity group-hover/user:opacity-100">
+          <div className="group/copy relative">
+            <button type="button"
+              onClick={() => {
+                navigator.clipboard.writeText(userContent).catch(() => { /* clipboard unavailable */ });
+                setCopied(true);
+                if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
+              }}
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] hover:shadow-sm">
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </button>
+            <span className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--paper)] px-2 py-1 text-[11px] text-[var(--ink-muted)] shadow-md border border-[var(--line)] opacity-0 transition-opacity group-hover/copy:opacity-100">
+              {copied ? '已复制' : '复制'}
+            </span>
+          </div>
+          {!isStreaming && onRewind && (
+            <div className="group/rewind relative">
+              <button type="button"
+                onClick={() => onRewind(message.id)}
+                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] hover:shadow-sm">
+                <Undo2 className="size-3.5" />
+              </button>
+              <span className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--paper)] px-2 py-1 text-[11px] text-[var(--ink-muted)] shadow-md border border-[var(--line)] opacity-0 transition-opacity group-hover/rewind:opacity-100">
+                时间回溯
+              </span>
             </div>
           )}
-          {/* Text below images */}
-          {hasText && (
-            <div className="text-[var(--ink)]">
-              <Markdown preserveNewlines>{userContent}</Markdown>
-            </div>
-          )}
-        </article>
+        </div>
       </div>
     );
   }
@@ -190,7 +248,7 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
     return false;
   });
 
-  const isStreaming = isLoading && hasIncompleteBlocks;
+  const isAssistantStreaming = isLoading && hasIncompleteBlocks;
 
   return (
     <div className="flex justify-start select-none">
@@ -227,7 +285,7 @@ const Message = memo(function Message({ message, isLoading = false }: MessagePro
                 key={`group-${index}`}
                 blocks={item}
                 isLatestActiveSection={isLatestActiveSection}
-                isStreaming={isStreaming}
+                isStreaming={isAssistantStreaming}
                 hasTextAfter={hasTextAfter}
               />
             );

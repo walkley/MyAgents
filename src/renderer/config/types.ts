@@ -355,7 +355,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     websiteUrl: 'https://bigmodel.cn/console/overview',
     config: {
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
-      timeout: 3000000,
+      timeout: 600000,
       disableNonessential: true,
     },
     models: [

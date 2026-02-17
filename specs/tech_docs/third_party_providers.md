@@ -146,25 +146,23 @@ if (providerChanged && querySession) {
   resumeSessionId = switchingFromThirdPartyToAnthropic ? undefined : systemInitInfo?.session_id;
 
   currentProviderEnv = providerEnv;
-  shouldAbortSession = true;
+  abortPersistentSession();  // 统一中止：设置标志 + 唤醒 generator 门控 + interrupt
 
   // 等待旧会话完全终止，避免竞态条件
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
   }
 
-  querySession = null;
-  isProcessing = false;
-  // 新消息会触发 startStreamingSession() 使用新环境变量
+  // schedulePreWarm() 会在 finally 中自动触发
 }
 ```
 
 ### 注意事项
 
 - **应用层 session 保留**：`sessionId`、`messages` 不变
-- **SDK 层 session 重建**：`querySession` 重新创建
-- **状态清理**：`streamIndexToToolId`、`toolResultIndexToId` 需清理
-- **`switchToSession` 必须终止旧 session**：设置 `shouldAbortSession = true`，否则旧 session 的 `messageGenerator` 不会退出，新消息被旧 session 处理
+- **SDK 层 session 重建**：`querySession` 通过 pre-warm 重新创建
+- **跨回合状态清理**：`streamIndexToToolId`、`toolResultIndexToId`、`childToolToParent` 在 `handleMessageComplete()` 中自动清理
+- **统一中止**：所有需要终止 session 的场景必须使用 `abortPersistentSession()`，它同时唤醒 generator 的 Promise 门控并调用 `interrupt()`
 
 ---
 

@@ -96,6 +96,7 @@ import {
   waitForSessionIdle,
   setSystemPromptConfig,
   clearSystemPromptConfig,
+  rewindSession,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { getScriptDir } from './utils/runtime';
@@ -704,6 +705,17 @@ async function main() {
         }
       }
 
+      // Rewind session to a specific user message (time travel)
+      if (pathname === '/chat/rewind' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
+        if (!userMessageId) {
+          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
+        }
+        const result = await rewindSession(userMessageId);
+        return jsonResponse(result);
+      }
+
       // Cancel a queued message
       if (pathname === '/chat/queue/cancel' && request.method === 'POST') {
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
@@ -1058,8 +1070,8 @@ async function main() {
           console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)
-          // Timeout: 10 minutes max execution time
-          const completed = await waitForSessionIdle(600000, 1000);
+          // Timeout: 60 minutes max execution time (matches Rust cron_task timeout)
+          const completed = await waitForSessionIdle(3600000, 1000);
 
           if (!completed) {
             console.warn(`[cron] execute-sync taskId=${taskId} timed out`);

@@ -102,6 +102,7 @@ export type MessageWire = {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
   timestamp: string;
+  sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
   attachments?: {
     id: string;
     name: string;
@@ -160,11 +161,69 @@ export type ProviderEnv = {
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
-// SDK session ID to resume from (set by switchToSession)
-let resumeSessionId: string | undefined = undefined;
-// Tracks whether sessionId has been used in a query() call.
-// Once used, all subsequent calls MUST use `resume` (SDK rejects reusing a session ID).
-let sessionIdUsedByQuery = false;
+// SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
+// 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
+// Pre-warm 永不修改此标志 — 从结构上消除超时/重试导致的状态错误。
+let sessionRegistered = false;
+
+// 时间回溯：对话截断后，下次 query 需携带 resumeSessionAt 截断 SDK 对话历史
+let pendingResumeSessionAt: string | undefined;
+// 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
+let rewindPromise: Promise<unknown> | null = null;
+
+// ===== 持久 Session 门控 =====
+// 消息交付：事件驱动替代轮询，generator 阻塞在 waitForMessage 直到新消息到达
+let messageResolver: ((item: MessageQueueItem | null) => void) | null = null;
+// 回合同步：等待 result 后才 yield 下一条消息
+let resolveTurnComplete: (() => void) | null = null;
+
+/** 唤醒 generator — 投递消息或 null（退出信号） */
+function wakeGenerator(item: MessageQueueItem | null): void {
+  if (messageResolver) {
+    const resolve = messageResolver;
+    messageResolver = null;
+    resolve(item);
+  } else if (item) {
+    messageQueue.push(item);
+  }
+}
+
+/** generator 等待下一条消息（事件驱动，无轮询） */
+function waitForMessage(): Promise<MessageQueueItem | null> {
+  if (shouldAbortSession) return Promise.resolve(null);
+  if (messageQueue.length > 0) return Promise.resolve(messageQueue.shift()!);
+  return new Promise(resolve => { messageResolver = resolve; });
+}
+
+/** result handler 调用：解锁 generator 进入下一轮 */
+function signalTurnComplete(): void {
+  if (resolveTurnComplete) {
+    const resolve = resolveTurnComplete;
+    resolveTurnComplete = null;
+    resolve();
+  }
+}
+
+/** generator 等待当前回合 AI 回复完成 */
+function waitForTurnComplete(): Promise<void> {
+  if (shouldAbortSession) return Promise.resolve();
+  return new Promise(resolve => { resolveTurnComplete = resolve; });
+}
+
+/** 中止持久 session：唤醒所有被阻塞的 Promise */
+function abortPersistentSession(): void {
+  shouldAbortSession = true;
+  // 唤醒被阻塞的 generator（waitForMessage）
+  if (messageResolver) {
+    const resolve = messageResolver;
+    messageResolver = null;
+    resolve(null);
+  }
+  // 唤醒被阻塞的 generator（waitForTurnComplete）
+  signalTurnComplete();
+  // 强制 subprocess 产出消息/错误，解除 for-await 阻塞
+  querySession?.interrupt().catch(() => {});
+}
 
 // ===== System Prompt Configuration =====
 // Supports three modes:
@@ -384,12 +443,8 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   // If MCP changed and session is running, restart with resume to apply new config
   if (mcpChanged && querySession) {
     if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
-    // Save current SDK session_id for resume so conversation context is preserved
-    if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    }
-    shouldAbortSession = true;
+    // sessionRegistered 已正确反映 resume 状态，无需额外设置
+    abortPersistentSession();
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -422,11 +477,8 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
   // If agents changed and session is running, restart with resume
   if (agentsChanged && querySession) {
     if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
-    if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    }
-    shouldAbortSession = true;
+    // sessionRegistered 已正确反映 resume 状态，无需额外设置
+    abortPersistentSession();
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -978,14 +1030,14 @@ async function checkToolPermission(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    // Timeout after 5 minutes
+    // Timeout after 10 minutes (consistent with AskUserQuestion timeout)
     const timer = setTimeout(() => {
       if (pendingPermissions.has(requestId)) {
         cleanup();
-        console.warn(`[permission] ${toolName}: timed out after 5 minutes, denying`);
+        console.warn(`[permission] ${toolName}: timed out after 10 minutes, denying`);
         resolve('deny');
       }
-    }, 5 * 60 * 1000);
+    }, 10 * 60 * 1000);
 
     pendingPermissions.set(requestId, { resolve, toolName, input, timer });
   });
@@ -1052,6 +1104,7 @@ function persistMessagesToStorage(
       role: msg.role,
       content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
       timestamp: msg.timestamp,
+      sdkUuid: msg.sdkUuid,
       attachments: msg.attachments?.map((att) => ({
         id: att.id,
         name: att.name,
@@ -1642,9 +1695,14 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
+  // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
+  // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
+  streamIndexToToolId.clear();
+  toolResultIndexToId.clear();
+  childToolToParent.clear();
+  clearCronTaskContext();
+
   // Only transition to idle if no queued messages waiting.
-  // When queue has messages, the session will restart in the finally block
-  // to process the next one — keep 'running' to avoid UI flicker.
   if (messageQueue.length === 0) {
     setSessionState('idle');
   }
@@ -1665,6 +1723,11 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
+  // 跨回合状态清理（与 handleMessageComplete 保持一致）
+  streamIndexToToolId.clear();
+  toolResultIndexToId.clear();
+  childToolToParent.clear();
+
   // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
   if (messageQueue.length === 0) {
     setSessionState('idle');
@@ -1999,10 +2062,10 @@ export async function resetSession(): Promise<void> {
   console.log('[agent] resetSession: starting new conversation');
 
   // 1. Properly terminate the SDK session (same pattern as switchToSession)
-  // Must set shouldAbortSession so the messageGenerator exits its polling loop
+  // Must abort persistent session so the generator exits and subprocess terminates
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] resetSession: terminating existing SDK session');
-    shouldAbortSession = true;
+    abortPersistentSession();
     messageQueue.length = 0; // Clear queue so old session doesn't pick up stale messages
 
     // Wait for the session to fully terminate
@@ -2035,8 +2098,10 @@ export async function resetSession(): Promise<void> {
   hasInitialPrompt = false; // Reset so first message creates a new session in SessionStore
 
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
-  resumeSessionId = undefined;
-  sessionIdUsedByQuery = false; // New session ID, not yet used
+  sessionRegistered = false;
+  pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
+  messageResolver = null;
+  resolveTurnComplete = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
@@ -2098,7 +2163,7 @@ export function initializeAgent(nextAgentDir: string, initialPrompt?: string | n
  * 
  * Key behavior:
  * - Preserves target sessionId so messages are saved to the same session
- * - Sets resumeSessionId if available so SDK continues conversation context
+ * - Sets sessionRegistered if sdkSessionId exists so SDK continues conversation context
  * - If no sdkSessionId exists (old session), starts fresh but keeps same session ID
  */
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
@@ -2119,11 +2184,11 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   }
 
   // Properly terminate the old session if one is running
-  // Must set shouldAbortSession so the messageGenerator exits its polling loop
+  // Must abort persistent session so the generator exits and subprocess terminates
   // Otherwise the old session continues processing messages with stale settings
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] switchToSession: aborting current session');
-    shouldAbortSession = true;
+    abortPersistentSession();
     messageQueue.length = 0; // Clear queue before waiting so old session doesn't pick up stale messages
     if (sessionTerminationPromise) {
       await sessionTerminationPromise;
@@ -2141,7 +2206,10 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Reset all runtime state
   shouldAbortSession = false;
   isProcessing = false;
-  sessionIdUsedByQuery = false; // New session context
+  sessionRegistered = false; // New session context, will re-set from sessionMeta below
+  pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
+  messageResolver = null;
+  resolveTurnComplete = null;
   setSessionState('idle');
   messages.length = 0;
   messageQueue.length = 0;
@@ -2186,6 +2254,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
         role: storedMsg.role,
         content: parsedContent,
         timestamp: storedMsg.timestamp,
+        sdkUuid: storedMsg.sdkUuid,
         attachments: storedMsg.attachments?.map((att) => ({
           id: att.id,
           name: att.name,
@@ -2207,19 +2276,15 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing messages`);
   }
 
-  // Set SDK session ID for resume (if available)
-  if (sessionMeta.unifiedSession && sessionMeta.sdkSessionId) {
-    // 统一后的 session：sdkSessionId === id，直接用 id
-    resumeSessionId = sessionMeta.id;
-    console.log(`[agent] switchToSession: will resume unified session ${resumeSessionId}`);
-  } else if (sessionMeta.sdkSessionId) {
-    // 统一前的旧 session：用存储的 SDK ID
-    resumeSessionId = sessionMeta.sdkSessionId;
-    console.log(`[agent] switchToSession: will resume pre-unified SDK session ${resumeSessionId}`);
+  // Set sessionRegistered based on whether SDK has this session
+  if (sessionMeta.sdkSessionId) {
+    // SDK 已注册此 session，后续 query 必须用 resume
+    sessionRegistered = true;
+    console.log(`[agent] switchToSession: will resume session ${sessionId}`);
   } else {
-    // 无 SDK ID 的老旧 session 或从未 query 过的 session
-    resumeSessionId = undefined;
-    console.warn(`[agent] switchToSession: no SDK session_id available, will start fresh`);
+    // 从未 query 过的 session，用 sessionId 创建
+    sessionRegistered = false;
+    console.warn(`[agent] switchToSession: no SDK session_id, will start fresh`);
   }
 
   // Update agentDir from session
@@ -2233,7 +2298,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Session already exists, skip first-message session creation logic
   hasInitialPrompt = true;
 
-  console.log(`[agent] switchToSession: ready, agentDir=${agentDir}, hasResume=${!!resumeSessionId}`);
+  console.log(`[agent] switchToSession: ready, agentDir=${agentDir}, sessionRegistered=${sessionRegistered}`);
 
   // Pre-warm with resumed session so subprocess + MCP are ready before user types
   schedulePreWarm();
@@ -2292,6 +2357,11 @@ export async function enqueueUserMessage(
   model?: string,
   providerEnv?: ProviderEnv
 ): Promise<EnqueueResult> {
+  // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
+  if (rewindPromise) {
+    await rewindPromise;
+  }
+
   const trimmed = text.trim();
   const hasImages = images && images.length > 0;
 
@@ -2333,32 +2403,20 @@ export async function enqueueUserMessage(
     // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
     const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
     if (switchingFromThirdPartyToAnthropic) {
-      resumeSessionId = undefined;
-      console.log('[agent] Starting fresh session (no resume): third-party → Anthropic official (signature incompatible)');
-    } else if (systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
-      if (isDebugMode) console.log(`[agent] Will resume from SDK session: ${resumeSessionId}`);
-    } else {
-      // systemInitInfo not available — pre-warm was never fully initialized.
-      // Two sub-cases require different handling:
-      //   a) Historical session (messages exist on disk): the session ID is valid and
-      //      exists in the SDK's storage. We MUST use `resume` to continue it.
-      //   b) Brand new session (no messages): the SDK CLI may not have saved this
-      //      session. Use `sessionId` to create fresh, avoiding "No conversation found".
-      resumeSessionId = undefined;
-      if (messages.length === 0) {
-        sessionIdUsedByQuery = false;
-        console.log('[agent] Starting fresh session: no system_init, no messages (new session)');
-      } else {
-        // Keep sessionIdUsedByQuery=true so startStreamingSession uses `resume: sessionId`
-        console.log(`[agent] Resuming historical session: no system_init, but ${messages.length} messages exist`);
-      }
+      // Anthropic 官方验证 thinking block 签名，第三方不验证，必须新建 session
+      sessionRegistered = false;
+      sessionId = randomUUID();
+      hasInitialPrompt = false;   // 确保新 session 创建 metadata
+      messages.length = 0;        // 清除旧 provider 不兼容的消息
+      systemInitInfo = null;      // 清除旧 init info
+      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
+    // 其他 provider 切换：sessionRegistered 保持不变，自动走正确路径
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = providerEnv; // undefined for subscription, object for API
     // Terminate current session - it will restart automatically when processing the message
-    shouldAbortSession = true;
+    abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
     // This prevents race conditions where old session continues processing
     if (sessionTerminationPromise) {
@@ -2423,7 +2481,11 @@ export async function enqueueUserMessage(
   // Transition from pre-warm to active session
   if (isPreWarming) {
     isPreWarming = false;
-    console.log('[agent] pre-warm → active, first user message');
+    // Pre-warm 已收到 system_init → SDK 已注册此 session，后续必须用 resume
+    if (systemInitInfo) {
+      sessionRegistered = true;
+    }
+    console.log(`[agent] pre-warm → active, first user message, sessionRegistered=${sessionRegistered}`);
     // Replay buffered system_init so frontend gets tools/session info
     if (systemInitInfo) {
       broadcast('chat:system-init', { info: systemInitInfo, sessionId });
@@ -2524,23 +2586,26 @@ export async function enqueueUserMessage(
   // Persist messages to disk after adding user message
   persistMessagesToStorage();
 
-  if (!isSessionActive()) {
-    console.log('[agent] starting session (idle -> running)');
-    startStreamingSession().catch((error) => {
-      console.error('[agent] failed to start session', error);
-    });
-  }
-
-  // Push to queue — generator will pick it up asynchronously.
-  // No need to await: user message is already in messages[], broadcast, and persisted.
-  // This allows the HTTP response to return immediately so the frontend can clear the input.
-  messageQueue.push({
+  const queueItem: MessageQueueItem = {
     id: queueId,
     message: { role: 'user', content: contentBlocks },
     messageText: trimmed,
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
-  });
+  };
+
+  if (!isSessionActive()) {
+    // 无活跃 session（pre-warm 失败或首次启动）→ 先入队再启动 session
+    console.log('[agent] starting session (idle -> running)');
+    messageQueue.push(queueItem);
+    startStreamingSession().catch((error) => {
+      console.error('[agent] failed to start session', error);
+    });
+  } else {
+    // Session 已在运行（generator 在 waitForMessage 中等待）→ 直接投递
+    wakeGenerator(queueItem);
+  }
+
   return { queued: false };
 }
 
@@ -2676,6 +2741,89 @@ export function getQueueStatus(): Array<{ id: string; messagePreview: string }> 
   }));
 }
 
+/**
+ * 时间回溯：截断对话历史 + 即时回退文件状态。
+ * 持久 session 下 subprocess 存活，可直接调用 rewindFiles（无需临时 session）。
+ */
+export async function rewindSession(userMessageId: string): Promise<{
+  success: boolean;
+  error?: string;
+  content?: string;
+  attachments?: MessageWire['attachments'];
+}> {
+  const doRewind = async () => {
+    // 1. 找到目标 user message
+    const targetIndex = messages.findIndex(m => m.id === userMessageId && m.role === 'user');
+    if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
+    const targetMessage = messages[targetIndex];
+
+    // 2. 找到目标前的最后一个 assistant UUID
+    //    持久 session 模式下，user 消息不会通过 SDK stdout 回传（无 resume 重放），
+    //    因此 user 消息没有 sdkUuid。使用前一个 assistant 的 UUID 替代：
+    //    - rewindFiles(assistantUuid) → 回退该 assistant 之后的文件变更
+    //    - pendingResumeSessionAt = assistantUuid → 下次 resume 从该 assistant 截断
+    let lastAssistantUuid: string | undefined;
+    for (let i = targetIndex - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
+        lastAssistantUuid = messages[i].sdkUuid;
+        break;
+      }
+    }
+
+    // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
+    if (querySession && lastAssistantUuid) {
+      try {
+        const result = await querySession.rewindFiles(lastAssistantUuid);
+        console.log('[agent] rewindFiles result:', JSON.stringify(result));
+        if (!result.canRewind) {
+          console.warn('[agent] rewindFiles cannot rewind:', result.error);
+        }
+      } catch (err) {
+        console.error('[agent] rewindFiles error:', err);
+        // 文件回溯失败不阻断消息截断
+      }
+    }
+
+    // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
+    abortPersistentSession();
+    messageQueue.length = 0;
+    if (sessionTerminationPromise) {
+      try { await sessionTerminationPromise; } catch { /* ignore */ }
+    }
+    shouldAbortSession = false;
+
+    // 5. 收集被删消息内容（恢复到输入框）
+    const removedContent = typeof targetMessage.content === 'string' ? targetMessage.content : '';
+    const removedAttachments = targetMessage.attachments;
+
+    // 6. 截断消息
+    messages.length = targetIndex;
+    persistMessagesToStorage();
+
+    // 7. 设置下次 query 的对话截断点
+    if (lastAssistantUuid) {
+      pendingResumeSessionAt = lastAssistantUuid;
+    } else {
+      pendingResumeSessionAt = undefined;
+      sessionRegistered = false;
+      sessionId = randomUUID();
+    }
+
+    // 8. 预热下次 session
+    schedulePreWarm();
+
+    return { success: true as const, content: removedContent, attachments: removedAttachments };
+  };
+
+  const promise = doRewind();
+  rewindPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    rewindPromise = null;
+  }
+}
+
 async function startStreamingSession(preWarm = false): Promise<void> {
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
@@ -2692,6 +2840,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   resetAbortFlag();
   isProcessing = true;
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
+  let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   streamIndexToToolId.clear();
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
   if (!preWarm) {
@@ -2708,22 +2857,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
-    // Determine resume: explicit resumeSessionId takes priority, then safety-net flag.
-    // Once a sessionId has been used in any query(), the SDK rejects it for new sessions —
-    // all subsequent calls must use `resume`. This handles: queue restarts, provider changes
-    // before system_init arrives, and restored historical sessions.
-    const resumeFrom = resumeSessionId ?? (sessionIdUsedByQuery ? sessionId : undefined);
-    // Only clear resumeSessionId for non-pre-warm sessions.
-    // During pre-warm, preserve it so a retry after failure can still resume.
-    if (!preWarm) {
-      resumeSessionId = undefined;
-    }
+    // 单一变量决策：sessionRegistered 为 true 则 resume，否则创建新 session
+    const resumeFrom = sessionRegistered ? sessionId : undefined;
+    // sessionRegistered 不在此处修改 — 等待 system_init 确认
+
+    // 消费 rewind 设置的对话截断点
+    // 持久 session 模式下，pre-warm 即最终 session（用户消息通过 wakeGenerator 投递），
+    // 必须在 pre-warm 时就传 resumeSessionAt，否则 SDK 会加载完整历史不截断
+    const rewindResumeAt = pendingResumeSessionAt;
+    if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
-
-    // Mark that this sessionId has been used in a query — subsequent calls must use `resume`
-    sessionIdUsedByQuery = true;
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
 
     querySession = query({
       prompt: messageGenerator(),
@@ -2732,20 +2877,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // 新 session：传 sessionId 让 SDK 使用我们的 UUID
         // Resume：传 resume 恢复对话上下文
         ...(resumeFrom
-          ? { resume: resumeFrom }
+          ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
           : { sessionId: sessionId }
         ),
+        enableFileCheckpointing: true,
         maxThinkingTokens: 32_000,
         // Only use project-level settings from .claude/ directory
         // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
         // MCP is explicitly configured via mcpServers, not SDK auto-discovery
         settingSources: buildSettingSources(),
-        // Permission mode mapping:
-        // - fullAgency → bypassPermissions (no confirmation needed)
-        // - other modes → default (enables canUseTool callback for user confirmation)
-        permissionMode: currentPermissionMode === 'fullAgency' ? 'bypassPermissions' : 'default',
-        // Only needed when using bypassPermissions
-        ...(currentPermissionMode === 'fullAgency' ? { allowDangerouslySkipPermissions: true } : {}),
+        // Permission mode mapping (uses mapToSdkPermissionMode):
+        // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
+        // - plan → plan
+        // - fullAgency → bypassPermissions (skip all checks)
+        // - custom → default (all tools go through canUseTool)
+        permissionMode: sdkPermissionMode,
+        // allowDangerouslySkipPermissions is required when using bypassPermissions
+        ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
         model: currentModel, // Use currently selected model
         pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
         executable: 'bun',
@@ -2766,7 +2914,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
           ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
         // Custom permission handling - check rules and prompt user for unknown tools
-        // Only effective when permissionMode is 'default'
+        // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
         canUseTool: async (toolName, input, options) => {
           console.debug(`[permission] canUseTool checking: ${toolName}`);
 
@@ -2842,22 +2990,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     startupTimeoutId = setTimeout(() => {
         if (!firstMessageReceived && !shouldAbortSession) {
             console.error(`[agent] Startup timeout: no SDK message in ${STARTUP_TIMEOUT_MS / 1000}s`);
-            shouldAbortSession = true;
+            abortedByTimeout = true;
             if (!isPreWarming) {
                 broadcast('chat:agent-error', {
                     message: 'Agent 启动超时，请重试。如果持续出现，请检查网络连接和 API 配置。'
                 });
                 broadcast('chat:message-error', 'Agent 启动超时');
             }
-            // Setting shouldAbortSession alone is NOT enough — the for-await loop
-            // blocks on querySession.next() and the flag check (line ~2911) only runs
-            // AFTER a message arrives. We must call interrupt() to force the SDK
-            // subprocess to exit, which completes the async generator and unblocks for-await.
-            if (querySession) {
-                querySession.interrupt().catch(err => {
-                    console.warn('[agent] Startup timeout: interrupt failed:', err);
-                });
-            }
+            // abortPersistentSession 统一处理：设置 shouldAbortSession、唤醒 generator
+            // 的 waitForMessage/waitForTurnComplete、调用 interrupt() 解除 for-await 阻塞
+            abortPersistentSession();
         }
     }, STARTUP_TIMEOUT_MS);
 
@@ -2882,12 +3024,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         systemInitInfo = nextSystemInit;
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
+          sessionRegistered = true;  // SDK 确认注册，后续必须 resume
           broadcast('chat:system-init', { info: systemInitInfo, sessionId });
         } else {
-          // Pre-warm succeeded — subprocess + MCP ready
+          // Pre-warm 不设 sessionRegistered — 这是核心设计约束
+          // Pre-warm 的 system_init 只意味着 subprocess 准备好了，
+          // 但 SDK 不会在没有用户消息的情况下持久化 session
           preWarmStartedOk = true;
           preWarmFailCount = 0;
-          resumeSessionId = undefined; // Session started successfully, safe to clear
           console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
         }
 
@@ -2904,6 +3048,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             console.log(`[agent] SDK session_id saved (pre-unified): ${nextSystemInit.session_id} (our: ${sessionId})`);
           }
         }
+
       }
 
       // Handle system status (e.g., compacting)
@@ -3119,6 +3264,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'user') {
+        // Track SDK user UUID — only for non-synthetic messages
+        if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'user' && !messages[i].sdkUuid) {
+              messages[i].sdkUuid = sdkMessage.uuid;
+              broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
+              break;
+            }
+          }
+        }
         // Process tool_result blocks from user messages
         // This handles both subagent results (parent_tool_use_id set) and top-level tool results (parent_tool_use_id null)
         if (sdkMessage.message?.content) {
@@ -3191,6 +3346,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'assistant') {
+        // Track SDK assistant UUID for resumeSessionAt / rewindFiles
+        const currentAssistant = ensureAssistantMessage();
+        // 始终更新为最新的 UUID — SDK 一个回合可能输出多条 assistant 消息
+        // （thinking → text），resumeSessionAt 需要最后一条的 UUID 才能保留完整回答
+        if (sdkMessage.uuid) {
+          currentAssistant.sdkUuid = sdkMessage.uuid;
+        }
         const assistantMessage = sdkMessage.message;
         // Main turn token usage is extracted from result message (more reliable across providers)
         // Here we extract usage only for subagent tool broadcasts (Task tool runtime stats)
@@ -3408,6 +3570,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           duration_ms: durationMs,
         });
         handleMessageComplete();
+        signalTurnComplete();  // 解锁 generator 进入下一轮
       }
     }
   } catch (error) {
@@ -3441,137 +3604,110 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const wasPreWarming = isPreWarming;
     isPreWarming = false;
     isProcessing = false;
-    querySession = null;
 
-    // Each query() call processes ONE user message (single-yield generator pattern).
-    // After successful completion, set resumeSessionId so subsequent query() calls
-    // use `resume` instead of `sessionId` (the SDK rejects reusing a session ID).
-    if (!wasPreWarming && !shouldAbortSession && sessionState !== 'error' && systemInitInfo?.session_id) {
-      resumeSessionId = systemInitInfo.session_id;
+    // 确保 generator 退出（防止 streamInput 永远阻塞）
+    if (messageResolver) {
+      const resolve = messageResolver;
+      messageResolver = null;
+      resolve(null);
     }
+    signalTurnComplete();
 
-    // Check if there are queued messages to process next.
-    const shouldRestart = !wasPreWarming && !shouldAbortSession
-      && sessionState !== 'error' && messageQueue.length > 0;
+    // 安全关闭 SDK session
+    const session = querySession;
+    querySession = null;
+    try { session?.close(); } catch { /* subprocess 可能已退出 */ }
+
+    // sessionRegistered 已在 system_init handler 中设置，无需重复
 
     // Don't broadcast state changes from pre-warm sessions
     if (!wasPreWarming) {
-      if (sessionState !== 'error' && !shouldRestart) {
+      if (sessionState !== 'error') {
         setSessionState('idle');
       }
     }
-    // Clear cron task context after session ends
+
     clearCronTaskContext();
     resolveTermination!();
 
     if (wasPreWarming) {
-      // The SDK subprocess has exited, so the sessionId is no longer "in use".
-      sessionIdUsedByQuery = false;
+      // sessionRegistered 不修改 — pre-warm 永不触碰此标志
 
       if (!preWarmStartedOk) {
-        // Pre-warm never received system_init — session didn't start successfully.
-        // Clear stale resumeSessionId to prevent infinite retry with a non-existent
-        // server-side session (e.g., expired session from a previous app launch).
-        resumeSessionId = undefined;
-
-        if (!shouldAbortSession) {
-          // Genuine failure (not a config-change abort) — count towards PRE_WARM_MAX_RETRIES.
-          // SDK "No conversation found" errors arrive as result messages (not exceptions),
-          // so this is the only path that increments preWarmFailCount for such failures.
+        if (!shouldAbortSession || abortedByTimeout) {
           preWarmFailCount++;
-          console.warn(`[agent] pre-warm failed (no system_init), cleared resumeSessionId, failCount=${preWarmFailCount}`);
+          console.warn(`[agent] pre-warm failed, failCount=${preWarmFailCount}${abortedByTimeout ? ' (timeout)' : ''}`);
         } else {
-          console.log('[agent] pre-warm aborted before system_init, cleared resumeSessionId');
+          console.log('[agent] pre-warm aborted by config change');
         }
       }
 
-      // Re-schedule: on failure (retry with fresh session) or on abort (config change).
-      // Don't re-schedule after success — subprocess+MCP already warmed, no benefit.
       if (!preWarmStartedOk || shouldAbortSession) {
         schedulePreWarm();
       }
-    } else if (shouldRestart) {
-      // Process next queued message by starting a new session with resume
-      // (resumeSessionId already set above)
-      console.log(`[agent] Queue has ${messageQueue.length} pending message(s), restarting session with resume=${resumeSessionId}`);
-      startStreamingSession().catch((error) => {
-        console.error('[agent] failed to restart session for queued message:', error);
-        setSessionState('idle');
-      });
+    } else if (!shouldAbortSession && sessionRegistered && sessionState !== 'error') {
+      // 非主动中止的意外退出（subprocess crash）→ 安排恢复
+      console.log('[agent] Unexpected session exit, scheduling recovery pre-warm');
+      schedulePreWarm();
     }
   }
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  // Yield exactly ONE message and return.
-  // The SDK's streamInput() iterates the generator with `for await`, writing each value
-  // to the subprocess's stdin. When the generator returns (done), streamInput() calls
-  // endInput() to close stdin (EOF), allowing the subprocess to finish and exit cleanly.
-  // For queued messages, the startStreamingSession() finally block detects remaining items
-  // and restarts the session with `resume` to process the next one sequentially.
-  console.log('[messageGenerator] Started, waiting for message');
+  // 持久 yield 模式：generator 不 return → subprocess 全程存活 → 消除每轮重启开销。
+  // while(true) 循环等待消息 → yield 到 SDK stdin → 等待 AI 回复完成 → 下一轮。
+  // 唯一退出信号：waitForMessage() 返回 null（由 abortPersistentSession 触发）。
+  console.log('[messageGenerator] Started (persistent mode)');
 
-  // Wait for one message in queue
-  while (messageQueue.length === 0) {
+  while (true) {
+    // 等待队列中的消息（事件驱动，无轮询）
+    const item = await waitForMessage();
+    if (!item) {
+      console.log('[messageGenerator] Received null — exiting (abort or session end)');
+      return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
+    }
+
+    // 排队消息的延迟渲染（原逻辑不变）
+    if (item.wasQueued) {
+      const userMessage: MessageWire = {
+        id: String(messageSequence++),
+        role: 'user',
+        content: item.messageText,
+        timestamp: new Date().toISOString(),
+        attachments: item.attachments,
+      };
+      messages.push(userMessage);
+      persistMessagesToStorage();
+      resetTurnUsage();
+      currentTurnStartTime = Date.now();
+      broadcast('queue:started', {
+        queueId: item.id,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+      });
+    }
+
+    // Yield 消息到 SDK stdin
+    isStreamingMessage = true;
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}`);
+    yield {
+      type: 'user' as const,
+      message: item.message,
+      parent_tool_use_id: null,
+      session_id: getSessionId()
+    };
+    item.resolve();
+
+    // 等待本轮 AI 回复完成（result 消息到达后解锁）
+    await waitForTurnComplete();
     if (shouldAbortSession) {
-      console.log('[messageGenerator] Abort flag set while waiting, returning');
+      console.log('[messageGenerator] Abort flag set after turn complete, exiting');
       return;
     }
-    await new Promise<void>(resolve => setTimeout(resolve, 100));
   }
-
-  if (shouldAbortSession) {
-    console.log('[messageGenerator] Abort flag set after wait, returning');
-    return;
-  }
-
-  const item = messageQueue.shift();
-  if (!item) return;
-
-  // For queued items: the user message was NOT added to messages[] at enqueue time.
-  // Now that execution is starting, push it to backend state and persist,
-  // but do NOT broadcast chat:message-replay — instead send message data via queue:started.
-  // This lets the frontend control rendering timing and avoids the user message
-  // appearing in the message list while the previous AI response is still visually streaming.
-  if (item.wasQueued) {
-    const userMessage: MessageWire = {
-      id: String(messageSequence++),
-      role: 'user',
-      content: item.messageText,
-      timestamp: new Date().toISOString(),
-      attachments: item.attachments,
-    };
-    messages.push(userMessage);
-    persistMessagesToStorage();
-
-    resetTurnUsage();
-    currentTurnStartTime = Date.now();
-    // Include user message data so the frontend can render it.
-    // Attachments are included so the frontend has a reliable source for image rendering
-    // (especially for cron-triggered queued messages where frontend queuedMessages may lack image data).
-    broadcast('queue:started', {
-      queueId: item.id,
-      userMessage: {
-        id: userMessage.id,
-        role: userMessage.role,
-        content: userMessage.content,
-        timestamp: userMessage.timestamp,
-        attachments: userMessage.attachments,
-      },
-    });
-  }
-
-  // Mark as streaming BEFORE yielding to SDK, so any new messages arriving
-  // during SDK processing will be queued.
-  isStreamingMessage = true;
-  console.log(`[messageGenerator] Yielding message to SDK, wasQueued=${item.wasQueued}`);
-  yield {
-    type: 'user' as const,
-    message: item.message,
-    parent_tool_use_id: null,
-    session_id: getSessionId()
-  };
-  item.resolve();
-  console.log('[messageGenerator] Message yielded, generator returning (single-yield pattern)');
-  // Generator returns → SDK's streamInput loop exits → endInput() closes stdin → subprocess processes and exits
 }
