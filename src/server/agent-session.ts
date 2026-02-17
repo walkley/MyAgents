@@ -2861,8 +2861,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const resumeFrom = sessionRegistered ? sessionId : undefined;
     // sessionRegistered 不在此处修改 — 等待 system_init 确认
 
-    // 消费 rewind 设置的对话截断点（仅用于非 pre-warm 的实际 query）
-    const rewindResumeAt = !preWarm ? pendingResumeSessionAt : undefined;
+    // 消费 rewind 设置的对话截断点
+    // 持久 session 模式下，pre-warm 即最终 session（用户消息通过 wakeGenerator 投递），
+    // 必须在 pre-warm 时就传 resumeSessionAt，否则 SDK 会加载完整历史不截断
+    const rewindResumeAt = pendingResumeSessionAt;
     if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
