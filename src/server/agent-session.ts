@@ -1030,14 +1030,14 @@ async function checkToolPermission(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    // Timeout after 5 minutes
+    // Timeout after 10 minutes (consistent with AskUserQuestion timeout)
     const timer = setTimeout(() => {
       if (pendingPermissions.has(requestId)) {
         cleanup();
-        console.warn(`[permission] ${toolName}: timed out after 5 minutes, denying`);
+        console.warn(`[permission] ${toolName}: timed out after 10 minutes, denying`);
         resolve('deny');
       }
-    }, 5 * 60 * 1000);
+    }, 10 * 60 * 1000);
 
     pendingPermissions.set(requestId, { resolve, toolName, input, timer });
   });
@@ -2756,12 +2756,24 @@ export async function rewindSession(userMessageId: string): Promise<{
     const targetIndex = messages.findIndex(m => m.id === userMessageId && m.role === 'user');
     if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
     const targetMessage = messages[targetIndex];
-    if (!targetMessage.sdkUuid) return { success: false as const, error: 'Message has no SDK UUID' };
 
-    // 2. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
-    if (querySession) {
+    // 2. 找到目标前的最后一个 assistant UUID
+    //    持久 session 模式下，user 消息不会通过 SDK stdout 回传（无 resume 重放），
+    //    因此 user 消息没有 sdkUuid。使用前一个 assistant 的 UUID 替代：
+    //    - rewindFiles(assistantUuid) → 回退该 assistant 之后的文件变更
+    //    - pendingResumeSessionAt = assistantUuid → 下次 resume 从该 assistant 截断
+    let lastAssistantUuid: string | undefined;
+    for (let i = targetIndex - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
+        lastAssistantUuid = messages[i].sdkUuid;
+        break;
+      }
+    }
+
+    // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
+    if (querySession && lastAssistantUuid) {
       try {
-        const result = await querySession.rewindFiles(targetMessage.sdkUuid);
+        const result = await querySession.rewindFiles(lastAssistantUuid);
         console.log('[agent] rewindFiles result:', JSON.stringify(result));
         if (!result.canRewind) {
           console.warn('[agent] rewindFiles cannot rewind:', result.error);
@@ -2772,7 +2784,7 @@ export async function rewindSession(userMessageId: string): Promise<{
       }
     }
 
-    // 3. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
+    // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
     abortPersistentSession();
     messageQueue.length = 0;
     if (sessionTerminationPromise) {
@@ -2780,18 +2792,9 @@ export async function rewindSession(userMessageId: string): Promise<{
     }
     shouldAbortSession = false;
 
-    // 4. 收集被删消息内容（恢复到输入框）
+    // 5. 收集被删消息内容（恢复到输入框）
     const removedContent = typeof targetMessage.content === 'string' ? targetMessage.content : '';
     const removedAttachments = targetMessage.attachments;
-
-    // 5. 找到目标前的最后一个 assistant UUID
-    let lastAssistantUuid: string | undefined;
-    for (let i = targetIndex - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
-        lastAssistantUuid = messages[i].sdkUuid;
-        break;
-      }
-    }
 
     // 6. 截断消息
     messages.length = targetIndex;
@@ -2986,22 +2989,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (!firstMessageReceived && !shouldAbortSession) {
             console.error(`[agent] Startup timeout: no SDK message in ${STARTUP_TIMEOUT_MS / 1000}s`);
             abortedByTimeout = true;
-            shouldAbortSession = true;
             if (!isPreWarming) {
                 broadcast('chat:agent-error', {
                     message: 'Agent 启动超时，请重试。如果持续出现，请检查网络连接和 API 配置。'
                 });
                 broadcast('chat:message-error', 'Agent 启动超时');
             }
-            // Setting shouldAbortSession alone is NOT enough — the for-await loop
-            // blocks on querySession.next() and the flag check (line ~2911) only runs
-            // AFTER a message arrives. We must call interrupt() to force the SDK
-            // subprocess to exit, which completes the async generator and unblocks for-await.
-            if (querySession) {
-                querySession.interrupt().catch(err => {
-                    console.warn('[agent] Startup timeout: interrupt failed:', err);
-                });
-            }
+            // abortPersistentSession 统一处理：设置 shouldAbortSession、唤醒 generator
+            // 的 waitForMessage/waitForTurnComplete、调用 interrupt() 解除 for-await 阻塞
+            abortPersistentSession();
         }
     }, STARTUP_TIMEOUT_MS);
 
