@@ -119,20 +119,27 @@ import { getBundledRuntimePath } from './utils/runtime';
 spawn('npm', ['install', pkg]);
 ```
 
-### 4. Session 上下文保持
+### 4. Session 上下文保持 + 持久 Session
 
-配置变更（Provider/Model/MCP）时必须保持对话上下文，只有用户点击「新对话」才创建全新 session：
+配置变更（Provider/Model/MCP）时必须保持对话上下文，只有用户点击「新对话」才创建全新 session。
+
+**持久 Session 架构**（v0.1.18+）：`messageGenerator()` 使用 `while(true)` 持续 yield，SDK subprocess 全程存活。所有中止场景必须使用 `abortPersistentSession()` 统一中止（设置 abort 标志 + 唤醒 generator Promise 门控 + interrupt subprocess）。
 
 ```typescript
-// ✅ 配置变更时 resume
+// ✅ 配置变更时：统一中止 + 设置 resume
 if (configChanged) {
     resumeSessionId = systemInitInfo?.session_id;
-    shouldAbortSession = true;
+    abortPersistentSession();  // 唤醒 waitForMessage/waitForTurnComplete + interrupt
 }
 
+// ❌ 直接设置标志，generator 的 Promise 门控无法退出
+shouldAbortSession = true;  // generator 永远阻塞在 waitForMessage()！
+
 // ❌ 配置变更直接重启，AI 会"失忆"
-shouldAbortSession = true;  // 没有 resumeSessionId！
+abortPersistentSession();  // 没有 resumeSessionId！
 ```
+
+**`abortPersistentSession()` 必须用于所有中止场景**：`setMcpServers`、`setAgents`、`resetSession`、`switchToSession`、`enqueueUserMessage` provider change、`rewindSession`。
 
 ### 5. Tab 初始化与 Pre-warm
 
@@ -150,6 +157,7 @@ Tab 创建 → Sidecar 启动 → Model 同步(/api/model/set)
 - **Model 同步不触发 pre-warm**（模型变更无需重启 session），MCP/Agents 变更才触发
 - **新增配置同步端点时**，确保 `currentXxx` 变量在 pre-warm 前已设置，否则 `applySessionConfig` 会在首消息时执行阻塞操作
 - Pre-warm 失败通过 `preWarmStartedOk` 标志统一管理，abort 不计入失败次数
+- **持久 Session 中 pre-warm 就是最终 session**：用户消息通过 `wakeGenerator()` 直接注入，不会再次调用 `startStreamingSession()`。任何使用 `!preWarm` 条件守卫的逻辑都可能导致该逻辑在持久模式下永远不执行
 
 ---
 
@@ -308,6 +316,8 @@ const savePresetCustomModels = useCallback(async (providerId, models) => {
 | 不清理定时器 | 内存泄漏 | cleanup 函数 |
 | 依赖 npm/npx/Node.js | 用户可能未安装 | 内置 bun |
 | 配置变更不 resume session | AI 失忆 | 先设 `resumeSessionId` |
+| 直接设置 `shouldAbortSession = true` | generator Promise 门控无法退出 | `abortPersistentSession()` |
+| pre-warm 中使用 `!preWarm` 条件守卫 | 持久 Session 下 pre-warm 就是最终 session | 移除 `!preWarm` 守卫或改用其他条件 |
 | `useConfig` 写盘用 React `config` 状态 | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 从磁盘读 |
 | 新增配置同步不考虑 pre-warm | 首消息阻塞延迟 | 确保变量在 pre-warm 前设置 |
 | 提交前不 typecheck | CI 失败 | `npm run typecheck` |

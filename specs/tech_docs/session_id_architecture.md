@@ -43,7 +43,7 @@ MyAgents 使用 Session ID 标识每次对话，用于消息存储、前端展�
 5. Resume 时直接使用 sessionId
 ```
 
-## 当前实现（v0.1.11）
+## 当前实现（v0.1.18）
 
 ### 核心数据结构
 
@@ -75,10 +75,37 @@ querySession = query({
             ? { resume: resumeFrom }
             : { sessionId: sessionId }
         ),
+        // 可选：rewind 截断点（与 resume 配合）
+        ...(rewindResumeAt
+            ? { resumeSessionAt: rewindResumeAt }
+            : {}
+        ),
         // ...
     }
 });
 ```
+
+### 持久 Session 模式（v0.1.18+）
+
+v0.1.18 引入持久 Session 架构，`messageGenerator()` 使用 `while(true)` 循环持续 yield 消息，SDK subprocess 全程存活，不再每轮对话重启。
+
+**`resume` 的真正用途**：仅用于以下场景，不再是每轮对话的机制：
+
+| 场景 | 说明 |
+|------|------|
+| 恢复历史 session | 用户从历史记录切换到旧 session |
+| Rewind 后截断历史 | `resumeSessionAt` 截断 SDK 消息树 |
+| Subprocess crash 恢复 | `finally` 块触发 `schedulePreWarm()` 重建 session |
+| 配置变更重启 | MCP/Agent 变更导致 session 中止后恢复 |
+
+**核心状态变量**：
+
+```typescript
+let sessionRegistered = false;  // SDK 是否已注册此 sessionId（替代旧的 sessionIdUsedByQuery）
+```
+
+- `sessionRegistered = true`：SDK 已持久化此 session，后续只能用 `resume` 访问
+- `sessionRegistered = false`：SDK 未注册，可以用 `sessionId` 创建新 session
 
 ### Session 切换 resume 逻辑
 
@@ -103,10 +130,24 @@ system-init 事件中验证 SDK 是否确认使用了我们的 UUID：
 ```typescript
 if (nextSystemInit.session_id) {
     const isUnified = nextSystemInit.session_id === sessionId;
+    sessionRegistered = true;  // SDK 已注册此 session
     updateSessionMetadata(sessionId, {
         sdkSessionId: nextSystemInit.session_id,
         unifiedSession: isUnified,
     });
+}
+```
+
+### sdkUuid 追踪（v0.1.18+）
+
+每条消息的 SDK UUID 用于 `rewindFiles()` 和 `resumeSessionAt` 截断。
+
+**关键规则**：assistant 的 `sdkUuid` 必须存储**最后一条**消息（text）的 UUID，而非第一条（thinking）。SDK 对一轮 assistant 回复输出多条 `type=assistant` 消息——先 thinking（UUID "A"），再 text（UUID "B"）。`resumeSessionAt` 保留指定 UUID 及之前的所有消息，若使用 thinking UUID 会丢失 text 部分。
+
+```typescript
+// 每次 type=assistant 都更新，确保最终值是最后一条（text）的 UUID
+if (sdkMessage.uuid) {
+    currentAssistant.sdkUuid = sdkMessage.uuid;
 }
 ```
 

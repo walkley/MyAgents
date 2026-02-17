@@ -39,22 +39,27 @@ const resetSession = useCallback(async (): Promise<boolean> => {
 ```typescript
 // agent-session.ts
 export async function resetSession(): Promise<void> {
-    // 1. 中断进行中的响应
-    if (querySession) {
-        await querySession.interrupt();
-    }
+    // 1. 中止持久 session（唤醒 generator 门控 + interrupt）
+    abortPersistentSession();
+    messageQueue.length = 0;
+    if (sessionTerminationPromise) await sessionTerminationPromise;
 
-    // 2. 清空消息
+    // 2. 清空消息和状态
     clearMessageState();
+    shouldAbortSession = false;
+    messageResolver = null;
+    resolveTurnComplete = null;
 
     // 3. 生成新 sessionId
     sessionId = randomUUID();
+    sessionRegistered = false;
 
     // 4. 清理权限
     clearSessionPermissions();
 
-    // 5. 广播新状态
+    // 5. 广播新状态 + 预热
     broadcast('chat:init', { ... });
+    schedulePreWarm();
 }
 ```
 

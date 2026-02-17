@@ -187,16 +187,15 @@ function migrateToJsonl(sessionId: string): SessionMessage[] {
 
 ```typescript
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
-    // 1. 正确终止旧 session（关键！否则 messageGenerator 不会退出）
-    if (querySession || sessionTerminationPromise) {
-        shouldAbortSession = true;
-        messageQueue.length = 0;
-        if (sessionTerminationPromise) await sessionTerminationPromise;
-        querySession = null;
-    }
+    // 1. 中止持久 session（唤醒 generator 门控 + interrupt）
+    abortPersistentSession();
+    messageQueue.length = 0;
+    if (sessionTerminationPromise) await sessionTerminationPromise;
 
     // 2. 重置状态
     shouldAbortSession = false;
+    messageResolver = null;
+    resolveTurnComplete = null;
     messages.length = 0;
 
     // 3. 加载历史消息到内存（支持增量保存）
@@ -207,8 +206,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
         }
     }
 
-    // 4. 更新 sessionId
+    // 4. 更新 sessionId + resume 策略
     sessionId = targetSessionId;
+    // resume 逻辑见 session_id_architecture.md
 }
 ```
 
