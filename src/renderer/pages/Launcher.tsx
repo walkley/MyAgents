@@ -125,6 +125,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             }
             return newEnabled;
         });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes, not on every property change
     }, [selectedWorkspace?.id, patchProject]);
 
     // Restore launcherLastUsed settings once config finishes loading from disk.
@@ -160,6 +161,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (selectedWorkspace) {
             void patchProject(selectedWorkspace.id, { permissionMode: mode });
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
     }, [selectedWorkspace?.id, patchProject]);
 
     const handleLauncherModelChange = useCallback((model: string | undefined) => {
@@ -167,6 +169,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (selectedWorkspace) {
             void patchProject(selectedWorkspace.id, { model: model ?? null });
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
     }, [selectedWorkspace?.id, patchProject]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined) => {
@@ -174,6 +177,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (selectedWorkspace) {
             void patchProject(selectedWorkspace.id, { providerId: providerId ?? null });
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
     }, [selectedWorkspace?.id, patchProject]);
 
     // Handle send from BrandSection
