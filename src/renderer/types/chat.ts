@@ -128,5 +128,6 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
   timestamp: Date;
+  sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
   attachments?: MessageAttachment[];
 }

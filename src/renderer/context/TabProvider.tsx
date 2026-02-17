@@ -451,7 +451,7 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping message-replay (new session)');
                     break;
                 }
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string } } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string } } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 if (seenIdsRef.current.has(msg.id)) break;
@@ -469,6 +469,21 @@ export default function TabProvider({
                     timestamp: new Date(msg.timestamp),
                     attachments,
                 }]);
+                break;
+            }
+
+            case 'chat:message-sdk-uuid': {
+                // Backend assigns sdkUuid after SDK echoes messages — update React state
+                const payload = data as { messageId: string; sdkUuid: string } | null;
+                if (payload?.messageId && payload?.sdkUuid) {
+                    setMessages(prev => {
+                        const idx = prev.findIndex(m => m.id === payload.messageId);
+                        if (idx < 0 || prev[idx].sdkUuid) return prev;
+                        const updated = [...prev];
+                        updated[idx] = { ...updated[idx], sdkUuid: payload.sdkUuid };
+                        return updated;
+                    });
+                }
                 break;
             }
 
@@ -1386,7 +1401,7 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
+            const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -1415,6 +1430,7 @@ export default function TabProvider({
                     role: msg.role,
                     content: parsedContent,
                     timestamp: new Date(msg.timestamp),
+                    sdkUuid: msg.sdkUuid,
                     attachments: msg.attachments?.map((att: { id: string; name: string; mimeType: string; path: string; previewUrl?: string }) => ({
                         id: att.id,
                         name: att.name,

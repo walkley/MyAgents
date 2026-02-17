@@ -102,6 +102,7 @@ export type MessageWire = {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
   timestamp: string;
+  sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
   attachments?: {
     id: string;
     name: string;
@@ -164,6 +165,13 @@ let currentProviderEnv: ProviderEnv | undefined = undefined;
 // 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
 // Pre-warm 永不修改此标志 — 从结构上消除超时/重试导致的状态错误。
 let sessionRegistered = false;
+
+// 时间回溯：对话截断后，下次 query 需携带 resumeSessionAt 截断 SDK 对话历史
+let pendingResumeSessionAt: string | undefined;
+// 时间回溯：延迟到 pre-warm 的 system_init 时执行 rewindFiles
+let pendingRewindUuid: string | undefined;
+// 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
+let rewindPromise: Promise<unknown> | null = null;
 
 // ===== System Prompt Configuration =====
 // Supports three modes:
@@ -1044,6 +1052,7 @@ function persistMessagesToStorage(
       role: msg.role,
       content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
       timestamp: msg.timestamp,
+      sdkUuid: msg.sdkUuid,
       attachments: msg.attachments?.map((att) => ({
         id: att.id,
         name: att.name,
@@ -2028,6 +2037,8 @@ export async function resetSession(): Promise<void> {
 
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   sessionRegistered = false;
+  pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
+  pendingRewindUuid = undefined;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
   // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
@@ -2133,6 +2144,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   shouldAbortSession = false;
   isProcessing = false;
   sessionRegistered = false; // New session context, will re-set from sessionMeta below
+  pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
+  pendingRewindUuid = undefined;
   setSessionState('idle');
   messages.length = 0;
   messageQueue.length = 0;
@@ -2177,6 +2190,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
         role: storedMsg.role,
         content: parsedContent,
         timestamp: storedMsg.timestamp,
+        sdkUuid: storedMsg.sdkUuid,
         attachments: storedMsg.attachments?.map((att) => ({
           id: att.id,
           name: att.name,
@@ -2279,6 +2293,11 @@ export async function enqueueUserMessage(
   model?: string,
   providerEnv?: ProviderEnv
 ): Promise<EnqueueResult> {
+  // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
+  if (rewindPromise) {
+    await rewindPromise;
+  }
+
   const trimmed = text.trim();
   const hasImages = images && images.length > 0;
 
@@ -2398,7 +2417,11 @@ export async function enqueueUserMessage(
   // Transition from pre-warm to active session
   if (isPreWarming) {
     isPreWarming = false;
-    console.log('[agent] pre-warm → active, first user message');
+    // Pre-warm 已收到 system_init → SDK 已注册此 session，后续必须用 resume
+    if (systemInitInfo) {
+      sessionRegistered = true;
+    }
+    console.log(`[agent] pre-warm → active, first user message, sessionRegistered=${sessionRegistered}`);
     // Replay buffered system_init so frontend gets tools/session info
     if (systemInitInfo) {
       broadcast('chat:system-init', { info: systemInitInfo, sessionId });
@@ -2651,6 +2674,226 @@ export function getQueueStatus(): Array<{ id: string; messagePreview: string }> 
   }));
 }
 
+/**
+ * 通过临时 SDK session 执行文件回溯。
+ * resume 会触发消息 replay，借此捕获之前缺失的 sdkUuid，
+ * 然后调用 rewindFiles 回退文件状态。
+ */
+async function executeRewind(targetMessageId: string): Promise<boolean> {
+  const env = buildClaudeSessionEnv();
+  const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
+  const REWIND_TIMEOUT_MS = 30_000;
+
+  const tempQuery = query({
+    prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
+      // 空 generator：不发送用户消息，只借助 session 调用 rewindFiles
+    })(),
+    options: {
+      resume: sessionId,
+      enableFileCheckpointing: true,
+      maxThinkingTokens: 32_000,
+      settingSources: buildSettingSources(),
+      permissionMode: sdkPermissionMode,
+      ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
+      model: currentModel,
+      pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
+      executable: 'bun',
+      env,
+      cwd: agentDir,
+    },
+  });
+
+  let rewound = false;
+  let timedOut = false;
+  let initReceived = false;
+  // Track next unassigned user message index for forward-order replay matching
+  let nextUserMatchIdx = 0;
+
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    tempQuery.close();
+  }, REWIND_TIMEOUT_MS);
+
+  try {
+    for await (const sdkMessage of tempQuery) {
+      // 1. Handle system_init
+      const init = parseSystemInitInfo(sdkMessage);
+      if (init) {
+        initReceived = true;
+        sessionRegistered = true;
+        if (init.session_id) {
+          updateSessionMetadata(sessionId, {
+            sdkSessionId: init.session_id,
+            unifiedSession: init.session_id === sessionId,
+          });
+        }
+
+        // If target already has sdkUuid (from earlier tracking), call rewindFiles immediately
+        const existingUuid = messages.find(m => m.id === targetMessageId)?.sdkUuid;
+        if (existingUuid) {
+          try {
+            const result = await tempQuery.rewindFiles(existingUuid);
+            console.log('[agent] rewindFiles result:', JSON.stringify(result));
+            rewound = result.canRewind;
+            if (!result.canRewind) {
+              console.warn('[agent] rewindFiles cannot rewind:', result.error);
+            }
+          } catch (err) {
+            console.error('[agent] rewindFiles error:', err);
+          }
+          break;
+        }
+        // Otherwise continue iterating to capture UUIDs from replay
+        continue;
+      }
+
+      // 2. Capture user UUIDs from replay messages (replay comes in order after system_init)
+      if (initReceived && sdkMessage.type === 'user'
+        && !(sdkMessage as { isSynthetic?: boolean }).isSynthetic
+        && sdkMessage.uuid) {
+        // Forward search: match replay messages to our messages in order
+        for (let i = nextUserMatchIdx; i < messages.length; i++) {
+          if (messages[i].role === 'user' && !messages[i].sdkUuid) {
+            messages[i].sdkUuid = sdkMessage.uuid;
+            broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
+            nextUserMatchIdx = i + 1;
+
+            // Found target — call rewindFiles
+            if (messages[i].id === targetMessageId) {
+              try {
+                const result = await tempQuery.rewindFiles(sdkMessage.uuid);
+                console.log('[agent] rewindFiles result:', JSON.stringify(result));
+                rewound = result.canRewind;
+                if (!result.canRewind) {
+                  console.warn('[agent] rewindFiles cannot rewind:', result.error);
+                }
+              } catch (err) {
+                console.error('[agent] rewindFiles error:', err);
+              }
+              break; // inner for
+            }
+            break; // inner for — one match per replay message
+          }
+        }
+        // If we've called rewindFiles, exit the outer loop
+        if (rewound || messages.find(m => m.id === targetMessageId)?.sdkUuid) {
+          break;
+        }
+      }
+
+      // 3. Also capture assistant UUIDs from replay
+      if (initReceived && sdkMessage.type === 'assistant' && sdkMessage.uuid) {
+        for (let i = 0; i < messages.length; i++) {
+          if (messages[i].role === 'assistant' && !messages[i].sdkUuid) {
+            messages[i].sdkUuid = sdkMessage.uuid;
+            broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
+            break;
+          }
+        }
+      }
+
+      // 4. Result message means session ended — no more replays
+      if ((sdkMessage as { type: string }).type === 'result') {
+        break;
+      }
+    }
+  } catch (err) {
+    if (timedOut) {
+      console.error(`[agent] executeRewind timed out after ${REWIND_TIMEOUT_MS}ms`);
+    } else {
+      throw err;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  console.log(`[agent] executeRewind completed, rewound=${rewound}`);
+  return rewound;
+}
+
+/**
+ * 时间回溯：截断对话历史 + 立即回退文件状态。
+ * 前端在确认后调用此函数。
+ */
+export async function rewindSession(userMessageId: string): Promise<{
+  success: boolean;
+  error?: string;
+  content?: string;
+  attachments?: MessageWire['attachments'];
+}> {
+  // 用 rewindPromise 标记正在回溯，阻止 enqueueUserMessage 并发写入
+  const doRewind = async () => {
+    // 1. 找到目标 user message
+    const targetIndex = messages.findIndex(m => m.id === userMessageId && m.role === 'user');
+    if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
+    const targetMessage = messages[targetIndex];
+
+    // 2. 终止当前活跃 session
+    if (querySession || isProcessing) {
+      shouldAbortSession = true;
+      messageQueue.length = 0;
+      if (sessionTerminationPromise) {
+        try { await sessionTerminationPromise; } catch { /* ignore */ }
+      }
+    }
+    shouldAbortSession = false;
+
+    // 3. 文件回溯
+    if (targetMessage.sdkUuid) {
+      // 快速路径：UUID 已知，延迟到 pre-warm 的 system_init 时执行 rewindFiles
+      // 省去创建临时 SDK session 的 3-8s 开销
+      pendingRewindUuid = targetMessage.sdkUuid;
+      console.log(`[agent] rewind: deferring rewindFiles to pre-warm, uuid=${targetMessage.sdkUuid}`);
+    } else {
+      // 慢速路径（罕见）：UUID 未知，需要创建临时 session 从 replay 中捕获
+      console.log('[agent] rewind: no sdkUuid, falling back to executeRewind');
+      try {
+        await executeRewind(targetMessage.id);
+      } catch (err) {
+        console.error('[agent] executeRewind failed:', err);
+        // 文件回溯失败不阻断消息截断
+      }
+    }
+
+    // 4. 找到目标前的最后一个 assistant（用于下次 query 的 resumeSessionAt）
+    let lastAssistantUuid: string | undefined;
+    for (let i = targetIndex - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
+        lastAssistantUuid = messages[i].sdkUuid;
+        break;
+      }
+    }
+
+    // 5. 截断消息、收集被删消息内容
+    const removedContent = typeof targetMessage.content === 'string' ? targetMessage.content : '';
+    const removedAttachments = targetMessage.attachments;
+    messages.length = targetIndex;
+    persistMessagesToStorage();
+
+    // 6. 设置下次 query 的对话截断点
+    if (lastAssistantUuid) {
+      pendingResumeSessionAt = lastAssistantUuid;
+    } else {
+      pendingResumeSessionAt = undefined;
+      sessionRegistered = false;
+      sessionId = randomUUID();
+    }
+
+    // 7. 预热下次 session
+    schedulePreWarm();
+
+    return { success: true as const, content: removedContent, attachments: removedAttachments };
+  };
+
+  const promise = doRewind();
+  rewindPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    rewindPromise = null;
+  }
+}
+
 async function startStreamingSession(preWarm = false): Promise<void> {
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
@@ -2688,8 +2931,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const resumeFrom = sessionRegistered ? sessionId : undefined;
     // sessionRegistered 不在此处修改 — 等待 system_init 确认
 
+    // 消费 rewind 设置的对话截断点（仅用于非 pre-warm 的实际 query）
+    const rewindResumeAt = !preWarm ? pendingResumeSessionAt : undefined;
+    if (rewindResumeAt) pendingResumeSessionAt = undefined;
+
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
 
     querySession = query({
       prompt: messageGenerator(),
@@ -2698,9 +2945,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // 新 session：传 sessionId 让 SDK 使用我们的 UUID
         // Resume：传 resume 恢复对话上下文
         ...(resumeFrom
-          ? { resume: resumeFrom }
+          ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
           : { sessionId: sessionId }
         ),
+        enableFileCheckpointing: true,
         maxThinkingTokens: 32_000,
         // Only use project-level settings from .claude/ directory
         // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
@@ -2873,6 +3121,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             console.log(`[agent] SDK session_id confirmed unified: ${nextSystemInit.session_id}`);
           } else {
             console.log(`[agent] SDK session_id saved (pre-unified): ${nextSystemInit.session_id} (our: ${sessionId})`);
+          }
+        }
+
+        // 延迟执行的 rewindFiles — 搭载到 pre-warm/正常 query 的 system_init
+        if (pendingRewindUuid && querySession) {
+          const uuid = pendingRewindUuid;
+          pendingRewindUuid = undefined;
+          try {
+            const result = await querySession.rewindFiles(uuid);
+            console.log('[agent] deferred rewindFiles result:', JSON.stringify(result));
+            if (!result.canRewind) {
+              console.warn('[agent] deferred rewindFiles cannot rewind:', result.error);
+            }
+          } catch (err) {
+            console.error('[agent] deferred rewindFiles error:', err);
           }
         }
       }
@@ -3090,6 +3353,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'user') {
+        // Track SDK user UUID — only for non-synthetic messages
+        if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'user' && !messages[i].sdkUuid) {
+              messages[i].sdkUuid = sdkMessage.uuid;
+              broadcast('chat:message-sdk-uuid', { messageId: messages[i].id, sdkUuid: sdkMessage.uuid });
+              break;
+            }
+          }
+        }
         // Process tool_result blocks from user messages
         // This handles both subagent results (parent_tool_use_id set) and top-level tool results (parent_tool_use_id null)
         if (sdkMessage.message?.content) {
@@ -3162,6 +3435,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'assistant') {
+        // Track SDK assistant UUID for resumeSessionAt / rewindFiles
+        const currentAssistant = ensureAssistantMessage();
+        if (sdkMessage.uuid && !currentAssistant.sdkUuid) {
+          currentAssistant.sdkUuid = sdkMessage.uuid;
+          broadcast('chat:message-sdk-uuid', { messageId: currentAssistant.id, sdkUuid: sdkMessage.uuid });
+        }
         const assistantMessage = sdkMessage.message;
         // Main turn token usage is extracted from result message (more reliable across providers)
         // Here we extract usage only for subagent tool broadcasts (Task tool runtime stats)

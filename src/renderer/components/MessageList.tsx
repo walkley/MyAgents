@@ -37,6 +37,8 @@ interface MessageListProps {
   onAskUserQuestionSubmit?: (requestId: string, answers: Record<string, string>) => void;
   onAskUserQuestionCancel?: (requestId: string) => void;
   systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
+  isStreaming?: boolean;          // AI 回复中（传递给 Message 隐藏回溯按钮）
+  onRewind?: (messageId: string) => void;
 }
 
 // Enable CSS scroll anchoring for smoother streaming experience
@@ -75,6 +77,7 @@ const STREAMING_MESSAGES = [
 // System status messages (fixed, not random)
 const SYSTEM_STATUS_MESSAGES: Record<string, string> = {
   compacting: '会话内容过长，智能总结中…',
+  rewinding: '正在时间回溯中，请稍等…',
 };
 
 function getRandomStreamingMessage(): string {
@@ -123,6 +126,8 @@ const MessageList = memo(function MessageList({
   onAskUserQuestionSubmit,
   onAskUserQuestionCancel,
   systemStatus,
+  isStreaming,
+  onRewind,
 }: MessageListProps) {
   const containerStyle: CSSProperties | undefined =
     bottomPadding ? { paddingBottom: bottomPadding } : undefined;
@@ -149,6 +154,8 @@ const MessageList = memo(function MessageList({
             key={message.id}
             message={message}
             isLoading={isLoading && index === messages.length - 1}
+            isStreaming={isStreaming}
+            onRewind={onRewind}
           />
         ))}
         {/* Permission prompt inline after messages */}

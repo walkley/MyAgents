@@ -79,6 +79,7 @@ export interface SessionMessage {
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
+    sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
     attachments?: MessageAttachment[];
     /** Usage info (only for assistant messages) */
     usage?: MessageUsage;

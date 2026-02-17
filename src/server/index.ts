@@ -96,6 +96,7 @@ import {
   waitForSessionIdle,
   setSystemPromptConfig,
   clearSystemPromptConfig,
+  rewindSession,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { getScriptDir } from './utils/runtime';
@@ -702,6 +703,17 @@ async function main() {
             500
           );
         }
+      }
+
+      // Rewind session to a specific user message (time travel)
+      if (pathname === '/chat/rewind' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
+        if (!userMessageId) {
+          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
+        }
+        const result = await rewindSession(userMessageId);
+        return jsonResponse(result);
       }
 
       // Cancel a queued message
