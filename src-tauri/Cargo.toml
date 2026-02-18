@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.1.18"
+version = "0.1.19"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -36,7 +36,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 reqwest = { version = "0.13.1", features = ["stream", "json", "blocking"] }
 futures-util = "0.3.31"
-tokio = { version = "1.49.0", features = ["rt", "sync", "time"] }
+tokio = { version = "1.49.0", features = ["rt", "sync", "time", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 base64 = "0.22"
