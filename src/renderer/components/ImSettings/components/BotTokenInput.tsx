@@ -70,9 +70,6 @@ export default function BotTokenInput({
                     Token 无效，请检查后重试
                 </p>
             )}
-            <p className="text-xs text-[var(--ink-muted)]">
-                通过 Telegram @BotFather 创建 Bot 并获取 Token
-            </p>
         </div>
     );
 }

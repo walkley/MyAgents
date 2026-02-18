@@ -10,12 +10,11 @@ export default function PermissionModeSelect({
 }) {
     return (
         <div className="space-y-2">
-            <label className="text-sm font-medium text-[var(--ink)]">权限模式</label>
             <div className="space-y-2">
                 {PERMISSION_MODES.map((mode) => (
                     <label
                         key={mode.value}
-                        className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                        className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
                             value === mode.value
                                 ? 'border-[var(--button-primary-bg)] bg-[var(--paper-contrast)]'
                                 : 'border-[var(--line)] hover:border-[var(--line-strong)]'
@@ -27,8 +26,19 @@ export default function PermissionModeSelect({
                             value={mode.value}
                             checked={value === mode.value}
                             onChange={() => onChange(mode.value)}
-                            className="mt-0.5"
+                            className="sr-only"
                         />
+                        <div className={`h-4 w-4 flex-shrink-0 rounded-full border-2 transition-colors ${
+                            value === mode.value
+                                ? 'border-[var(--button-primary-bg)] bg-[var(--button-primary-bg)]'
+                                : 'border-[var(--ink-subtle)]'
+                        }`}>
+                            {value === mode.value && (
+                                <div className="flex h-full w-full items-center justify-center">
+                                    <div className="h-1.5 w-1.5 rounded-full bg-white" />
+                                </div>
+                            )}
+                        </div>
                         <div>
                             <div className="text-sm font-medium text-[var(--ink)]">
                                 {mode.icon} {mode.label}

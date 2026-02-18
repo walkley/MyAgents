@@ -24,7 +24,7 @@ export default function ImBotDetail({
     botId: string;
     onBack: () => void;
 }) {
-    const { config, providers, apiKeys, projects, addProject } = useConfig();
+    const { config, providers, apiKeys, projects, addProject, refreshConfig } = useConfig();
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -53,10 +53,11 @@ export default function ImBotDetail({
         return () => { isMountedRef.current = false; };
     }, []);
 
-    // Save bot config to disk (per-bot partial update via centralized helper)
+    // Save bot config to disk and sync React state
     const saveBotField = useCallback(async (updates: Partial<ImBotConfig>) => {
         await updateImBotConfig(botId, updates);
-    }, [botId]);
+        await refreshConfig();
+    }, [botId, refreshConfig]);
 
     // Ref for bot config (used in effects without re-triggering)
     const botConfigRef = useRef(botConfig);
@@ -241,8 +242,9 @@ export default function ImBotDetail({
                 }
             }
 
-            // Remove from config
+            // Remove from config and sync React state before navigating back
             await removeImBotConfig(botId);
+            await refreshConfig();
             toastRef.current.success('Bot 已删除');
             onBack();
         } catch (err) {
@@ -252,7 +254,7 @@ export default function ImBotDetail({
                 setShowDeleteConfirm(false);
             }
         }
-    }, [botId, onBack]);
+    }, [botId, onBack, refreshConfig]);
 
     // Computed values
     const availableMcpServers = useMemo(
@@ -432,7 +434,7 @@ export default function ImBotDetail({
 
             {/* Permission mode */}
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">安全设置</h3>
+                <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">权限模式</h3>
                 <PermissionModeSelect
                     value={botConfig.permissionMode}
                     onChange={(mode) => saveBotField({ permissionMode: mode })}

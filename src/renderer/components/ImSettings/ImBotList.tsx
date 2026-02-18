@@ -6,6 +6,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { getAllMcpServers, getEnabledMcpServerIds, updateImBotConfig } from '@/config/configService';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
+import telegramIcon from './assets/telegram.png';
 
 export default function ImBotList({
     configs,
@@ -108,20 +109,35 @@ export default function ImBotList({
 
             if (isRunning) {
                 await invoke('cmd_stop_im_bot', { botId });
-                toastRef.current.success(`${cfg.name} 已停止`);
-                await updateImBotConfig(botId, { enabled: false });
+                if (isMountedRef.current) {
+                    // Optimistic status update so button reflects change immediately
+                    setStatuses(prev => {
+                        const next = { ...prev };
+                        if (next[botId]) {
+                            next[botId] = { ...next[botId], status: 'stopped' as const };
+                        }
+                        return next;
+                    });
+                    toastRef.current.success(`${cfg.name} 已停止`);
+                    await updateImBotConfig(botId, { enabled: false });
+                }
             } else {
                 if (!cfg.botToken) {
                     toastRef.current.error('请先配置 Bot Token');
                     return;
                 }
                 const params = await buildStartParams(cfg);
-                await invoke('cmd_start_im_bot', params);
-                toastRef.current.success(`${cfg.name} 已启动`);
-                await updateImBotConfig(botId, { enabled: true });
+                const newStatus = await invoke<ImBotStatus>('cmd_start_im_bot', params);
+                if (isMountedRef.current) {
+                    setStatuses(prev => ({ ...prev, [botId]: newStatus }));
+                    toastRef.current.success(`${cfg.name} 已启动`);
+                    await updateImBotConfig(botId, { enabled: true });
+                }
             }
         } catch (err) {
-            toastRef.current.error(`操作失败: ${err}`);
+            if (isMountedRef.current) {
+                toastRef.current.error(`操作失败: ${err}`);
+            }
         } finally {
             if (isMountedRef.current) {
                 setTogglingIds(prev => {
@@ -135,9 +151,9 @@ export default function ImBotList({
 
     // Platform icon
     const platformIcon = (platform: string) => {
-        if (platform === 'telegram') return '✈️';
-        if (platform === 'feishu') return '🐦';
-        return '💬';
+        if (platform === 'telegram') return <img src={telegramIcon} alt="Telegram" className="h-5 w-5" />;
+        if (platform === 'feishu') return <span className="text-base">🐦</span>;
+        return <span className="text-base">💬</span>;
     };
 
     return (
@@ -145,9 +161,9 @@ export default function ImBotList({
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">IM 集成</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">聊天机器人</h2>
                     <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                        通过 IM Bot 远程使用 AI Agent 能力
+                        通过聊天机器人Bot远程使用 AI Agent
                     </p>
                 </div>
                 {configs.length > 0 && (
@@ -166,10 +182,10 @@ export default function ImBotList({
                 <div className="flex flex-col items-center rounded-xl border border-dashed border-[var(--line)] px-8 py-16">
                     <div className="text-4xl">🤖</div>
                     <p className="mt-4 text-base font-medium text-[var(--ink)]">
-                        还没有 IM Bot
+                        还没有聊天机器人
                     </p>
                     <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
-                        添加一个 Bot，通过 Telegram 等 IM 远程使用 AI Agent
+                        添加一个 Bot，通过 Telegram 等聊天机器人远程使用 AI Agent
                     </p>
                     <button
                         onClick={onAdd}
@@ -197,7 +213,7 @@ export default function ImBotList({
                                 {/* Top row: icon + name + status */}
                                 <div className="flex items-start justify-between">
                                     <div className="flex items-center gap-2 min-w-0">
-                                        <span className="text-lg flex-shrink-0">{platformIcon(cfg.platform)}</span>
+                                        <span className="flex-shrink-0">{platformIcon(cfg.platform)}</span>
                                         <span className="text-sm font-medium text-[var(--ink)] truncate">
                                             {displayName}
                                         </span>

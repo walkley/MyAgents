@@ -1302,7 +1302,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        IM 集成
+                        聊天机器人
                     </button>
                     <button
                         onClick={() => setActiveSection('general')}

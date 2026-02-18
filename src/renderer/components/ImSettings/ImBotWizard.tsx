@@ -21,7 +21,7 @@ export default function ImBotWizard({
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { config, providers, apiKeys, projects } = useConfig();
+    const { config, providers, apiKeys, projects, refreshConfig } = useConfig();
     const isMountedRef = useRef(true);
 
     const [step, setStep] = useState<1 | 2>(1);
@@ -88,10 +88,11 @@ export default function ImBotWizard({
         };
     }, [step, botId]);
 
-    // Save bot config to disk (upsert via centralized helper)
+    // Save bot config to disk and sync React state
     const saveBotConfig = useCallback(async (cfg: ImBotConfig) => {
         await addOrUpdateImBotConfig(cfg);
-    }, []);
+        await refreshConfig();
+    }, [refreshConfig]);
 
     // Step 1 → Step 2: validate token and start bot
     const handleNext = useCallback(async () => {
@@ -186,6 +187,7 @@ export default function ImBotWizard({
                 // Save Telegram username as bot name
                 if (status.botUsername) {
                     await updateImBotConfig(botId, { name: `@${status.botUsername}` });
+                    await refreshConfig();
                 }
                 setStep(2);
             }
@@ -199,19 +201,21 @@ export default function ImBotWizard({
                 setStarting(false);
             }
         }
-    }, [botToken, botId, config.imBotConfigs, providers, apiKeys, projects, saveBotConfig]);
+    }, [botToken, botId, config.imBotConfigs, providers, apiKeys, projects, saveBotConfig, refreshConfig]);
 
     // Complete wizard
     const handleComplete = useCallback(async () => {
         await updateImBotConfig(botId, { setupCompleted: true, allowedUsers });
+        await refreshConfig();
         onComplete(botId);
-    }, [botId, allowedUsers, onComplete]);
+    }, [botId, allowedUsers, onComplete, refreshConfig]);
 
     // Skip binding step
     const handleSkip = useCallback(async () => {
         await updateImBotConfig(botId, { setupCompleted: true });
+        await refreshConfig();
         onComplete(botId);
-    }, [botId, onComplete]);
+    }, [botId, onComplete, refreshConfig]);
 
     // Cancel wizard — stop bot and remove config
     const handleCancel = useCallback(async () => {
@@ -224,8 +228,9 @@ export default function ImBotWizard({
             }
         }
         await removeImBotConfig(botId);
+        await refreshConfig();
         onCancel();
-    }, [botId, onCancel]);
+    }, [botId, onCancel, refreshConfig]);
 
     return (
         <div className="space-y-6">
@@ -302,12 +307,12 @@ export default function ImBotWizard({
                             disabled={!botToken.trim() || starting}
                             className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                         >
+                            下一步
                             {starting ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
                             ) : (
                                 <ArrowRight className="h-4 w-4" />
                             )}
-                            下一步
                         </button>
                     </div>
                 </div>
