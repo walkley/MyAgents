@@ -14,6 +14,7 @@ import { getAllCronTasks } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import type { Project } from '@/config/types';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import type { ImBotStatus } from '../../../shared/types/im';
 
 /**
  * Extract folder name from path (cross-platform, handles both / and \)
@@ -61,6 +62,23 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
         );
     }, [cronTasks]);
 
+    // Map sessionId to IM bot platform name (only for currently active sessions)
+    const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+    const sessionImBotMap = useMemo(() => {
+        const map = new Map<string, string>(); // sessionId → platform display name
+        for (const status of Object.values(imBotStatuses)) {
+            if (status.status !== 'online' && status.status !== 'connecting') continue;
+            for (const activeSession of status.activeSessions) {
+                // sessionKey format: "im:telegram:private:12345" → extract platform
+                const parts = activeSession.sessionKey.split(':');
+                const platform = parts[1]; // 'telegram', 'feishu', etc.
+                const displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                map.set(activeSession.sessionId, displayName);
+            }
+        }
+        return map;
+    }, [imBotStatuses]);
+
     const fetchSessions = useCallback(async (currentRetryCount = 0) => {
         if (currentRetryCount === 0) {
             setIsLoading(true);
@@ -68,10 +86,17 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
         setError(null);
 
         try {
-            // Fetch sessions and cron tasks in parallel
-            const [sessions, tasks] = await Promise.all([
+            // Fetch sessions, cron tasks, and IM bot statuses in parallel
+            const imStatusPromise = isTauriEnvironment()
+                ? import('@tauri-apps/api/core')
+                    .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
+                    .catch(() => ({} as Record<string, ImBotStatus>))
+                : Promise.resolve({} as Record<string, ImBotStatus>);
+
+            const [sessions, tasks, imStatuses] = await Promise.all([
                 getSessions(),
                 getAllCronTasks().catch(() => [] as CronTask[]), // Cron tasks are optional
+                imStatusPromise,
             ]);
             // Sort by lastActiveAt descending and take top 3
             const sorted = sessions
@@ -79,6 +104,7 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
                 .slice(0, 3);
             setRecentSessions(sorted);
             setCronTasks(tasks);
+            setImBotStatuses(imStatuses);
             setRetryCount(0); // Reset retry count on success
         } catch (err) {
             console.error('[RecentTasks] Failed to load sessions:', err);
@@ -224,12 +250,7 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
                     if (!project) return null;
 
                     const hasCronTask = sessionCronTaskMap.has(session.id);
-
-                    const sourceIcon = session.source === 'telegram_private'
-                        ? '\u{1F4F1}' // 📱
-                        : session.source === 'telegram_group'
-                            ? '\u{1F465}' // 👥
-                            : null;
+                    const imBotPlatform = sessionImBotMap.get(session.id);
 
                     return (
                         <button
@@ -243,10 +264,10 @@ export default memo(function RecentTasks({ projects, onOpenTask, isActive }: Rec
                                 <span>{formatTime(session.lastActiveAt)}</span>
                             </div>
 
-                            {/* IM source tag */}
-                            {sourceIcon && (
-                                <span className="flex-shrink-0 text-[11px]" title={session.source === 'telegram_private' ? 'Telegram 私聊' : 'Telegram 群聊'}>
-                                    {sourceIcon}
+                            {/* IM bot tag (only when bot is actively using this session) */}
+                            {imBotPlatform && (
+                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                                    {imBotPlatform}
                                 </span>
                             )}
 
