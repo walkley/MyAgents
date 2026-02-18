@@ -882,6 +882,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 baseUrl: provider.config.baseUrl,
                 apiKey,
                 model: provider.primaryModel,
+                authType: provider.authType,
             });
 
             console.log('[verifyProvider] Result:', JSON.stringify(result, null, 2));

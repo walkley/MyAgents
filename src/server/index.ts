@@ -118,7 +118,7 @@ import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
-import { checkAnthropicSubscription, getGitBranch, verifyApiKey, verifySubscription } from './provider-verify';
+import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 
 type ImagePayload = {
   name: string;
@@ -2348,30 +2348,29 @@ async function main() {
 
       // ============= PROVIDER VERIFICATION API =============
 
-      // POST /api/provider/verify - Verify API key by sending a test request
+      // POST /api/provider/verify - Verify API key via SDK (same path as normal chat)
       if (pathname === '/api/provider/verify' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             baseUrl?: string;
             apiKey?: string;
             model?: string;
+            authType?: string;
           };
 
-          const { baseUrl, apiKey, model } = payload;
+          const { baseUrl, apiKey, model, authType } = payload;
 
           if (!baseUrl || !apiKey) {
             return jsonResponse({ success: false, error: 'baseUrl and apiKey are required.' }, 400);
           }
 
-          // Use provided model or default to a reasonable fallback
-          const testModel = model || 'claude-sonnet-4-6';
-
           console.log(`[api/provider/verify] =========================`);
           console.log(`[api/provider/verify] baseUrl: ${baseUrl}`);
           console.log(`[api/provider/verify] apiKey: ${apiKey.slice(0, 10)}...`);
-          console.log(`[api/provider/verify] model: ${testModel}`);
+          console.log(`[api/provider/verify] model: ${model ?? 'default'}`);
+          console.log(`[api/provider/verify] authType: ${authType ?? 'both'}`);
 
-          const result = await verifyApiKey(baseUrl, apiKey, testModel);
+          const result = await verifyProviderViaSdk(baseUrl, apiKey, authType ?? 'both', model || undefined);
 
           console.log(`[api/provider/verify] result:`, JSON.stringify(result));
           console.log(`[api/provider/verify] =========================`);
