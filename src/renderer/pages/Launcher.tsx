@@ -28,9 +28,10 @@ interface LauncherProps {
     onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
     isStarting?: boolean;
     startError?: string | null;
+    isActive?: boolean;
 }
 
-export default function Launcher({ onLaunchProject, isStarting, startError: _startError }: LauncherProps) {
+export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive }: LauncherProps) {
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -48,6 +49,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         providerVerifyStatus,
         refreshProviderData,
         updateConfig,
+        reload: reloadConfig,
     } = useConfig();
     const [_addError, setAddError] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
@@ -116,6 +118,34 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedWorkspace?.id]);
 
+    // Refresh data when tab becomes active (inactive → active transition).
+    // useConfig() is a standalone hook, not a context — each component instance has
+    // independent state. Changes in Settings (projects, providers, API keys) don't
+    // automatically propagate here, so we reload from disk on tab activation.
+    const prevIsActiveRef = useRef(isActive);
+    useEffect(() => {
+        const wasInactive = !prevIsActiveRef.current;
+        prevIsActiveRef.current = isActive;
+        if (!wasInactive || !isActive) return;
+
+        // Reload config/projects/providers/apiKeys from disk
+        void reloadConfig();
+        // Reload global MCP servers (may have changed in Settings or Chat).
+        // Workspace MCP enabled list is handled by the settings sync effect cascade:
+        // reloadConfig → projects update → selectedWorkspace update → settings sync effect.
+        void (async () => {
+            try {
+                const servers = await getAllMcpServers();
+                const enabled = await getEnabledMcpServerIds();
+                setLauncherMcpServers(servers);
+                setLauncherGlobalMcpEnabled(enabled);
+            } catch (err) {
+                console.warn('[Launcher] Failed to reload MCP servers on activation:', err);
+            }
+        })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on visibility transition
+    }, [isActive]);
+
     // Handle workspace MCP toggle — persist to project config via patchProject (updates disk + React state)
     const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
         setLauncherWorkspaceMcpEnabled(prev => {
@@ -152,8 +182,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         setLauncherPermissionMode(selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
         setLauncherSelectedModel(selectedWorkspace.model ?? undefined);
         setLauncherProviderId(selectedWorkspace.providerId ?? undefined);
+        setLauncherWorkspaceMcpEnabled(selectedWorkspace.mcpEnabledServers ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, config.defaultPermissionMode]);
+    }, [isLoading, selectedWorkspace?.id, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
     const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
@@ -372,7 +403,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 <section className="launcher-workspaces flex flex-col overflow-hidden">
                     {/* Recent Tasks */}
                     <div className="flex-shrink-0 px-6 pt-6">
-                        <RecentTasks projects={projects} onOpenTask={handleOpenTask} />
+                        <RecentTasks projects={projects} onOpenTask={handleOpenTask} isActive={isActive} />
                     </div>
 
                     {/* Workspaces Header */}
