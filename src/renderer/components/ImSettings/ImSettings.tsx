@@ -10,10 +10,13 @@ type View =
     | { type: 'wizard' };
 
 export default function ImSettings() {
-    const { config } = useConfig();
+    const { config, isLoading } = useConfig();
     const [view, setView] = useState<View>({ type: 'list' });
 
     const botConfigs = config.imBotConfigs ?? [];
+
+    // Don't render until config is loaded from disk to avoid empty-state flash
+    if (isLoading) return null;
 
     switch (view.type) {
         case 'list':

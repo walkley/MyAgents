@@ -199,7 +199,10 @@ export default function ImBotList({
                 <div className="grid grid-cols-2 gap-3">
                     {configs.map((cfg) => {
                         const status = statuses[cfg.id];
-                        const isRunning = status?.status === 'online' || status?.status === 'connecting';
+                        // Use cfg.enabled as hint before first poll to avoid button color flash
+                        const isRunning = status
+                            ? (status.status === 'online' || status.status === 'connecting')
+                            : cfg.enabled;
                         const isToggling = togglingIds.has(cfg.id);
 
                         const displayName = status?.botUsername ? `@${status.botUsername}` : cfg.name;
