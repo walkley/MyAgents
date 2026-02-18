@@ -119,29 +119,31 @@ async function verifyViaSdk(
         }
 
         if (message.type === 'result') {
-          // SDK types: SDKResultError has { is_error, errors: string[], subtype }
-          //            SDKResultSuccess has { is_error, result: string, subtype: 'success' }
+          // SDK types: SDKResultSuccess { subtype: 'success', result: string }
+          //            SDKResultError   { subtype: 'error_...', errors: string[] }
+          // Note: is_error can be true even on subtype 'success' (e.g. tool errors
+          // that were handled), so use subtype to determine verification outcome.
           const resultMsg = message as {
-            is_error?: boolean;
             subtype?: string;
             errors?: string[];
-            result?: string;
           };
 
-          if (resultMsg.is_error) {
-            // Extract error from SDKResultError.errors[] array
-            const errorsArray = resultMsg.errors;
-            const errorText = (errorsArray && errorsArray.length > 0)
-              ? errorsArray.join('; ')
-              : resultMsg.subtype || '验证失败';
-            console.log(`[${logPrefix}] SDK error result: ${errorText} (subtype: ${resultMsg.subtype})`);
-            const stderrHint = stderrMessages.length > 0
-              ? ` (详情: ${stderrMessages.join('; ').slice(0, 100)})`
-              : '';
-            return { success: false, error: parseError(errorText) + stderrHint };
+          if (resultMsg.subtype === 'success') {
+            // API responded = credentials are valid
+            console.log(`[${logPrefix}] SDK verification successful`);
+            return { success: true };
           }
-          console.log(`[${logPrefix}] SDK verification successful`);
-          return { success: true };
+
+          // Error result (error_during_execution, error_max_turns, etc.)
+          const errorsArray = resultMsg.errors;
+          const errorText = (errorsArray && errorsArray.length > 0)
+            ? errorsArray.join('; ')
+            : resultMsg.subtype || '验证失败';
+          console.log(`[${logPrefix}] SDK error result: ${errorText} (subtype: ${resultMsg.subtype})`);
+          const stderrHint = stderrMessages.length > 0
+            ? ` (详情: ${stderrMessages.join('; ').slice(0, 100)})`
+            : '';
+          return { success: false, error: parseError(errorText) + stderrHint };
         }
       }
 
