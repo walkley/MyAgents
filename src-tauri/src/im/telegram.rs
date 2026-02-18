@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
 use super::types::{ImConfig, ImMessage, ImSourceType, TelegramError};
+use crate::proxy_config;
 
 /// Telegram long-poll timeout (seconds)
 const LONG_POLL_TIMEOUT: u64 = 30;
@@ -181,10 +182,16 @@ impl TelegramAdapter {
         message_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
     ) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
-            .build()
-            .expect("Failed to create HTTP client");
+        let client_builder = Client::builder()
+            .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
+        let client = proxy_config::build_client_with_proxy(client_builder)
+            .unwrap_or_else(|e| {
+                log::warn!("[telegram] Failed to build client with proxy: {}, falling back to direct", e);
+                Client::builder()
+                    .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
+                    .build()
+                    .expect("Failed to create HTTP client")
+            });
 
         Self {
             bot_token: config.bot_token.clone(),

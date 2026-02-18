@@ -106,7 +106,7 @@ export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
   allowedUsers: [],
   providerId: undefined,
   model: undefined,
-  permissionMode: 'plan',
+  permissionMode: 'fullAgency',
   mcpEnabledServers: undefined,
   enabled: false,
   setupCompleted: false,

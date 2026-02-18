@@ -273,14 +273,26 @@ export default function ImBotDetail({
         return options;
     }, [providers, apiKeys]);
 
+    const selectedProvider = useMemo(
+        () => providers.find(p => p.id === (botConfig?.providerId || 'anthropic-sub')),
+        [providers, botConfig?.providerId],
+    );
+
     const modelOptions = useMemo(() => {
-        const selectedProvider = providers.find(p => p.id === (botConfig?.providerId || 'anthropic-sub'));
         if (!selectedProvider) return [];
         return getProviderModels(selectedProvider).map(m => ({
             value: m.model,
             label: m.modelName,
         }));
-    }, [providers, botConfig?.providerId]);
+    }, [selectedProvider]);
+
+    // Default to provider's primaryModel (or first model) when not explicitly set
+    const effectiveModel = useMemo(() => {
+        if (botConfig?.model) return botConfig.model;
+        if (selectedProvider?.primaryModel) return selectedProvider.primaryModel;
+        if (modelOptions.length > 0) return modelOptions[0].value;
+        return '';
+    }, [botConfig?.model, selectedProvider?.primaryModel, modelOptions]);
 
     // Stable refs for workspace handler
     const buildStartParamsRef = useRef(buildStartParams);
@@ -444,7 +456,7 @@ export default function ImBotDetail({
             {/* AI Configuration */}
             <AiConfigCard
                 providerId={botConfig.providerId ?? ''}
-                model={botConfig.model ?? ''}
+                model={effectiveModel}
                 providerOptions={providerOptions}
                 modelOptions={modelOptions}
                 onProviderChange={(providerId) => {

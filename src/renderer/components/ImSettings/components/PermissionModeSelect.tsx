@@ -48,9 +48,6 @@ export default function PermissionModeSelect({
                     </label>
                 ))}
             </div>
-            <p className="text-xs text-[var(--ink-muted)]">
-                IM Bot 通过远程消息触发操作，建议使用「规划」模式以确保安全。
-            </p>
         </div>
     );
 }

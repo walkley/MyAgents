@@ -161,7 +161,7 @@ export default function ImBotList({
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">聊天机器人</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">聊天机器人 Bot</h2>
                     <p className="mt-1 text-sm text-[var(--ink-muted)]">
                         通过聊天机器人Bot远程使用 AI Agent
                     </p>
