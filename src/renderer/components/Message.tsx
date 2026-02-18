@@ -41,6 +41,9 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // Different ID -> different message
   if (prevMsg.id !== nextMsg.id) return false;
 
+  // Metadata change -> must re-render
+  if (prevMsg.metadata?.source !== nextMsg.metadata?.source) return false;
+
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
     return prevMsg.content === nextMsg.content;
@@ -125,12 +128,24 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
     }
 
     const hasText = userContent.trim().length > 0;
+    const imSource = message.metadata?.source;
+    const isImMessage = imSource && imSource !== 'desktop';
 
     return (
       <div className="group/user relative flex justify-end px-1 select-none"
            data-role="user" data-message-id={message.id}>
         {/* 气泡 + 时间戳 */}
         <div className="flex w-full flex-col items-end">
+          {/* IM source indicator */}
+          {isImMessage && (
+            <div className="mr-2 mb-1 flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
+              {imSource === 'telegram_group' && <span>👥</span>}
+              <span>via {imSource === 'telegram_private' ? 'Telegram' : 'Telegram 群聊'}</span>
+              {message.metadata?.senderName && (
+                <span>· {message.metadata.senderName}</span>
+              )}
+            </div>
+          )}
           <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
             {/* Images first (above text) - compact mode for 5 per row */}
             {hasAttachments && (

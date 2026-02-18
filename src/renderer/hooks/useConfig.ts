@@ -69,6 +69,9 @@ interface UseConfigResult {
     // Config updates
     updateConfig: (updates: Partial<AppConfig>) => Promise<void>;
 
+    /** Lightweight config-only refresh from disk (no loading state, no projects/providers reload) */
+    refreshConfig: () => Promise<void>;
+
     // Reload all data
     reload: () => Promise<void>;
 
@@ -231,6 +234,16 @@ export function useConfig(): UseConfigResult {
         }));
     }, []);
 
+    // Lightweight config-only refresh from disk (no loading state, no projects/providers reload)
+    const refreshConfig = useCallback(async () => {
+        try {
+            const latest = await loadAppConfig();
+            setConfig(latest);
+        } catch (err) {
+            console.error('[useConfig] Failed to refresh config:', err);
+        }
+    }, []);
+
     // Lightweight refresh for provider data only (no loading state change)
     const refreshProviderData = useCallback(async () => {
         try {
@@ -338,6 +351,7 @@ export function useConfig(): UseConfigResult {
         providerVerifyStatus,
         saveProviderVerifyStatus,
         updateConfig,
+        refreshConfig,
         reload: load,
         refreshProviderData,
     };

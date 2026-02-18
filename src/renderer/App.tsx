@@ -72,11 +72,13 @@ const MemoizedTabContent = memo(function TabContent({
           onLaunchProject={onLaunchProject}
           isStarting={isLoading}
           startError={error}
+          isActive={isActive}
         />
       ) : tab.view === 'settings' ? (
         <Settings
           initialSection={settingsInitialSection}
           onSectionChange={onSettingsSectionChange}
+          isActive={isActive}
           updateReady={updateReady}
           updateVersion={updateVersion}
           updateChecking={updateChecking}

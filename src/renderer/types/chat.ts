@@ -130,4 +130,10 @@ export interface Message {
   timestamp: Date;
   sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
   attachments?: MessageAttachment[];
+  /** Message source metadata (IM integration) */
+  metadata?: {
+    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    sourceId?: string;
+    senderName?: string;
+  };
 }

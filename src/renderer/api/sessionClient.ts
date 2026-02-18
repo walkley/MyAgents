@@ -29,6 +29,8 @@ export interface SessionMetadata {
     stats?: SessionStats;
     /** Associated cron task ID (if this session is used by a scheduled task) */
     cronTaskId?: string;
+    /** Session origin — undefined or 'desktop' for Desktop, IM sources for Telegram */
+    source?: 'desktop' | 'telegram_private' | 'telegram_group';
 }
 
 export interface SessionMessage {

@@ -28,6 +28,8 @@ export interface SessionMetadata {
     stats?: SessionStats;
     /** Associated cron task ID (if this session is used by a scheduled task) */
     cronTaskId?: string;
+    /** Session origin — undefined or 'desktop' for Desktop, IM sources for Telegram */
+    source?: 'desktop' | 'telegram_private' | 'telegram_group';
 }
 
 /**
@@ -72,6 +74,15 @@ export interface MessageUsage {
 }
 
 /**
+ * Message source metadata (IM integration)
+ */
+export interface MessageSourceMetadata {
+    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    sourceId?: string;      // Telegram chat_id
+    senderName?: string;    // Telegram username
+}
+
+/**
  * Simplified message format for storage
  */
 export interface SessionMessage {
@@ -87,6 +98,8 @@ export interface SessionMessage {
     toolCount?: number;
     /** Response duration in milliseconds */
     durationMs?: number;
+    /** Message source metadata (IM integration) */
+    metadata?: MessageSourceMetadata;
 }
 
 /**

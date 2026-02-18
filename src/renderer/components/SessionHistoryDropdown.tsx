@@ -6,6 +6,8 @@ import { deactivateSession } from '@/api/tauriClient';
 import { getWorkspaceCronTasks } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
+import { isTauriEnvironment } from '@/utils/browserMock';
+import type { ImBotStatus } from '../../shared/types/im';
 
 import SessionStatsModal from './SessionStatsModal';
 
@@ -43,6 +45,9 @@ export default function SessionHistoryDropdown({
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
 
+    // IM bot statuses for active session tagging
+    const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+
     // Map sessionId to active cron task (running only)
     const sessionCronTaskMap = useMemo(() => {
         if (!cronTasks) return new Map<string, CronTask>();
@@ -52,6 +57,21 @@ export default function SessionHistoryDropdown({
                 .map(t => [t.sessionId, t])
         );
     }, [cronTasks]);
+
+    // Map sessionId to IM bot platform name (only for currently active sessions)
+    const sessionImBotMap = useMemo(() => {
+        const map = new Map<string, string>();
+        for (const status of Object.values(imBotStatuses)) {
+            if (status.status !== 'online' && status.status !== 'connecting') continue;
+            for (const activeSession of status.activeSessions) {
+                const parts = activeSession.sessionKey.split(':');
+                const platform = parts[1];
+                const displayName = platform.charAt(0).toUpperCase() + platform.slice(1);
+                map.set(activeSession.sessionId, displayName);
+            }
+        }
+        return map;
+    }, [imBotStatuses]);
 
     // Keep refs updated via effect (not during render)
     useEffect(() => {
@@ -66,10 +86,17 @@ export default function SessionHistoryDropdown({
         let cancelled = false;
 
         (async () => {
-            // Load sessions and cron tasks in parallel, with independent error handling
-            const [sessionsResult, cronTasksResult] = await Promise.allSettled([
+            // Load sessions, cron tasks, and IM bot statuses in parallel
+            const imStatusPromise = isTauriEnvironment()
+                ? import('@tauri-apps/api/core')
+                    .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
+                    .catch(() => ({} as Record<string, ImBotStatus>))
+                : Promise.resolve({} as Record<string, ImBotStatus>);
+
+            const [sessionsResult, cronTasksResult, imStatuses] = await Promise.allSettled([
                 getSessions(agentDir),
                 getWorkspaceCronTasks(agentDir),
+                imStatusPromise,
             ]);
 
             if (cancelled) return;
@@ -88,6 +115,11 @@ export default function SessionHistoryDropdown({
             } else {
                 console.error('[SessionHistoryDropdown] Failed to load cron tasks:', cronTasksResult.reason);
                 setCronTasks([]); // Fall back to no cron task indicators
+            }
+
+            // IM bot statuses are optional enhancement
+            if (imStatuses.status === 'fulfilled') {
+                setImBotStatuses(imStatuses.value);
             }
         })();
 
@@ -241,6 +273,11 @@ export default function SessionHistoryDropdown({
                                             {isCurrent && (
                                                 <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
                                                     当前
+                                                </span>
+                                            )}
+                                            {sessionImBotMap.has(session.id) && (
+                                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                                                    {sessionImBotMap.get(session.id)}
                                                 </span>
                                             )}
                                             {sessionCronTaskMap.has(session.id) && (

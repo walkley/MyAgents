@@ -353,7 +353,7 @@ export default function ChatInput({
                       onClick={() => handleSmartModelToggle('sonnet')}
                       disabled={!isSmartMode || isModelPreferenceUpdating}
                       className={modelPillClass(smartVariant === 'sonnet', 'compact')}
-                      title="claude-sonnet-4-5-20250929"
+                      title="claude-sonnet-4-6"
                     >
                       Sonnet
                     </button>
@@ -363,7 +363,7 @@ export default function ChatInput({
                       onClick={() => handleSmartModelToggle('opus')}
                       disabled={!isSmartMode || isModelPreferenceUpdating}
                       className={modelPillClass(smartVariant === 'opus', 'compact')}
-                      title="claude-opus-4-5-20251101"
+                      title="claude-opus-4-6"
                     >
                       Opus
                     </button>

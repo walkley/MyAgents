@@ -22,7 +22,7 @@ export interface SerializedAttachmentPayload {
 export interface SendMessagePayload {
   text: string;
   attachments?: SerializedAttachmentPayload[];
-  /** Model ID to use for this message (e.g., 'claude-sonnet-4-5-20250514') */
+  /** Model ID to use for this message (e.g., 'claude-sonnet-4-6') */
   model?: string;
   /** Permission mode to use for this message */
   permissionMode?: 'auto' | 'plan' | 'fullAgency' | 'custom';

@@ -26,18 +26,25 @@ import {
     mockSaveProjects,
     mockAddProject,
 } from '@/utils/browserMock';
+import { DEFAULT_IM_BOT_CONFIG } from '../../shared/types/im';
+import type { ImBotConfig } from '../../shared/types/im';
 import { isDebugMode } from '@/utils/debug';
 
-// 异步互斥锁 — 序列化 projects.json 的读-改-写操作，防止并发损坏
-let projectsLock: Promise<void> = Promise.resolve();
+// 异步互斥锁 — 序列化读-改-写操作，防止并发损坏
 
-function withProjectsLock<T>(fn: () => Promise<T>): Promise<T> {
-    let release: () => void;
-    const next = new Promise<void>(resolve => { release = resolve; });
-    const prev = projectsLock;
-    projectsLock = next;
-    return prev.then(fn).finally(() => release!());
+function createAsyncLock() {
+    let queue: Promise<void> = Promise.resolve();
+    return function withLock<T>(fn: () => Promise<T>): Promise<T> {
+        let release: () => void;
+        const next = new Promise<void>(resolve => { release = resolve; });
+        const prev = queue;
+        queue = next;
+        return prev.then(fn).finally(() => release!());
+    };
 }
+
+const withProjectsLock = createAsyncLock();
+const withConfigLock = createAsyncLock();
 
 const CONFIG_DIR_NAME = '.myagents';
 const CONFIG_FILE = 'config.json';
@@ -180,6 +187,83 @@ function isValidAppConfig(data: unknown): data is AppConfig {
     return data !== null && typeof data === 'object' && !Array.isArray(data);
 }
 
+/**
+ * Migrate legacy single-bot imBotConfig to multi-bot imBotConfigs[].
+ * Mutates config in-place and persists the result.
+ *
+ * Session flag prevents duplicate saves when multiple concurrent
+ * loadAppConfig() calls each detect the legacy field.
+ */
+let _imBotMigrationDone = false;
+
+function migrateImBotConfig(config: AppConfig): AppConfig {
+    if (config.imBotConfig && !config.imBotConfigs && !_imBotMigrationDone) {
+        _imBotMigrationDone = true;
+        const legacy = config.imBotConfig;
+        const migrated: ImBotConfig = {
+            ...DEFAULT_IM_BOT_CONFIG,
+            ...legacy,
+            id: legacy.id || crypto.randomUUID(),
+            name: legacy.name || 'Telegram Bot',
+            platform: legacy.platform || 'telegram',
+            setupCompleted: true, // Legacy config is already set up
+        };
+        config.imBotConfigs = [migrated];
+        delete config.imBotConfig;
+        // Persist migration (fire-and-forget, with logging)
+        saveAppConfig(config).catch(err => {
+            console.error('[configService] Failed to persist imBotConfig migration:', err);
+        });
+    }
+    return config;
+}
+
+// ===== IM Bot Config Helpers =====
+// Centralized read-from-disk → modify → write-back operations for imBotConfigs[].
+// Eliminates duplicated patterns across ImBotDetail, ImBotWizard, ImBotList.
+
+/**
+ * Add or update an IM bot config entry (upsert by id).
+ * Always reads latest from disk to avoid stale React state overwrites.
+ */
+export async function addOrUpdateImBotConfig(botConfig: ImBotConfig): Promise<void> {
+    const latest = await loadAppConfig();
+    const configs = [...(latest.imBotConfigs ?? [])];
+    const idx = configs.findIndex(c => c.id === botConfig.id);
+    if (idx >= 0) {
+        configs[idx] = botConfig;
+    } else {
+        configs.push(botConfig);
+    }
+    await saveAppConfig({ ...latest, imBotConfigs: configs });
+}
+
+/**
+ * Partially update an IM bot config by merging fields.
+ * Only the specified fields are overwritten; everything else is preserved from disk.
+ */
+export async function updateImBotConfig(
+    botId: string,
+    updates: Partial<ImBotConfig>,
+): Promise<void> {
+    const latest = await loadAppConfig();
+    const configs = [...(latest.imBotConfigs ?? [])];
+    const idx = configs.findIndex(c => c.id === botId);
+    if (idx >= 0) {
+        configs[idx] = { ...configs[idx], ...updates };
+        await saveAppConfig({ ...latest, imBotConfigs: configs });
+    }
+}
+
+/**
+ * Remove an IM bot config by id.
+ */
+export async function removeImBotConfig(botId: string): Promise<void> {
+    const latest = await loadAppConfig();
+    const configs = (latest.imBotConfigs ?? []).filter(c => c.id !== botId);
+    await saveAppConfig({ ...latest, imBotConfigs: configs });
+}
+
 export async function loadAppConfig(): Promise<AppConfig> {
     // Dynamic default: showDevTools defaults to true in dev mode, false in production
     const dynamicDefault: AppConfig = {
@@ -204,7 +288,8 @@ export async function loadAppConfig(): Promise<AppConfig> {
         if (loaded) {
             // Merge with dynamic defaults: if showDevTools was never explicitly set,
             // it will use the environment-based default
-            return { ...dynamicDefault, ...loaded };
+            const merged = { ...dynamicDefault, ...loaded };
+            return migrateImBotConfig(merged);
         }
         return dynamicDefault;
     } catch (error) {
@@ -219,15 +304,19 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
         return;
     }
 
-    try {
-        await ensureConfigDir();
-        const dir = await getConfigDir();
-        const configPath = await join(dir, CONFIG_FILE);
-        await safeWriteJson(configPath, config);
-    } catch (error) {
-        console.error('[configService] Failed to save app config:', error);
-        throw error;
-    }
+    // Serialize config writes to prevent concurrent safeWriteJson races
+    // (multiple callers sharing the same .tmp file path)
+    return withConfigLock(async () => {
+        try {
+            await ensureConfigDir();
+            const dir = await getConfigDir();
+            const configPath = await join(dir, CONFIG_FILE);
+            await safeWriteJson(configPath, config);
+        } catch (error) {
+            console.error('[configService] Failed to save app config:', error);
+            throw error;
+        }
+    });
 }
 
 // API Key Management (stored in AppConfig.providerApiKeys)

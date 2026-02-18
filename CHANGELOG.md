@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.19] - 2026-02-18
+
+### Added
+- **IM 多 Bot 架构**：支持创建和管理多个 Telegram Bot 实例，独立配置工作区、权限、AI 供应商和 MCP 工具
+- **IM Bot AI 配置**：每个 Bot 独立设置 Provider/Model/MCP 服务，支持 Telegram `/model` 和 `/provider` 命令切换
+- **Telegram 多媒体消息支持**：支持图片（SDK Vision）、语音、音频、视频、文档（保存到工作区）、贴纸、位置、相册（500ms 缓冲合并）
+- **IM Bot 自动启动**：应用启动时自动恢复上次运行中的 Bot
+
+### Fixed
+- **Telegram 代理支持**：文件下载复用代理配置的 HTTP 客户端
+- **IM Bot 启停按钮状态回弹**：轮询跳过正在操作的 Bot，避免覆盖乐观更新；toggleBot 使用 ref 读取最新状态消除闭包陈旧
+- **TodoWriteTool 白屏崩溃**：流式 JSON 解析中间态 `todos` 可能为对象而非数组，改用 `Array.isArray()` 守卫
+- **IM 私聊 emoji 移除**：去掉 Telegram 私聊消息的手机 emoji，群聊保留群组图标
+- **IM Bot 列表页 UI 闪烁**：消除空状态闪烁和按钮颜色闪烁
+- **多媒体安全加固**：文件名路径穿越防护（sanitize_filename）、下载大小限制（20MB）、图片编码限制（10MB）、异步文件 I/O
+
+### Changed
+- **IM 会话列表标签化**：用平台标签替代 emoji 标识 IM 来源
+- **SDK 升级**：claude-agent-sdk 升级至 0.2.45
+- **模型更新**：新增 Sonnet 4.6，移除 Opus 4.5
+
+---
+
 ## [0.1.18] - 2026-02-17
 
 ### Added
