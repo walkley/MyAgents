@@ -140,6 +140,7 @@ pub fn run() {
             im::cmd_start_im_bot,
             im::cmd_stop_im_bot,
             im::cmd_im_bot_status,
+            im::cmd_im_all_bots_status,
             im::cmd_im_conversations,
         ])
         .setup(|app| {

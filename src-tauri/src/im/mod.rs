@@ -30,11 +30,13 @@ use router::{
 use telegram::TelegramAdapter;
 use types::{ImBotStatus, ImConfig, ImConversation, ImMessage, ImSourceType, ImStatus};
 
-/// Managed state for the IM Bot subsystem
-pub type ManagedImBot = Arc<Mutex<Option<ImBotInstance>>>;
+/// Managed state for the IM Bot subsystem (multi-bot: bot_id → instance)
+pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
 
 /// Running IM Bot instance
 pub struct ImBotInstance {
+    #[allow(dead_code)]
+    bot_id: String,
     shutdown_tx: watch::Sender<bool>,
     health: Arc<HealthManager>,
     router: Arc<Mutex<SessionRouter>>,
@@ -49,22 +51,23 @@ pub struct ImBotInstance {
 }
 
 /// Create the managed IM Bot state (called during app setup)
-pub fn create_im_bot_state() -> ManagedImBot {
-    Arc::new(Mutex::new(None))
+pub fn create_im_bot_state() -> ManagedImBots {
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
 /// Start the IM Bot
 pub async fn start_im_bot<R: Runtime>(
     app_handle: &AppHandle<R>,
-    im_state: &ManagedImBot,
+    im_state: &ManagedImBots,
     sidecar_manager: &ManagedSidecarManager,
+    bot_id: String,
     config: ImConfig,
 ) -> Result<ImBotStatus, String> {
     let mut im_guard = im_state.lock().await;
 
-    // Gracefully stop existing instance if running
-    if let Some(instance) = im_guard.take() {
-        log::info!("[im] Stopping existing IM Bot before restart");
+    // Gracefully stop existing instance for this bot_id if running
+    if let Some(instance) = im_guard.remove(&bot_id) {
+        log::info!("[im] Stopping existing IM Bot {} before restart", bot_id);
         let _ = instance.shutdown_tx.send(true);
         // Wait briefly for in-flight messages (shorter timeout for restart)
         let _ = tokio::time::timeout(
@@ -81,9 +84,13 @@ pub async fn start_im_bot<R: Runtime>(
     }
 
     log::info!(
-        "[im] Starting IM Bot (configured workspace: {:?})",
+        "[im] Starting IM Bot {} (configured workspace: {:?})",
+        bot_id,
         config.default_workspace_path,
     );
+
+    // Migrate legacy files to per-bot paths on first start
+    health::migrate_legacy_files(&bot_id);
 
     // Determine default workspace (filter empty strings from frontend)
     // Fallback chain: configured path → bundled mino → home dir
@@ -104,15 +111,12 @@ pub async fn start_im_bot<R: Runtime>(
 
     log::info!("[im] Resolved workspace: {}", default_workspace.display());
 
-    // Initialize components
-    let health_path = health::default_health_path();
+    // Initialize components (per-bot paths)
+    let health_path = health::bot_health_path(&bot_id);
     let health = Arc::new(HealthManager::new(health_path));
     health.set_status(ImStatus::Connecting).await;
 
-    let buffer_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".myagents")
-        .join("im_buffer.json");
+    let buffer_path = health::bot_buffer_path(&bot_id);
     let buffer = Arc::new(Mutex::new(MessageBuffer::load_from_disk(&buffer_path)));
 
     let router = {
@@ -209,6 +213,7 @@ pub async fn start_im_bot<R: Runtime>(
     // Available providers list (for /provider command menu)
     let available_providers_json = config.available_providers_json.clone();
     let bind_code_for_loop = bind_code.clone();
+    let bot_id_for_loop = bot_id.clone();
     let allowed_users_for_loop = Arc::clone(&allowed_users);
     let current_model_for_loop = Arc::clone(&current_model);
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
@@ -258,6 +263,7 @@ pub async fn start_im_bot<R: Runtime>(
                             let _ = app_clone.emit(
                                 "im:user-bound",
                                 serde_json::json!({
+                                    "botId": bot_id_for_loop,
                                     "userId": user_id_str,
                                     "username": msg.sender_name,
                                 }),
@@ -752,7 +758,8 @@ pub async fn start_im_bot<R: Runtime>(
     };
 
     // Store instance
-    *im_guard = Some(ImBotInstance {
+    im_guard.insert(bot_id.clone(), ImBotInstance {
+        bot_id,
         shutdown_tx,
         health: Arc::clone(&health),
         router,
@@ -768,13 +775,14 @@ pub async fn start_im_bot<R: Runtime>(
 
 /// Stop the IM Bot
 pub async fn stop_im_bot(
-    im_state: &ManagedImBot,
+    im_state: &ManagedImBots,
     sidecar_manager: &ManagedSidecarManager,
+    bot_id: &str,
 ) -> Result<(), String> {
     let mut im_guard = im_state.lock().await;
 
-    if let Some(instance) = im_guard.take() {
-        log::info!("[im] Stopping IM Bot...");
+    if let Some(instance) = im_guard.remove(bot_id) {
+        log::info!("[im] Stopping IM Bot {}...", bot_id);
 
         // Signal shutdown to all loops
         let _ = instance.shutdown_tx.send(true);
@@ -820,11 +828,11 @@ pub async fn stop_im_bot(
     Ok(())
 }
 
-/// Get current IM Bot status
-pub async fn get_im_bot_status(im_state: &ManagedImBot) -> ImBotStatus {
+/// Get current IM Bot status for a specific bot
+pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotStatus {
     let im_guard = im_state.lock().await;
 
-    if let Some(instance) = im_guard.as_ref() {
+    if let Some(instance) = im_guard.get(bot_id) {
         let mut status = instance.health.get_state().await;
         status.uptime_seconds = instance.started_at.elapsed().as_secs();
         status.buffered_messages = instance.buffer.lock().await.len();
@@ -849,6 +857,38 @@ pub async fn get_im_bot_status(im_state: &ManagedImBot) -> ImBotStatus {
     } else {
         ImBotStatus::default()
     }
+}
+
+/// Get status of all running bots
+pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, ImBotStatus> {
+    let im_guard = im_state.lock().await;
+    let mut result = HashMap::new();
+
+    for (bot_id, instance) in im_guard.iter() {
+        let mut status = instance.health.get_state().await;
+        status.uptime_seconds = instance.started_at.elapsed().as_secs();
+        status.buffered_messages = instance.buffer.lock().await.len();
+        status.active_sessions = instance.router.lock().await.active_sessions();
+
+        let bind_url = status
+            .bot_username
+            .as_ref()
+            .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
+
+        result.insert(bot_id.clone(), ImBotStatus {
+            bot_username: status.bot_username,
+            status: status.status,
+            uptime_seconds: status.uptime_seconds,
+            last_message_at: status.last_message_at,
+            active_sessions: status.active_sessions,
+            error_message: status.error_message,
+            restart_count: status.restart_count,
+            buffered_messages: status.buffered_messages,
+            bind_url,
+        });
+    }
+
+    result
 }
 
 // ===== SSE Stream → Telegram Draft ====
@@ -1072,41 +1112,110 @@ fn extract_sse_data(event_str: &str) -> String {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialAppConfig {
-    im_bot_config: Option<ImConfig>,
+    /// Legacy single-bot config (for migration)
+    im_bot_config: Option<PartialBotEntry>,
+    /// Multi-bot configs (v0.1.19+)
+    im_bot_configs: Option<Vec<PartialBotEntry>>,
 }
 
-/// Auto-start the IM Bot if it was previously enabled.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialBotEntry {
+    id: Option<String>,
+    #[serde(flatten)]
+    config: ImConfig,
+}
+
+/// Auto-start all enabled IM Bots.
 /// Called from Tauri `setup` with a short delay to let the app initialize.
 pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         // Give the app time to fully initialize (Sidecar manager, etc.)
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        let config = match read_im_config_from_disk() {
-            Some(c) if c.enabled && !c.bot_token.is_empty() => c,
-            _ => return,
-        };
-
-        log::info!("[im] Auto-starting IM Bot (previously enabled)...");
+        let configs = read_im_configs_from_disk();
+        if configs.is_empty() {
+            return;
+        }
 
         use tauri::Manager;
-        let im_state = app_handle.state::<ManagedImBot>();
+        let im_state = app_handle.state::<ManagedImBots>();
         let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
 
-        match start_im_bot(&app_handle, &im_state, &sidecar_manager, config).await {
-            Ok(_) => log::info!("[im] Auto-start succeeded"),
-            Err(e) => log::warn!("[im] Auto-start failed: {}", e),
+        for (bot_id, config) in configs {
+            if config.enabled && !config.bot_token.is_empty() {
+                log::info!("[im] Auto-starting bot: {}", bot_id);
+                match start_im_bot(&app_handle, &im_state, &sidecar_manager, bot_id.clone(), config).await {
+                    Ok(_) => log::info!("[im] Auto-start succeeded for bot {}", bot_id),
+                    Err(e) => log::warn!("[im] Auto-start failed for bot {}: {}", bot_id, e),
+                }
+            }
         }
     });
 }
 
-/// Read IM bot config from ~/.myagents/config.json
-fn read_im_config_from_disk() -> Option<ImConfig> {
-    let home = dirs::home_dir()?;
-    let config_path = home.join(".myagents").join("config.json");
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let app_config: PartialAppConfig = serde_json::from_str(&content).ok()?;
-    app_config.im_bot_config
+/// Read IM bot configs from ~/.myagents/config.json
+/// Returns (bot_id, config) pairs for all enabled bots.
+///
+/// Recovery chain (mirrors frontend safeLoadJson):
+///   1. config.json — current version
+///   2. config.json.bak — previous known-good version
+///   3. config.json.tmp — in-progress write
+fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    let config_dir = home.join(".myagents");
+    let main_path = config_dir.join("config.json");
+
+    // Try main → .bak → .tmp (same order as frontend safeLoadJson)
+    let candidates = [
+        main_path.clone(),
+        config_dir.join("config.json.bak"),
+        config_dir.join("config.json.tmp"),
+    ];
+
+    for (i, path) in candidates.iter().enumerate() {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let app_config: PartialAppConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                let label = ["main", "bak", "tmp"][i];
+                log::warn!("[im] Config {} file corrupted, trying next: {}", label, e);
+                continue;
+            }
+        };
+
+        if i > 0 {
+            log::warn!("[im] Recovered config from {} file", ["main", "bak", "tmp"][i]);
+        }
+
+        return parse_bot_entries(app_config);
+    }
+
+    Vec::new()
+}
+
+/// Extract (bot_id, config) pairs from parsed config.
+fn parse_bot_entries(app_config: PartialAppConfig) -> Vec<(String, ImConfig)> {
+    // Prefer multi-bot configs, fall back to legacy single-bot
+    if let Some(bots) = app_config.im_bot_configs {
+        bots.into_iter()
+            .map(|entry| {
+                let id = entry.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                (id, entry.config)
+            })
+            .collect()
+    } else if let Some(entry) = app_config.im_bot_config {
+        let id = entry.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        vec![(id, entry.config)]
+    } else {
+        Vec::new()
+    }
 }
 
 // ===== Tauri Commands =====
@@ -1115,8 +1224,9 @@ fn read_im_config_from_disk() -> Option<ImConfig> {
 #[allow(non_snake_case)]
 pub async fn cmd_start_im_bot(
     app_handle: AppHandle,
-    imState: tauri::State<'_, ManagedImBot>,
+    imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
+    botId: String,
     botToken: String,
     allowedUsers: Vec<String>,
     permissionMode: String,
@@ -1142,6 +1252,7 @@ pub async fn cmd_start_im_bot(
         &app_handle,
         &imState,
         &sidecarManager,
+        botId,
         config,
     )
     .await
@@ -1150,28 +1261,39 @@ pub async fn cmd_start_im_bot(
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_stop_im_bot(
-    imState: tauri::State<'_, ManagedImBot>,
+    imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
+    botId: String,
 ) -> Result<(), String> {
-    stop_im_bot(&imState, &sidecarManager).await
+    stop_im_bot(&imState, &sidecarManager, &botId).await
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_im_bot_status(
-    imState: tauri::State<'_, ManagedImBot>,
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
 ) -> Result<ImBotStatus, String> {
-    Ok(get_im_bot_status(&imState).await)
+    Ok(get_im_bot_status(&imState, &botId).await)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_im_all_bots_status(
+    imState: tauri::State<'_, ManagedImBots>,
+) -> Result<HashMap<String, ImBotStatus>, String> {
+    Ok(get_all_bots_status(&imState).await)
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_im_conversations(
-    imState: tauri::State<'_, ManagedImBot>,
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
 ) -> Result<Vec<ImConversation>, String> {
     let im_guard = imState.lock().await;
 
-    if let Some(instance) = im_guard.as_ref() {
+    if let Some(instance) = im_guard.get(&botId) {
         let sessions = instance.router.lock().await.active_sessions();
         let conversations: Vec<ImConversation> = sessions
             .iter()

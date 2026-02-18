@@ -254,8 +254,10 @@ export interface AppConfig {
   };
 
   // ===== IM Bot Configuration =====
-  // Telegram Bot integration settings
+  /** @deprecated Migrated to imBotConfigs[]. Only used for migration. */
   imBotConfig?: import('../../shared/types/im').ImBotConfig;
+  // Multi-bot configuration (v0.1.19+)
+  imBotConfigs?: import('../../shared/types/im').ImBotConfig[];
 }
 
 /**

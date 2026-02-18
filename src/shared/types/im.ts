@@ -49,6 +49,9 @@ export interface ImBotConfig {
 
   // ===== Runtime state =====
   enabled: boolean;
+
+  /** Wizard completed (Token verified + user bound). Defaults to false for new bots. */
+  setupCompleted?: boolean;
 }
 
 /**
@@ -106,6 +109,7 @@ export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
   permissionMode: 'plan',
   mcpEnabledServers: undefined,
   enabled: false,
+  setupCompleted: false,
 };
 
 /**

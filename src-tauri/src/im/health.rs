@@ -159,10 +159,71 @@ impl HealthManager {
     }
 }
 
-/// Get default health state file path
+/// Get default health state file path (legacy single-bot)
 pub fn default_health_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".myagents")
         .join("im_state.json")
+}
+
+/// Get per-bot health state file path
+pub fn bot_health_path(bot_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".myagents")
+        .join(format!("im_{}_state.json", bot_id))
+}
+
+/// Get per-bot buffer file path
+pub fn bot_buffer_path(bot_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".myagents")
+        .join(format!("im_{}_buffer.json", bot_id))
+}
+
+/// Migrate legacy health/buffer files to per-bot paths.
+///
+/// Strategy: copy then rename original to `.migrated`.
+/// - Copy (not move) so rollback to older app version still finds data.
+/// - Rename to `.migrated` prevents a second bot from re-copying the same
+///   legacy state, which would be incorrect.
+pub fn migrate_legacy_files(bot_id: &str) {
+    migrate_single_file(
+        &default_health_path(),
+        &bot_health_path(bot_id),
+        "health",
+    );
+
+    let legacy_buffer = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".myagents")
+        .join("im_buffer.json");
+    migrate_single_file(
+        &legacy_buffer,
+        &bot_buffer_path(bot_id),
+        "buffer",
+    );
+}
+
+/// Copy a legacy file to the per-bot path, then rename original to `.migrated`.
+fn migrate_single_file(legacy: &PathBuf, target: &PathBuf, label: &str) {
+    if !legacy.exists() || target.exists() {
+        return;
+    }
+    match std::fs::copy(legacy, target) {
+        Ok(_) => {
+            log::info!("[im-health] Migrated legacy {} file to {:?}", label, target);
+            // Mark as migrated so no other bot copies the same file
+            let migrated = legacy.with_extension("json.migrated");
+            if let Err(e) = std::fs::rename(legacy, &migrated) {
+                log::warn!("[im-health] Failed to rename legacy {} to .migrated: {}", label, e);
+                // Non-fatal: worst case another bot copies the same state (harmless for health)
+            }
+        }
+        Err(e) => {
+            log::warn!("[im-health] Failed to migrate legacy {} file: {}", label, e);
+        }
+    }
 }
