@@ -309,6 +309,7 @@ impl TelegramAdapter {
             "commands": [
                 { "command": "new", "description": "开始新对话" },
                 { "command": "workspace", "description": "切换工作区 /workspace <path>" },
+                { "command": "model", "description": "查看或切换 AI 模型" },
                 { "command": "status", "description": "查看当前状态" }
             ]
         });

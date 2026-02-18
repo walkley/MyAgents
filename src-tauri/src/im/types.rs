@@ -55,6 +55,13 @@ pub struct ImConfig {
     pub permission_mode: String,
     pub default_workspace_path: Option<String>,
     pub enabled: bool,
+    // ===== AI config (new) =====
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider_env_json: Option<String>,
+    #[serde(default)]
+    pub mcp_servers_json: Option<String>,
 }
 
 impl Default for ImConfig {
@@ -65,6 +72,9 @@ impl Default for ImConfig {
             permission_mode: "plan".to_string(),
             default_workspace_path: None,
             enabled: false,
+            model: None,
+            provider_env_json: None,
+            mcp_servers_json: None,
         }
     }
 }

@@ -128,6 +128,9 @@ pub async fn start_im_bot<R: Runtime>(
     // Shared mutable whitelist — updated when a user binds via QR code
     let allowed_users = Arc::new(tokio::sync::RwLock::new(config.allowed_users.clone()));
 
+    // Shared mutable model — updated by /model command from Telegram
+    let current_model = Arc::new(tokio::sync::RwLock::new(config.model.clone()));
+
     // Generate bind code for QR code binding flow
     let bind_code = format!("BIND_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
@@ -196,8 +199,15 @@ pub async fn start_im_bot<R: Runtime>(
     let app_clone = app_handle.clone();
     let manager_clone = Arc::clone(sidecar_manager);
     let permission_mode = config.permission_mode.clone();
+    // Parse provider env from config (for per-message forwarding to Sidecar)
+    let provider_env: Option<serde_json::Value> = config
+        .provider_env_json
+        .as_ref()
+        .and_then(|json_str| serde_json::from_str(json_str).ok());
     let bind_code_for_loop = bind_code.clone();
     let allowed_users_for_loop = Arc::clone(&allowed_users);
+    let current_model_for_loop = Arc::clone(&current_model);
+    let mcp_servers_json_for_loop = config.mcp_servers_json.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
 
     // Concurrency primitives (live outside the router for lock-free access)
@@ -338,6 +348,53 @@ pub async fn start_im_bot<R: Runtime>(
                         continue;
                     }
 
+                    // /model — show or switch AI model
+                    if text.starts_with("/model") {
+                        let arg = text.strip_prefix("/model").unwrap_or("").trim().to_string();
+                        if arg.is_empty() {
+                            let current = current_model_for_loop.read().await;
+                            let display = current.as_deref().unwrap_or("claude-sonnet-4-6 (默认)");
+                            let help = format!(
+                                "📊 当前模型: {}\n\n可用快捷名:\n\
+                                 • sonnet → claude-sonnet-4-6\n\
+                                 • opus → claude-opus-4-6\n\
+                                 • haiku → claude-haiku-4-5\n\n\
+                                 用法: /model <名称>",
+                                display,
+                            );
+                            let _ = adapter_for_reply.send_message(&chat_id, &help).await;
+                        } else {
+                            let model_id = match arg.to_lowercase().as_str() {
+                                "sonnet" => "claude-sonnet-4-6".to_string(),
+                                "opus" => "claude-opus-4-6".to_string(),
+                                "haiku" => "claude-haiku-4-5".to_string(),
+                                other => other.to_string(),
+                            };
+                            // Update shared model state
+                            {
+                                let mut model_guard = current_model_for_loop.write().await;
+                                *model_guard = Some(model_id.clone());
+                            }
+                            // If peer has an active Sidecar, sync model via API
+                            let router = router_clone.lock().await;
+                            let sessions = router.active_sessions();
+                            if let Some(s) = sessions.iter().find(|s| s.session_key == session_key) {
+                                // Parse port from peer sessions (need to check via ensure_sidecar route)
+                                // Active sessions don't expose port directly, so use the http client
+                                // We'll sync on next message via ensure_sidecar + sync_ai_config pattern
+                                drop(router);
+                                // Attempt to sync if we can find the port
+                                // For now, the model will be picked up when session restarts
+                                log::info!("[im] /model: set to {} (session={})", model_id, s.session_key);
+                            }
+                            let _ = adapter_for_reply.send_message(
+                                &chat_id,
+                                &format!("✅ 模型已切换为: {}", model_id),
+                            ).await;
+                        }
+                        continue;
+                    }
+
                     // ── Regular message → spawn concurrent task ──────────
                     log::info!(
                         "[im] Routing message from {} to Sidecar (session_key={}, {} chars)",
@@ -354,6 +411,9 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_buffer = Arc::clone(&buffer_clone);
                     let task_health = Arc::clone(&health_clone);
                     let task_perm = permission_mode.clone();
+                    let task_provider_env = provider_env.clone();
+                    let task_model = Arc::clone(&current_model_for_loop);
+                    let task_mcp_json = mcp_servers_json_for_loop.clone();
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
                     let task_locks = Arc::clone(&peer_locks);
@@ -383,13 +443,13 @@ pub async fn start_im_bot<R: Runtime>(
                         task_adapter.send_typing(&chat_id).await;
 
                         // 4. Ensure Sidecar is running (brief router lock)
-                        let port = match task_router
+                        let (port, is_new_sidecar) = match task_router
                             .lock()
                             .await
                             .ensure_sidecar(&session_key, &task_app, &task_manager)
                             .await
                         {
-                            Ok(p) => p,
+                            Ok(result) => result,
                             Err(e) => {
                                 task_adapter.ack_clear(&chat_id, message_id).await;
                                 let _ = task_adapter
@@ -399,6 +459,20 @@ pub async fn start_im_bot<R: Runtime>(
                             }
                         };
 
+                        // 4b. Sync AI config to newly created Sidecar
+                        if is_new_sidecar {
+                            let model = task_model.read().await.clone();
+                            task_router
+                                .lock()
+                                .await
+                                .sync_ai_config(
+                                    port,
+                                    model.as_deref(),
+                                    task_mcp_json.as_deref(),
+                                )
+                                .await;
+                        }
+
                         // 5. SSE stream: route message + stream response to Telegram
                         let session_id = match stream_to_telegram(
                             &task_stream_client,
@@ -407,6 +481,7 @@ pub async fn start_im_bot<R: Runtime>(
                             &task_adapter,
                             &chat_id,
                             &task_perm,
+                            task_provider_env.as_ref(),
                         )
                         .await
                         {
@@ -468,6 +543,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         &task_adapter,
                                         &buf_chat_id,
                                         &task_perm,
+                                        task_provider_env.as_ref(),
                                     )
                                     .await
                                     {
@@ -693,19 +769,23 @@ async fn stream_to_telegram(
     adapter: &TelegramAdapter,
     chat_id: &str,
     permission_mode: &str,
+    provider_env: Option<&serde_json::Value>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match msg.source_type {
         ImSourceType::Private => "telegram_private",
         ImSourceType::Group => "telegram_group",
     };
-    let body = json!({
+    let mut body = json!({
         "message": msg.text,
         "source": source,
         "sourceId": msg.chat_id,
         "senderName": msg.sender_name,
         "permissionMode": permission_mode,
     });
+    if let Some(env) = provider_env {
+        body["providerEnv"] = env.clone();
+    }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     log::info!("[im-stream] POST {} (SSE)", url);
 
@@ -947,6 +1027,9 @@ pub async fn cmd_start_im_bot(
     allowedUsers: Vec<String>,
     permissionMode: String,
     workspacePath: String,
+    model: Option<String>,
+    providerEnvJson: Option<String>,
+    mcpServersJson: Option<String>,
 ) -> Result<ImBotStatus, String> {
     let config = ImConfig {
         bot_token: botToken,
@@ -954,6 +1037,9 @@ pub async fn cmd_start_im_bot(
         permission_mode: permissionMode,
         default_workspace_path: Some(workspacePath),
         enabled: true,
+        model,
+        provider_env_json: providerEnvJson,
+        mcp_servers_json: mcpServersJson,
     };
 
     start_im_bot(

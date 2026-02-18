@@ -255,13 +255,7 @@ export interface AppConfig {
 
   // ===== IM Bot Configuration =====
   // Telegram Bot integration settings
-  imBotConfig?: {
-    botToken: string;
-    allowedUsers: string[];
-    permissionMode: string;
-    defaultWorkspacePath?: string;
-    enabled: boolean;
-  };
+  imBotConfig?: import('../../shared/types/im').ImBotConfig;
 }
 
 /**

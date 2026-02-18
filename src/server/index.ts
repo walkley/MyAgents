@@ -99,6 +99,7 @@ import {
   clearSystemPromptConfig,
   rewindSession,
   getPendingInteractiveRequests,
+  type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { getScriptDir } from './utils/runtime';
@@ -4458,6 +4459,7 @@ async function main() {
             sourceId: string;
             senderName?: string;
             permissionMode?: string;
+            providerEnv?: ProviderEnv;
           };
 
           if (!payload.message?.trim()) {
@@ -4475,8 +4477,8 @@ async function main() {
             payload.message,
             undefined, // no images from IM
             (payload.permissionMode as PermissionMode) ?? 'plan',
-            undefined, // use current model
-            undefined, // use current provider
+            undefined, // model: already set via /api/model/set, not per-message
+            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM
             metadata,
           );
 

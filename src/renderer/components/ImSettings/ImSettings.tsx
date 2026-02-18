@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Check, Copy, Eye, EyeOff, FolderOpen, Loader2, Plus, Power, PowerOff, QrCode, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
 import { isTauriEnvironment } from '@/utils/browserMock';
-import { PERMISSION_MODES } from '@/config/types';
+import { PERMISSION_MODES, type McpServerDefinition, getProviderModels } from '@/config/types';
+import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService';
 import CustomSelect from '@/components/CustomSelect';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
@@ -407,16 +408,26 @@ function BindQrPanel({
 // ─── Main ImSettings Component ─────────────────────────────────────
 
 export default function ImSettings() {
-    const { config, updateConfig, projects, addProject } = useConfig();
+    const { config, updateConfig, projects, addProject, providers, apiKeys } = useConfig();
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    // Local config state
-    const [botConfig, setBotConfig] = useState<ImBotConfig>(() => ({
-        ...DEFAULT_IM_BOT_CONFIG,
-        ...config.imBotConfig,
-    }));
+    // Local config state (migration-compatible: old configs lack id/name/platform)
+    const [botConfig, setBotConfig] = useState<ImBotConfig>(() => {
+        const saved = config.imBotConfig;
+        return {
+            ...DEFAULT_IM_BOT_CONFIG,
+            ...saved,
+            id: saved?.id || crypto.randomUUID(),
+            name: saved?.name || 'Telegram Bot',
+            platform: saved?.platform || 'telegram',
+        };
+    });
+
+    // MCP state
+    const [mcpServers, setMcpServers] = useState<McpServerDefinition[]>([]);
+    const [globalMcpEnabled, setGlobalMcpEnabled] = useState<string[]>([]);
 
     // Bot runtime status
     const [botStatus, setBotStatus] = useState<ImBotStatus | null>(null);
@@ -489,6 +500,96 @@ export default function ImSettings() {
         saveConfig({ ...botConfig, permissionMode: mode });
     }, [botConfig, saveConfig]);
 
+    // Handle provider change
+    const handleProviderChange = useCallback((providerId: string) => {
+        const provider = providers.find(p => p.id === providerId);
+        const newModel = provider ? provider.primaryModel : undefined;
+        saveConfig({
+            ...botConfig,
+            providerId: providerId || undefined,
+            model: newModel,
+        });
+    }, [botConfig, saveConfig, providers]);
+
+    // Handle model change
+    const handleModelChange = useCallback((model: string) => {
+        saveConfig({ ...botConfig, model: model || undefined });
+    }, [botConfig, saveConfig]);
+
+    // Handle MCP toggle
+    const handleMcpToggle = useCallback((serverId: string) => {
+        const current = botConfig.mcpEnabledServers ?? [];
+        const updated = current.includes(serverId)
+            ? current.filter(id => id !== serverId)
+            : [...current, serverId];
+        saveConfig({ ...botConfig, mcpEnabledServers: updated.length > 0 ? updated : undefined });
+    }, [botConfig, saveConfig]);
+
+    // Available global MCP servers (only show globally enabled ones)
+    const availableMcpServers = useMemo(
+        () => mcpServers.filter(s => globalMcpEnabled.includes(s.id)),
+        [mcpServers, globalMcpEnabled],
+    );
+
+    // Provider options for select: subscription + API providers with keys
+    const providerOptions = useMemo(() => {
+        const options = [
+            { value: '', label: '默认 (Anthropic 订阅)' },
+        ];
+        for (const p of providers) {
+            if (p.type === 'subscription') {
+                // Subscription is already the default option
+                continue;
+            }
+            if (p.type === 'api' && apiKeys[p.id]) {
+                options.push({ value: p.id, label: p.name });
+            }
+        }
+        return options;
+    }, [providers, apiKeys]);
+
+    // Model options for selected provider
+    const modelOptions = useMemo(() => {
+        const selectedProvider = providers.find(p => p.id === (botConfig.providerId || 'anthropic-sub'));
+        if (!selectedProvider) return [];
+        return getProviderModels(selectedProvider).map(m => ({
+            value: m.model,
+            label: m.modelName,
+        }));
+    }, [providers, botConfig.providerId]);
+
+    // Build params for cmd_start_im_bot (shared between toggleBot & handleWorkspaceChange)
+    const buildStartBotParams = useCallback(async (cfg: ImBotConfig) => {
+        // Resolve provider env (API Key not stored in bot config — read at runtime)
+        const selectedProvider = providers.find(p => p.id === cfg.providerId);
+        let providerEnvJson: string | undefined;
+        if (selectedProvider && selectedProvider.type !== 'subscription') {
+            providerEnvJson = JSON.stringify({
+                baseUrl: selectedProvider.config.baseUrl,
+                apiKey: apiKeys[selectedProvider.id],
+                authType: selectedProvider.authType,
+            });
+        }
+
+        // Resolve MCP server definitions (filter bot-enabled from global list)
+        const allServers = await getAllMcpServers();
+        const globalEnabled = await getEnabledMcpServerIds();
+        const botMcpIds = cfg.mcpEnabledServers ?? [];
+        const enabledMcpDefs = allServers.filter(
+            s => globalEnabled.includes(s.id) && botMcpIds.includes(s.id)
+        );
+
+        return {
+            botToken: cfg.botToken,
+            allowedUsers: cfg.allowedUsers,
+            permissionMode: cfg.permissionMode,
+            workspacePath: cfg.defaultWorkspacePath || '',
+            model: cfg.model || null,
+            providerEnvJson: providerEnvJson || null,
+            mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
+        };
+    }, [providers, apiKeys]);
+
     // Poll bot status
     const fetchStatus = useCallback(async () => {
         if (!isTauriEnvironment()) return;
@@ -519,6 +620,24 @@ export default function ImSettings() {
         };
     }, [fetchStatus]);
 
+    // Load global MCP servers on mount
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            try {
+                const servers = await getAllMcpServers();
+                const enabledIds = await getEnabledMcpServerIds();
+                if (!cancelled) {
+                    setMcpServers(servers);
+                    setGlobalMcpEnabled(enabledIds);
+                }
+            } catch (err) {
+                console.error('[ImSettings] Failed to load MCP servers:', err);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
     // Stable refs for callbacks (avoid stale closures)
     const botConfigRef = useRef(botConfig);
     botConfigRef.current = botConfig;
@@ -526,6 +645,8 @@ export default function ImSettings() {
     saveConfigRef.current = saveConfig;
     const botStatusRef = useRef(botStatus);
     botStatusRef.current = botStatus;
+    const buildStartBotParamsRef = useRef(buildStartBotParams);
+    buildStartBotParamsRef.current = buildStartBotParams;
 
     // Auto-set default workspace to bundled mino on first load.
     // IMPORTANT: Must check config.imBotConfig (source of truth from disk), NOT
@@ -558,12 +679,8 @@ export default function ImSettings() {
         if ((status?.status === 'online' || status?.status === 'connecting') && isTauriEnvironment()) {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                await invoke('cmd_start_im_bot', {
-                    botToken: newConfig.botToken,
-                    allowedUsers: newConfig.allowedUsers,
-                    permissionMode: newConfig.permissionMode,
-                    workspacePath: path,
-                });
+                const params = await buildStartBotParamsRef.current(newConfig);
+                await invoke('cmd_start_im_bot', params);
                 toastRef.current.success('已切换工作区，Bot 已重启');
             } catch (err) {
                 toastRef.current.error(`重启失败: ${err}`);
@@ -633,12 +750,8 @@ export default function ImSettings() {
                 // No whitelist check — users can bind via QR code after starting
 
                 // Start bot — params must match Rust fn signature (flat camelCase)
-                await invoke('cmd_start_im_bot', {
-                    botToken: botConfig.botToken,
-                    allowedUsers: botConfig.allowedUsers,
-                    permissionMode: botConfig.permissionMode,
-                    workspacePath: botConfig.defaultWorkspacePath || '',
-                });
+                const params = await buildStartBotParams(botConfig);
+                await invoke('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
                     toastRef.current.success('IM Bot 已启动');
                     await saveConfig({ ...botConfig, enabled: true });
@@ -655,7 +768,7 @@ export default function ImSettings() {
                 setToggling(false);
             }
         }
-    }, [botConfig, botStatus, fetchStatus, saveConfig]);
+    }, [botConfig, botStatus, fetchStatus, saveConfig, buildStartBotParams]);
 
     const isRunning = botStatus?.status === 'online' || botStatus?.status === 'connecting';
 
@@ -726,6 +839,81 @@ export default function ImSettings() {
                         value={botConfig.permissionMode}
                         onChange={handlePermissionChange}
                     />
+                </div>
+
+                {/* AI Configuration */}
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                    <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">AI 配置</h3>
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                            <div className="flex-1 pr-4">
+                                <p className="text-sm font-medium text-[var(--ink)]">供应商</p>
+                                <p className="text-xs text-[var(--ink-muted)]">
+                                    Bot 使用的 AI 供应商（独立于客户端设置）
+                                </p>
+                            </div>
+                            <CustomSelect
+                                value={botConfig.providerId ?? ''}
+                                options={providerOptions}
+                                onChange={handleProviderChange}
+                                placeholder="选择供应商"
+                                className="w-[240px]"
+                            />
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <div className="flex-1 pr-4">
+                                <p className="text-sm font-medium text-[var(--ink)]">模型</p>
+                                <p className="text-xs text-[var(--ink-muted)]">
+                                    可在 Telegram 中使用 <code className="rounded bg-[var(--paper-contrast)] px-1 py-0.5 text-[10px]">/model</code> 命令切换
+                                </p>
+                            </div>
+                            <CustomSelect
+                                value={botConfig.model ?? ''}
+                                options={modelOptions}
+                                onChange={handleModelChange}
+                                placeholder="选择模型"
+                                className="w-[240px]"
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                {/* MCP Tools */}
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                    <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">MCP 工具</h3>
+                    <p className="mb-3 text-xs text-[var(--ink-muted)]">
+                        Bot 可使用的 MCP 工具（独立于客户端设置，仅显示全局已启用的 MCP 服务）
+                    </p>
+                    {availableMcpServers.length > 0 ? (
+                        <div className="space-y-2">
+                            {availableMcpServers.map((server) => {
+                                const checked = (botConfig.mcpEnabledServers ?? []).includes(server.id);
+                                return (
+                                    <label
+                                        key={server.id}
+                                        className="flex cursor-pointer items-center gap-3 rounded-lg border border-[var(--line)] p-3 transition-colors hover:border-[var(--ink-muted)]"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={() => handleMcpToggle(server.id)}
+                                            className="h-4 w-4 rounded border-[var(--line)]"
+                                        />
+                                        <div>
+                                            <p className="text-sm font-medium text-[var(--ink)]">{server.name}</p>
+                                            {server.description && (
+                                                <p className="text-xs text-[var(--ink-muted)]">{server.description}</p>
+                                            )}
+                                        </div>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <p className="text-xs text-[var(--ink-muted)]">
+                            暂无全局已启用的 MCP 服务。请先在「设置 → MCP 工具」中启用。
+                        </p>
+                    )}
                 </div>
 
                 {/* Default Workspace */}

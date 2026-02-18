@@ -108,19 +108,21 @@ impl SessionRouter {
     }
 
     /// Ensure a Sidecar is running for the given session key.
+    /// Returns `(port, is_new_sidecar)` — `is_new_sidecar` is true when a new Sidecar was created
+    /// (caller should sync AI config like model/MCP after creation).
     /// Called while holding the router lock (brief: health check ~500ms + spawn ~2s worst case).
     pub async fn ensure_sidecar<R: Runtime>(
         &mut self,
         session_key: &str,
         app_handle: &AppHandle<R>,
         manager: &ManagedSidecarManager,
-    ) -> Result<u16, String> {
+    ) -> Result<(u16, bool), String> {
         // Check existing peer session
         if let Some(ps) = self.peer_sessions.get(session_key) {
             if ps.sidecar_port > 0 {
                 // Verify Sidecar is still healthy via HTTP
                 if self.check_sidecar_health(ps.sidecar_port).await {
-                    return Ok(ps.sidecar_port);
+                    return Ok((ps.sidecar_port, false));
                 }
                 log::warn!(
                     "[im-router] Sidecar on port {} unhealthy for {}",
@@ -194,7 +196,7 @@ impl SessionRouter {
             },
         );
 
-        Ok(port)
+        Ok((port, true))
     }
 
     /// Record a successful AI response — increment message_count and refresh activity.
@@ -387,6 +389,35 @@ impl SessionRouter {
                 sessions.len(),
                 self.default_workspace.display(),
             );
+        }
+    }
+
+    /// Sync AI config (model + MCP) to a newly created Sidecar.
+    /// Called after ensure_sidecar returns is_new=true.
+    pub async fn sync_ai_config(
+        &self,
+        port: u16,
+        model: Option<&str>,
+        mcp_servers_json: Option<&str>,
+    ) {
+        // 1. Model
+        if let Some(model_id) = model {
+            let url = format!("http://127.0.0.1:{}/api/model/set", port);
+            match self.http_client.post(&url).json(&json!({ "model": model_id })).send().await {
+                Ok(_) => log::info!("[im-router] Synced model {} to port {}", model_id, port),
+                Err(e) => log::warn!("[im-router] Failed to sync model to port {}: {}", port, e),
+            }
+        }
+
+        // 2. MCP servers
+        if let Some(mcp_json) = mcp_servers_json {
+            if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
+                let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
+                match self.http_client.post(&url).json(&json!({ "servers": servers })).send().await {
+                    Ok(_) => log::info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
+                    Err(e) => log::warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
+                }
+            }
         }
     }
 

@@ -26,12 +26,28 @@ export type ImSourceType = 'private' | 'group';
 
 /**
  * IM Bot configuration (stored in AppConfig)
+ * Designed for multi-bot architecture (currently single bot)
  */
 export interface ImBotConfig {
+  // ===== Multi-bot identity (future-proof) =====
+  id: string;                   // Bot unique ID (UUID)
+  name: string;                 // User-defined name (e.g. "工作助手")
+  platform: 'telegram';         // Platform type (future: 'feishu', 'slack')
+
+  // ===== Platform connection =====
   botToken: string;
   allowedUsers: string[];       // Telegram user_id or username
+
+  // ===== AI config (independent from Desktop client) =====
+  providerId?: string;          // Provider ID (e.g. 'anthropic-sub', 'deepseek')
+  model?: string;               // Model ID (e.g. 'claude-sonnet-4-6')
   permissionMode: string;       // 'plan' | 'auto' | 'fullAgency'
+  mcpEnabledServers?: string[]; // Bot-enabled MCP server IDs
+
+  // ===== Workspace =====
   defaultWorkspacePath?: string;
+
+  // ===== Runtime state =====
   enabled: boolean;
 }
 
@@ -80,9 +96,15 @@ export interface ImConversation {
  * Default IM Bot configuration
  */
 export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
+  id: '',           // Generated on creation
+  name: 'Telegram Bot',
+  platform: 'telegram',
   botToken: '',
   allowedUsers: [],
+  providerId: undefined,
+  model: undefined,
   permissionMode: 'plan',
+  mcpEnabledServers: undefined,
   enabled: false,
 };
 
