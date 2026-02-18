@@ -200,13 +200,19 @@ pub async fn start_im_bot<R: Runtime>(
     let manager_clone = Arc::clone(sidecar_manager);
     let permission_mode = config.permission_mode.clone();
     // Parse provider env from config (for per-message forwarding to Sidecar)
+    // Wrapped in RwLock so /provider command can update it at runtime
     let provider_env: Option<serde_json::Value> = config
         .provider_env_json
         .as_ref()
         .and_then(|json_str| serde_json::from_str(json_str).ok());
+    let current_provider_env = Arc::new(tokio::sync::RwLock::new(provider_env));
+    // Available providers list (for /provider command menu)
+    let available_providers_json = config.available_providers_json.clone();
     let bind_code_for_loop = bind_code.clone();
     let allowed_users_for_loop = Arc::clone(&allowed_users);
     let current_model_for_loop = Arc::clone(&current_model);
+    let current_provider_env_for_loop = Arc::clone(&current_provider_env);
+    let available_providers_for_loop = available_providers_json.clone();
     let mcp_servers_json_for_loop = config.mcp_servers_json.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
 
@@ -273,6 +279,8 @@ pub async fn start_im_bot<R: Runtime>(
                              可用命令：\n\
                              /new — 开始新对话\n\
                              /workspace <路径> — 切换工作区\n\
+                             /model — 查看或切换 AI 模型\n\
+                             /provider — 查看或切换 AI 供应商\n\
                              /status — 查看状态\n\n\
                              直接发消息即可开始对话。",
                         ).await;
@@ -395,6 +403,91 @@ pub async fn start_im_bot<R: Runtime>(
                         continue;
                     }
 
+                    // /provider — show or switch AI provider
+                    if text.starts_with("/provider") {
+                        let arg = text.strip_prefix("/provider").unwrap_or("").trim().to_string();
+
+                        // Parse available providers from startup config
+                        let providers: Vec<serde_json::Value> = available_providers_for_loop
+                            .as_ref()
+                            .and_then(|json| serde_json::from_str(json).ok())
+                            .unwrap_or_default();
+
+                        if arg.is_empty() {
+                            // Show current provider + available list
+                            let current_env = current_provider_env_for_loop.read().await;
+                            let current_name = if current_env.is_none() {
+                                "Anthropic (订阅) [默认]".to_string()
+                            } else {
+                                // Find name by matching baseUrl
+                                let base_url = current_env.as_ref()
+                                    .and_then(|v| v["baseUrl"].as_str());
+                                providers.iter()
+                                    .find(|p| p["baseUrl"].as_str() == base_url)
+                                    .and_then(|p| p["name"].as_str())
+                                    .unwrap_or("自定义")
+                                    .to_string()
+                            };
+
+                            let mut menu = format!("📡 当前供应商: {}\n\n可用供应商:\n", current_name);
+                            for (i, p) in providers.iter().enumerate() {
+                                let name = p["name"].as_str().unwrap_or("?");
+                                let id = p["id"].as_str().unwrap_or("?");
+                                menu.push_str(&format!("{}. {} ({})\n", i + 1, name, id));
+                            }
+                            menu.push_str("\n用法: /provider <序号或ID>");
+
+                            let _ = adapter_for_reply.send_message(&chat_id, &menu).await;
+                        } else {
+                            // Switch provider by index (1-based) or ID
+                            let target = if let Ok(idx) = arg.parse::<usize>() {
+                                providers.get(idx.saturating_sub(1)).cloned()
+                            } else {
+                                providers.iter()
+                                    .find(|p| p["id"].as_str().map(|s| s == arg).unwrap_or(false))
+                                    .cloned()
+                            };
+
+                            match target {
+                                Some(provider) => {
+                                    let name = provider["name"].as_str().unwrap_or("?");
+                                    let primary_model = provider["primaryModel"].as_str().unwrap_or("");
+                                    let provider_id = provider["id"].as_str().unwrap_or("");
+
+                                    // Subscription provider → clear provider env
+                                    if provider_id.contains("sub") {
+                                        *current_provider_env_for_loop.write().await = None;
+                                    } else {
+                                        // Build new provider env from stored info
+                                        let new_env = serde_json::json!({
+                                            "baseUrl": provider["baseUrl"],
+                                            "apiKey": provider["apiKey"],
+                                            "authType": provider["authType"],
+                                        });
+                                        *current_provider_env_for_loop.write().await = Some(new_env);
+                                    }
+
+                                    // Also switch model to the provider's primary model
+                                    if !primary_model.is_empty() {
+                                        *current_model_for_loop.write().await = Some(primary_model.to_string());
+                                    }
+
+                                    let _ = adapter_for_reply.send_message(
+                                        &chat_id,
+                                        &format!("✅ 已切换供应商: {}\n模型: {}", name, primary_model),
+                                    ).await;
+                                }
+                                None => {
+                                    let _ = adapter_for_reply.send_message(
+                                        &chat_id,
+                                        "❌ 未找到该供应商，请使用 /provider 查看可用列表",
+                                    ).await;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     // ── Regular message → spawn concurrent task ──────────
                     log::info!(
                         "[im] Routing message from {} to Sidecar (session_key={}, {} chars)",
@@ -411,7 +504,7 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_buffer = Arc::clone(&buffer_clone);
                     let task_health = Arc::clone(&health_clone);
                     let task_perm = permission_mode.clone();
-                    let task_provider_env = provider_env.clone();
+                    let task_provider_env = Arc::clone(&current_provider_env_for_loop);
                     let task_model = Arc::clone(&current_model_for_loop);
                     let task_mcp_json = mcp_servers_json_for_loop.clone();
                     let task_stream_client = stream_client.clone();
@@ -474,6 +567,7 @@ pub async fn start_im_bot<R: Runtime>(
                         }
 
                         // 5. SSE stream: route message + stream response to Telegram
+                        let penv = task_provider_env.read().await.clone();
                         let session_id = match stream_to_telegram(
                             &task_stream_client,
                             port,
@@ -481,7 +575,7 @@ pub async fn start_im_bot<R: Runtime>(
                             &task_adapter,
                             &chat_id,
                             &task_perm,
-                            task_provider_env.as_ref(),
+                            penv.as_ref(),
                         )
                         .await
                         {
@@ -543,7 +637,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         &task_adapter,
                                         &buf_chat_id,
                                         &task_perm,
-                                        task_provider_env.as_ref(),
+                                        penv.as_ref(),
                                     )
                                     .await
                                     {
@@ -1030,6 +1124,7 @@ pub async fn cmd_start_im_bot(
     model: Option<String>,
     providerEnvJson: Option<String>,
     mcpServersJson: Option<String>,
+    availableProvidersJson: Option<String>,
 ) -> Result<ImBotStatus, String> {
     let config = ImConfig {
         bot_token: botToken,
@@ -1040,6 +1135,7 @@ pub async fn cmd_start_im_bot(
         model,
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
+        available_providers_json: availableProvidersJson,
     };
 
     start_im_bot(

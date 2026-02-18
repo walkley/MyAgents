@@ -386,8 +386,8 @@ function BindQrPanel({
                     {/* Deep link for desktop Telegram users */}
                     <div className="pt-1">
                         <p className="mb-1 text-[10px] text-[var(--ink-muted)]">或在桌面版 Telegram 中直接打开：</p>
-                        <div className="flex items-center gap-1.5">
-                            <code className="flex-1 truncate rounded bg-[var(--paper-contrast)] px-2 py-1 text-[11px] text-[var(--ink)]">
+                        <div className="flex items-center gap-1.5 overflow-hidden">
+                            <code className="min-w-0 flex-1 truncate rounded bg-[var(--paper-contrast)] px-2 py-1 text-[11px] text-[var(--ink)]">
                                 {bindUrl}
                             </code>
                             <button
@@ -571,6 +571,19 @@ export default function ImSettings() {
             });
         }
 
+        // Build available providers list for /provider command
+        // Include subscription + all API providers with configured API keys
+        const availableProviders = providers
+            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
+            .map(p => ({
+                id: p.id,
+                name: p.name,
+                primaryModel: p.primaryModel,
+                baseUrl: p.config.baseUrl,
+                authType: p.authType,
+                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
+            }));
+
         // Resolve MCP server definitions (filter bot-enabled from global list)
         const allServers = await getAllMcpServers();
         const globalEnabled = await getEnabledMcpServerIds();
@@ -587,6 +600,7 @@ export default function ImSettings() {
             model: cfg.model || null,
             providerEnvJson: providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
+            availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
         };
     }, [providers, apiKeys]);
 
