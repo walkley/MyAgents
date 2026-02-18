@@ -139,7 +139,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
           {/* IM source indicator */}
           {isImMessage && (
             <div className="mr-2 mb-1 flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
-              <span>{imSource === 'telegram_private' ? '📱' : '👥'}</span>
+              {imSource === 'telegram_group' && <span>👥</span>}
               <span>via {imSource === 'telegram_private' ? 'Telegram' : 'Telegram 群聊'}</span>
               {message.metadata?.senderName && (
                 <span>· {message.metadata.senderName}</span>

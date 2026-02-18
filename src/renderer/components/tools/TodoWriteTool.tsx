@@ -10,7 +10,7 @@ interface TodoWriteToolProps {
 export default function TodoWriteTool({ tool }: TodoWriteToolProps) {
   const input = tool.parsedInput as TodoWriteInput;
 
-  if (!input || !input.todos) {
+  if (!input || !Array.isArray(input.todos)) {
     return <div className="text-sm text-[var(--ink-muted)]">加载待办事项...</div>;
   }
 
