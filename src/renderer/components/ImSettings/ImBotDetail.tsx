@@ -63,15 +63,19 @@ export default function ImBotDetail({
     const botConfigRef = useRef(botConfig);
     botConfigRef.current = botConfig;
 
-    // Poll bot status
+    // Poll bot status (skip while toggling to avoid overwriting optimistic update)
+    const togglingRef = useRef(toggling);
+    togglingRef.current = toggling;
+
     useEffect(() => {
         if (!isTauriEnvironment()) return;
 
         const fetchStatus = async () => {
+            if (togglingRef.current) return; // Skip poll during toggle
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
                 const status = await invoke<ImBotStatus>('cmd_im_bot_status', { botId });
-                if (isMountedRef.current) {
+                if (isMountedRef.current && !togglingRef.current) {
                     setBotStatus(status);
                     if (status.botUsername) {
                         setBotUsername(status.botUsername);
@@ -89,7 +93,7 @@ export default function ImBotDetail({
                     }
                 }
             } catch {
-                if (isMountedRef.current) setBotStatus(null);
+                if (isMountedRef.current && !togglingRef.current) setBotStatus(null);
             }
         };
 
@@ -191,13 +195,17 @@ export default function ImBotDetail({
     }, [providers, apiKeys]);
 
     // Toggle bot
+    const botStatusRef = useRef(botStatus);
+    botStatusRef.current = botStatus;
+
     const toggleBot = useCallback(async () => {
-        if (!isTauriEnvironment() || !botConfig) return;
+        if (!isTauriEnvironment() || !botConfigRef.current) return;
 
         setToggling(true);
         try {
             const { invoke } = await import('@tauri-apps/api/core');
-            const isRunning = botStatus?.status === 'online' || botStatus?.status === 'connecting';
+            // Read from refs to get latest state (avoids stale closure)
+            const isRunning = botStatusRef.current?.status === 'online' || botStatusRef.current?.status === 'connecting';
 
             if (isRunning) {
                 await invoke('cmd_stop_im_bot', { botId });
@@ -207,12 +215,12 @@ export default function ImBotDetail({
                     await saveBotField({ enabled: false });
                 }
             } else {
-                if (!botConfig.botToken) {
+                if (!botConfigRef.current.botToken) {
                     toastRef.current.error('请先配置 Bot Token');
                     setToggling(false);
                     return;
                 }
-                const params = await buildStartParams(botConfig);
+                const params = await buildStartParams(botConfigRef.current);
                 await invoke('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
                     toastRef.current.success('Bot 已启动');
@@ -226,7 +234,7 @@ export default function ImBotDetail({
         } finally {
             if (isMountedRef.current) setToggling(false);
         }
-    }, [botConfig, botStatus, botId, buildStartParams, saveBotField]);
+    }, [botId, buildStartParams, saveBotField]);
 
     // Delete bot (called after ConfirmDialog confirmation)
     const executeDelete = useCallback(async () => {
@@ -297,8 +305,6 @@ export default function ImBotDetail({
     // Stable refs for workspace handler
     const buildStartParamsRef = useRef(buildStartParams);
     buildStartParamsRef.current = buildStartParams;
-    const botStatusRef = useRef(botStatus);
-    botStatusRef.current = botStatus;
 
     const handleWorkspaceChange = useCallback(async (path: string) => {
         if (!path) return;

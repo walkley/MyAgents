@@ -26,6 +26,10 @@ export default function ImBotList({
     // Bot statuses: botId → status
     const [statuses, setStatuses] = useState<Record<string, ImBotStatus>>({});
     const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
+    const togglingIdsRef = useRef(togglingIds);
+    togglingIdsRef.current = togglingIds;
+    const statusesRef = useRef(statuses);
+    statusesRef.current = statuses;
 
     useEffect(() => {
         return () => { isMountedRef.current = false; };
@@ -40,7 +44,19 @@ export default function ImBotList({
                 const { invoke } = await import('@tauri-apps/api/core');
                 const result = await invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status');
                 if (isMountedRef.current) {
-                    setStatuses(result);
+                    // Skip overwriting statuses for bots currently being toggled
+                    const toggling = togglingIdsRef.current;
+                    if (toggling.size > 0) {
+                        setStatuses(prev => {
+                            const merged = { ...result };
+                            for (const id of toggling) {
+                                if (prev[id]) merged[id] = prev[id];
+                            }
+                            return merged;
+                        });
+                    } else {
+                        setStatuses(result);
+                    }
                 }
             } catch {
                 // Command not available
@@ -104,7 +120,8 @@ export default function ImBotList({
 
         try {
             const { invoke } = await import('@tauri-apps/api/core');
-            const status = statuses[botId];
+            // Read from ref to get latest status (avoids stale closure)
+            const status = statusesRef.current[botId];
             const isRunning = status?.status === 'online' || status?.status === 'connecting';
 
             if (isRunning) {
@@ -147,7 +164,7 @@ export default function ImBotList({
                 });
             }
         }
-    }, [statuses, buildStartParams]);
+    }, [buildStartParams]);
 
     // Platform icon
     const platformIcon = (platform: string) => {
