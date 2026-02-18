@@ -343,6 +343,18 @@ impl SessionRouter {
         }
     }
 
+    /// Get workspace path for a peer session (for attachment file saving).
+    pub fn peer_session_workspace(&self, session_key: &str) -> Option<PathBuf> {
+        self.peer_sessions
+            .get(session_key)
+            .map(|ps| ps.workspace_path.clone())
+    }
+
+    /// Get the default workspace path.
+    pub fn default_workspace(&self) -> &PathBuf {
+        &self.default_workspace
+    }
+
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
         self.peer_sessions

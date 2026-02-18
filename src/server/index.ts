@@ -4460,10 +4460,12 @@ async function main() {
             senderName?: string;
             permissionMode?: string;
             providerEnv?: ProviderEnv;
+            images?: Array<{ name: string; mimeType: string; data: string }>;
           };
 
-          if (!payload.message?.trim()) {
-            return jsonResponse({ success: false, error: 'Message is required' }, 400);
+          const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
+          if (!hasContent) {
+            return jsonResponse({ success: false, error: 'Message or images required' }, 400);
           }
 
           const metadata = {
@@ -4474,8 +4476,8 @@ async function main() {
 
           // Use enqueueUserMessage — shares the same persistent generator as Desktop
           const result = await enqueueUserMessage(
-            payload.message,
-            undefined, // no images from IM
+            payload.message || '',
+            payload.images, // forward image attachments from Telegram
             (payload.permissionMode as PermissionMode) ?? 'plan',
             undefined, // model: already set via /api/model/set, not per-message
             payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM

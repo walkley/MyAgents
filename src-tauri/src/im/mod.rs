@@ -28,7 +28,7 @@ use router::{
     create_sidecar_stream_client, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
-use types::{ImBotStatus, ImConfig, ImConversation, ImMessage, ImSourceType, ImStatus};
+use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImSourceType, ImStatus};
 
 /// Managed state for the IM Bot subsystem (multi-bot: bot_id → instance)
 pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
@@ -140,6 +140,7 @@ pub async fn start_im_bot<R: Runtime>(
 
     // Create Telegram adapter (implements ImAdapter trait)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
+    let msg_tx_for_reinjection = msg_tx.clone(); // For media group merge re-injection
     let adapter: Arc<TelegramAdapter> = Arc::new(TelegramAdapter::new(
         &config,
         msg_tx,
@@ -230,9 +231,132 @@ pub async fn start_im_bot<R: Runtime>(
     let process_handle = tokio::spawn(async move {
         let mut in_flight: JoinSet<()> = JoinSet::new();
 
+        // Media group buffering (Telegram albums)
+        struct MediaGroupEntry {
+            messages: Vec<ImMessage>,
+            first_received: Instant,
+        }
+        let mut media_groups: HashMap<String, MediaGroupEntry> = HashMap::new();
+        const MEDIA_GROUP_TIMEOUT: Duration = Duration::from_millis(500);
+        const MEDIA_GROUP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+        /// Merge buffered media group messages into one combined message
+        fn merge_media_group(mut messages: Vec<ImMessage>) -> ImMessage {
+            messages.sort_by_key(|m| m.message_id);
+            let mut base = messages.remove(0);
+            // Use first non-empty text as caption
+            if base.text.is_empty() {
+                if let Some(msg_with_text) = messages.iter().find(|m| !m.text.is_empty()) {
+                    base.text = msg_with_text.text.clone();
+                }
+            }
+            // Merge all attachments
+            for msg in messages {
+                base.attachments.extend(msg.attachments);
+            }
+            base.media_group_id = None; // Already merged
+            base
+        }
+
+        /// Process attachments: save File types to workspace, encode Image types to base64.
+        /// This is async to use non-blocking file I/O.
+        async fn process_attachments(
+            msg: &mut ImMessage,
+            workspace_path: &std::path::Path,
+        ) -> Vec<serde_json::Value> {
+            /// Maximum image size for base64 encoding (10 MB)
+            const MAX_IMAGE_ENCODE_SIZE: usize = 10 * 1024 * 1024;
+
+            let mut file_refs: Vec<String> = Vec::new();
+            let mut image_payloads: Vec<serde_json::Value> = Vec::new();
+
+            for attachment in &msg.attachments {
+                match attachment.attachment_type {
+                    ImAttachmentType::File => {
+                        let target_dir = workspace_path.join("myagents_files");
+                        if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+                            log::error!("[im] Failed to create myagents_files dir: {}", e);
+                            continue;
+                        }
+                        let target_path = target_dir.join(&attachment.file_name);
+                        let final_path = auto_rename_path(&target_path);
+                        if let Err(e) = tokio::fs::write(&final_path, &attachment.data).await {
+                            log::error!("[im] Failed to save file: {}", e);
+                            continue;
+                        }
+                        let relative = format!(
+                            "myagents_files/{}",
+                            final_path.file_name().unwrap().to_string_lossy()
+                        );
+                        file_refs.push(format!("@{}", relative));
+                        log::info!(
+                            "[im] Saved file attachment: {} ({} bytes)",
+                            relative,
+                            attachment.data.len()
+                        );
+                    }
+                    ImAttachmentType::Image => {
+                        if attachment.data.len() > MAX_IMAGE_ENCODE_SIZE {
+                            log::warn!(
+                                "[im] Image too large for base64 encoding: {} ({} bytes, max {})",
+                                attachment.file_name,
+                                attachment.data.len(),
+                                MAX_IMAGE_ENCODE_SIZE
+                            );
+                            continue;
+                        }
+                        use base64::Engine;
+                        let b64 =
+                            base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+                        image_payloads.push(json!({
+                            "name": attachment.file_name,
+                            "mimeType": attachment.mime_type,
+                            "data": b64,
+                        }));
+                        log::info!(
+                            "[im] Encoded image attachment: {} ({} bytes)",
+                            attachment.file_name,
+                            attachment.data.len()
+                        );
+                    }
+                }
+            }
+
+            // Append @path references to message text
+            if !file_refs.is_empty() {
+                let refs_text = file_refs.join(" ");
+                if msg.text.is_empty() {
+                    msg.text = refs_text;
+                } else {
+                    msg.text = format!("{}\n{}", msg.text, refs_text);
+                }
+            }
+
+            image_payloads
+        }
+
         loop {
+            // Determine flush timeout for media groups
+            let flush_timeout = if media_groups.is_empty() {
+                Duration::from_secs(3600)
+            } else {
+                MEDIA_GROUP_CHECK_INTERVAL
+            };
+
             tokio::select! {
                 Some(msg) = msg_rx.recv() => {
+                    // Buffer media group messages
+                    if let Some(ref group_id) = msg.media_group_id {
+                        media_groups
+                            .entry(group_id.clone())
+                            .or_insert_with(|| MediaGroupEntry {
+                                messages: Vec::new(),
+                                first_received: Instant::now(),
+                            })
+                            .messages
+                            .push(msg);
+                        continue;
+                    }
                     let session_key = SessionRouter::session_key(&msg);
                     let chat_id = msg.chat_id.clone();
                     let message_id = msg.message_id;
@@ -572,8 +696,27 @@ pub async fn start_im_bot<R: Runtime>(
                                 .await;
                         }
 
+                        // 4c. Process attachments (File → save to workspace, Image → base64)
+                        let mut msg = msg; // make mutable for attachment processing
+                        let workspace_path = {
+                            let router = task_router.lock().await;
+                            router
+                                .peer_session_workspace(&session_key)
+                                .unwrap_or_else(|| router.default_workspace().clone())
+                        };
+                        let image_payloads = if !msg.attachments.is_empty() {
+                            process_attachments(&mut msg, &workspace_path).await
+                        } else {
+                            Vec::new()
+                        };
+
                         // 5. SSE stream: route message + stream response to Telegram
                         let penv = task_provider_env.read().await.clone();
+                        let images = if image_payloads.is_empty() {
+                            None
+                        } else {
+                            Some(&image_payloads)
+                        };
                         let session_id = match stream_to_telegram(
                             &task_stream_client,
                             port,
@@ -582,6 +725,7 @@ pub async fn start_im_bot<R: Runtime>(
                             &chat_id,
                             &task_perm,
                             penv.as_ref(),
+                            images,
                         )
                         .await
                         {
@@ -644,6 +788,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         &buf_chat_id,
                                         &task_perm,
                                         penv.as_ref(),
+                                        None, // buffered messages don't preserve attachments
                                     )
                                     .await
                                     {
@@ -695,6 +840,29 @@ pub async fn start_im_bot<R: Runtime>(
                 Some(result) = in_flight.join_next(), if !in_flight.is_empty() => {
                     if let Err(e) = result {
                         log::error!("[im] Message task panicked: {}", e);
+                    }
+                }
+                // Flush expired media groups
+                _ = tokio::time::sleep(flush_timeout) => {
+                    let expired_keys: Vec<String> = media_groups
+                        .iter()
+                        .filter(|(_, entry)| entry.first_received.elapsed() >= MEDIA_GROUP_TIMEOUT)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+
+                    for group_id in expired_keys {
+                        if let Some(entry) = media_groups.remove(&group_id) {
+                            let merged = merge_media_group(entry.messages);
+                            log::info!(
+                                "[im] Flushed media group {} ({} attachments)",
+                                group_id,
+                                merged.attachments.len(),
+                            );
+                            // Re-inject merged message into the channel
+                            if msg_tx_for_reinjection.send(merged).await.is_err() {
+                                log::error!("[im] Failed to re-inject merged media group");
+                            }
+                        }
                     }
                 }
                 _ = process_shutdown_rx.changed() => {
@@ -904,6 +1072,7 @@ async fn stream_to_telegram(
     chat_id: &str,
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
+    images: Option<&Vec<serde_json::Value>>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match msg.source_type {
@@ -919,6 +1088,11 @@ async fn stream_to_telegram(
     });
     if let Some(env) = provider_env {
         body["providerEnv"] = env.clone();
+    }
+    if let Some(imgs) = images {
+        if !imgs.is_empty() {
+            body["images"] = json!(imgs);
+        }
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     log::info!("[im-stream] POST {} (SSE)", url);
@@ -1104,6 +1278,31 @@ fn extract_sse_data(event_str: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Generate a non-conflicting file path by appending _1, _2, etc.
+fn auto_rename_path(path: &std::path::Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(path);
+    for i in 1..100 {
+        let new_name = format!("{}_{}{}", stem, i, ext);
+        let new_path = parent.join(new_name);
+        if !new_path.exists() {
+            return new_path;
+        }
+    }
+    path.to_path_buf()
 }
 
 // ===== Auto-start on app launch =====

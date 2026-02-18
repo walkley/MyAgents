@@ -23,6 +23,24 @@ pub enum ImSourceType {
     Group,
 }
 
+/// Attachment type determines processing path
+#[derive(Debug, Clone)]
+pub enum ImAttachmentType {
+    /// SDK Vision (base64 image content block) — photo, static sticker
+    Image,
+    /// Copy to workspace + @path reference — voice, audio, video, document
+    File,
+}
+
+/// Media attachment downloaded from Telegram
+#[derive(Debug, Clone)]
+pub struct ImAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+    pub attachment_type: ImAttachmentType,
+}
+
 /// Incoming IM message (from Telegram adapter)
 #[derive(Debug, Clone)]
 pub struct ImMessage {
@@ -33,6 +51,8 @@ pub struct ImMessage {
     pub sender_name: Option<String>,
     pub source_type: ImSourceType,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub attachments: Vec<ImAttachment>,
+    pub media_group_id: Option<String>,
 }
 
 impl ImMessage {
@@ -185,6 +205,7 @@ impl BufferedMessage {
     }
 
     /// Convert back to ImMessage for route_message() replay.
+    /// Note: attachments are lost (binary data too large for JSON serialization).
     pub fn to_im_message(&self) -> ImMessage {
         ImMessage {
             chat_id: self.chat_id.clone(),
@@ -196,6 +217,8 @@ impl BufferedMessage {
             timestamp: chrono::DateTime::parse_from_rfc3339(&self.timestamp)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+            attachments: Vec::new(),
+            media_group_id: None,
         }
     }
 }

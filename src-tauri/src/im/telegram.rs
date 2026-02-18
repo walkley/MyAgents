@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
-use super::types::{ImConfig, ImMessage, ImSourceType, TelegramError};
+use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImSourceType, TelegramError};
 use crate::proxy_config;
 
 /// Telegram long-poll timeout (seconds)
@@ -161,6 +161,8 @@ impl MessageCoalescer {
             sender_name: batch.sender_name,
             source_type: batch.source_type,
             timestamp: chrono::Utc::now(),
+            attachments: Vec::new(),
+            media_group_id: None,
         })
     }
 }
@@ -599,10 +601,67 @@ impl TelegramAdapter {
         log::info!("[telegram] Listen loop exited");
     }
 
-    /// Process a single Telegram update into an ImMessage
+    /// Download a file from Telegram by file_id.
+    /// Flow: getFile(file_id) → file_path → GET /file/bot{token}/{file_path}
+    /// Enforces MAX_FILE_DOWNLOAD_SIZE to prevent memory exhaustion.
+    async fn download_file(&self, file_id: &str) -> Result<(Vec<u8>, String), TelegramError> {
+        /// Maximum file download size (20 MB). Telegram Bot API limit is also 20 MB.
+        const MAX_FILE_DOWNLOAD_SIZE: usize = 20 * 1024 * 1024;
+
+        let result = self.api_call("getFile", &json!({ "file_id": file_id })).await?;
+        let file_path = result["file_path"]
+            .as_str()
+            .ok_or_else(|| TelegramError::Other("No file_path in getFile response".into()))?;
+
+        // Check file_size from getFile response (Telegram provides this)
+        if let Some(file_size) = result["file_size"].as_u64() {
+            if file_size as usize > MAX_FILE_DOWNLOAD_SIZE {
+                return Err(TelegramError::Other(format!(
+                    "File too large: {} bytes (max {} bytes)",
+                    file_size, MAX_FILE_DOWNLOAD_SIZE
+                )));
+            }
+        }
+
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.bot_token, file_path
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| TelegramError::Other(format!("File download error: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(TelegramError::Other(format!(
+                "File download HTTP {}",
+                resp.status()
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| TelegramError::Other(format!("File read error: {}", e)))?;
+
+        // Double-check actual downloaded size
+        if bytes.len() > MAX_FILE_DOWNLOAD_SIZE {
+            return Err(TelegramError::Other(format!(
+                "Downloaded file too large: {} bytes (max {} bytes)",
+                bytes.len(), MAX_FILE_DOWNLOAD_SIZE
+            )));
+        }
+
+        let name_hint = sanitize_filename(
+            file_path.rsplit('/').next().unwrap_or("file"),
+        );
+        Ok((bytes.to_vec(), name_hint))
+    }
+
+    /// Process a single Telegram update into an ImMessage.
+    /// Handles text, photo, voice, audio, video, document, sticker, location, venue.
     async fn process_update(&self, update: &Value) -> Option<ImMessage> {
         let message = update.get("message")?;
-        let text = message["text"].as_str()?;
         let chat = &message["chat"];
         let from = &message["from"];
 
@@ -621,8 +680,200 @@ impl TelegramAdapter {
             _ => ImSourceType::Private,
         };
 
+        // Text: message.text OR message.caption (media messages use caption)
+        let raw_text = message["text"]
+            .as_str()
+            .or_else(|| message["caption"].as_str())
+            .unwrap_or("");
+
+        // Media group ID (album)
+        let media_group_id = message["media_group_id"].as_str().map(String::from);
+
+        // ── Collect attachments ──
+        let mut attachments: Vec<ImAttachment> = Vec::new();
+        let mut text_parts: Vec<String> = Vec::new();
+
+        // 1. Photo (take highest resolution = last element)
+        if let Some(photos) = message["photo"].as_array() {
+            if let Some(photo) = photos.last() {
+                if let Some(file_id) = photo["file_id"].as_str() {
+                    match self.download_file(file_id).await {
+                        Ok((data, name)) => {
+                            attachments.push(ImAttachment {
+                                file_name: name,
+                                mime_type: "image/jpeg".into(),
+                                data,
+                                attachment_type: ImAttachmentType::Image,
+                            });
+                        }
+                        Err(e) => log::warn!("[telegram] Failed to download photo: {}", e),
+                    }
+                }
+            }
+        }
+
+        // 2. Voice note
+        if let Some(voice) = message.get("voice") {
+            if let Some(file_id) = voice["file_id"].as_str() {
+                let mime = voice["mime_type"].as_str().unwrap_or("audio/ogg");
+                match self.download_file(file_id).await {
+                    Ok((data, _)) => {
+                        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                        let ext = mime_to_ext(mime);
+                        attachments.push(ImAttachment {
+                            file_name: format!("voice_{}.{}", ts, ext),
+                            mime_type: mime.into(),
+                            data,
+                            attachment_type: ImAttachmentType::File,
+                        });
+                        if raw_text.is_empty() {
+                            text_parts.push("[语音消息]".into());
+                        }
+                    }
+                    Err(e) => log::warn!("[telegram] Failed to download voice: {}", e),
+                }
+            }
+        }
+
+        // 3. Audio file
+        if let Some(audio) = message.get("audio") {
+            if let Some(file_id) = audio["file_id"].as_str() {
+                let mime = audio["mime_type"].as_str().unwrap_or("audio/mpeg");
+                let title = audio["title"]
+                    .as_str()
+                    .or_else(|| audio["file_name"].as_str())
+                    .unwrap_or("audio");
+                match self.download_file(file_id).await {
+                    Ok((data, name)) => {
+                        let file_name = audio["file_name"]
+                            .as_str()
+                            .map(|s| sanitize_filename(s))
+                            .unwrap_or_else(|| sanitize_filename(&name));
+                        attachments.push(ImAttachment {
+                            file_name,
+                            mime_type: mime.into(),
+                            data,
+                            attachment_type: ImAttachmentType::File,
+                        });
+                        text_parts.push(format!("[音频: {}]", title));
+                    }
+                    Err(e) => log::warn!("[telegram] Failed to download audio: {}", e),
+                }
+            }
+        }
+
+        // 4. Video / Video note
+        if let Some(video) = message.get("video").or(message.get("video_note")) {
+            if let Some(file_id) = video["file_id"].as_str() {
+                let mime = video["mime_type"].as_str().unwrap_or("video/mp4");
+                match self.download_file(file_id).await {
+                    Ok((data, _name)) => {
+                        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                        let ext = mime_to_ext(mime);
+                        let file_name = video["file_name"]
+                            .as_str()
+                            .map(|s| sanitize_filename(s))
+                            .unwrap_or_else(|| format!("video_{}.{}", ts, ext));
+                        attachments.push(ImAttachment {
+                            file_name,
+                            mime_type: mime.into(),
+                            data,
+                            attachment_type: ImAttachmentType::File,
+                        });
+                        if raw_text.is_empty() {
+                            text_parts.push("[视频]".into());
+                        }
+                    }
+                    Err(e) => log::warn!("[telegram] Failed to download video: {}", e),
+                }
+            }
+        }
+
+        // 5. Document
+        if let Some(doc) = message.get("document") {
+            if let Some(file_id) = doc["file_id"].as_str() {
+                let mime = doc["mime_type"].as_str().unwrap_or("application/octet-stream");
+                match self.download_file(file_id).await {
+                    Ok((data, name)) => {
+                        let file_name = doc["file_name"]
+                            .as_str()
+                            .map(|s| sanitize_filename(s))
+                            .unwrap_or_else(|| sanitize_filename(&name));
+                        attachments.push(ImAttachment {
+                            file_name: file_name.clone(),
+                            mime_type: mime.into(),
+                            data,
+                            attachment_type: ImAttachmentType::File,
+                        });
+                        text_parts.push(format!("[文件: {}]", file_name));
+                    }
+                    Err(e) => log::warn!("[telegram] Failed to download document: {}", e),
+                }
+            }
+        }
+
+        // 6. Sticker
+        if let Some(sticker) = message.get("sticker") {
+            let is_animated = sticker["is_animated"].as_bool().unwrap_or(false);
+            let is_video = sticker["is_video"].as_bool().unwrap_or(false);
+            let emoji = sticker["emoji"].as_str().unwrap_or("");
+            if !is_animated && !is_video {
+                // Static WEBP → download as image for Vision
+                if let Some(file_id) = sticker["file_id"].as_str() {
+                    match self.download_file(file_id).await {
+                        Ok((data, name)) => {
+                            attachments.push(ImAttachment {
+                                file_name: name,
+                                mime_type: "image/webp".into(),
+                                data,
+                                attachment_type: ImAttachmentType::Image,
+                            });
+                            if !emoji.is_empty() {
+                                text_parts.push(format!("[贴纸: {}]", emoji));
+                            }
+                        }
+                        Err(e) => log::warn!("[telegram] Failed to download sticker: {}", e),
+                    }
+                }
+            } else {
+                // Animated/video sticker: skip media, keep emoji text
+                if !emoji.is_empty() {
+                    text_parts.push(format!("[贴纸: {}]", emoji));
+                }
+            }
+        }
+
+        // 7. Location / Venue
+        if let Some(venue) = message.get("venue") {
+            let lat = venue["location"]["latitude"].as_f64().unwrap_or(0.0);
+            let lng = venue["location"]["longitude"].as_f64().unwrap_or(0.0);
+            let title = venue["title"].as_str().unwrap_or("");
+            let addr = venue["address"].as_str().unwrap_or("");
+            text_parts.push(format!(
+                "[位置: {}, {} ({:.4}, {:.4})]",
+                title, addr, lat, lng
+            ));
+        } else if let Some(loc) = message.get("location") {
+            let lat = loc["latitude"].as_f64().unwrap_or(0.0);
+            let lng = loc["longitude"].as_f64().unwrap_or(0.0);
+            text_parts.push(format!("[位置: {:.4}, {:.4}]", lat, lng));
+        }
+
+        // ── Build final text ──
+        let mut final_text_parts = Vec::new();
+        if !raw_text.is_empty() {
+            final_text_parts.push(raw_text.to_string());
+        }
+        final_text_parts.extend(text_parts);
+        let combined_text = final_text_parts.join("\n");
+
+        // Skip if no content at all
+        if combined_text.is_empty() && attachments.is_empty() {
+            return None;
+        }
+
         // Allow /start BIND_ messages to bypass whitelist (QR code binding flow)
-        let is_bind_request = text.starts_with("/start BIND_");
+        let is_bind_request = combined_text.starts_with("/start BIND_");
 
         // Whitelist check (bypassed for bind requests)
         if !is_bind_request && !self.is_allowed(sender_id, sender_name.as_deref()).await {
@@ -639,9 +890,9 @@ impl TelegramAdapter {
             let bot_username = self.bot_username.lock().await;
             let is_mention = bot_username
                 .as_ref()
-                .map(|u| text.contains(&format!("@{}", u)))
+                .map(|u| combined_text.contains(&format!("@{}", u)))
                 .unwrap_or(false);
-            let is_ask = text.starts_with("/ask");
+            let is_ask = combined_text.starts_with("/ask");
 
             if !is_mention && !is_ask {
                 return None;
@@ -649,9 +900,10 @@ impl TelegramAdapter {
         }
 
         // Strip @mention and /ask prefix from text
-        let cleaned_text = clean_message_text(text, &*self.bot_username.lock().await);
+        let cleaned_text = clean_message_text(&combined_text, &*self.bot_username.lock().await);
 
-        if cleaned_text.trim().is_empty() {
+        // Allow image-only messages (no text required when attachments present)
+        if cleaned_text.trim().is_empty() && attachments.is_empty() {
             return None;
         }
 
@@ -663,6 +915,8 @@ impl TelegramAdapter {
             sender_name,
             source_type,
             timestamp: chrono::Utc::now(),
+            attachments,
+            media_group_id,
         })
     }
 
@@ -719,6 +973,47 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Map MIME type to file extension
+/// Sanitize a filename from Telegram to prevent path traversal attacks.
+/// Strips path separators, `.` and `..` components, and null bytes.
+fn sanitize_filename(name: &str) -> String {
+    // Take only the last path component (strip any directory traversal)
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
+    // Remove null bytes and leading dots (prevent hidden files / `.` / `..`)
+    let cleaned: String = base
+        .chars()
+        .filter(|c| *c != '\0')
+        .collect();
+    let cleaned = cleaned.trim_start_matches('.');
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        _ => {
+            // Handle mime types with parameters (e.g. "audio/ogg; codecs=opus")
+            if mime.starts_with("audio/ogg") {
+                "ogg"
+            } else {
+                "bin"
+            }
+        }
+    }
 }
 
 /// Clean message text: remove @mention and /ask prefix
@@ -834,6 +1129,8 @@ mod tests {
             sender_name: Some("testuser".to_string()),
             source_type: ImSourceType::Private,
             timestamp: chrono::Utc::now(),
+            attachments: Vec::new(),
+            media_group_id: None,
         }
     }
 
