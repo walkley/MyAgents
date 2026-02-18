@@ -2363,7 +2363,7 @@ async function main() {
           }
 
           // Use provided model or default to a reasonable fallback
-          const testModel = model || 'claude-sonnet-4-6-20250514';
+          const testModel = model || 'claude-sonnet-4-6';
 
           console.log(`[api/provider/verify] =========================`);
           console.log(`[api/provider/verify] baseUrl: ${baseUrl}`);

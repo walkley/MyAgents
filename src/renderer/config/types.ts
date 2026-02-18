@@ -43,7 +43,7 @@ export const PERMISSION_MODES: {
  * Model entity representing a single model configuration
  */
 export interface ModelEntity {
-  model: string;         // API 代码，如 "claude-sonnet-4-6-20250514"
+  model: string;         // API 代码，如 "claude-sonnet-4-6"
   modelName: string;     // 显示名称，如 "Claude Sonnet 4.6"
   modelSeries: string;   // 品牌系列，如 "claude" | "deepseek" | "zhipu"
 }
@@ -282,9 +282,9 @@ export interface ProjectSettings {
 // Preset providers with ModelEntity structure
 /** Anthropic 官方预设模型（订阅和 API 共用） */
 const ANTHROPIC_MODELS: ModelEntity[] = [
-  { model: 'claude-sonnet-4-6-20250514', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
+  { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
   { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
-  { model: 'claude-haiku-4-5-20251001', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
+  { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
 ];
 
 export const PRESET_PROVIDERS: Provider[] = [
@@ -294,7 +294,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'Anthropic',
     cloudProvider: '官方',
     type: 'subscription',
-    primaryModel: 'claude-sonnet-4-6-20250514',
+    primaryModel: 'claude-sonnet-4-6',
     isBuiltin: true,
     config: {},
     models: ANTHROPIC_MODELS,
@@ -305,7 +305,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'Anthropic',
     cloudProvider: '官方',
     type: 'api',
-    primaryModel: 'claude-sonnet-4-6-20250514',
+    primaryModel: 'claude-sonnet-4-6',
     isBuiltin: true,
     authType: 'both',
     config: {

@@ -243,7 +243,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showToolMenu, setShowToolMenu] = useState(false);
 
   // Derive current model ID from prop or provider default
-  const currentModelId = selectedModel ?? provider?.primaryModel ?? 'claude-sonnet-4-5-20250929';
+  const currentModelId = selectedModel ?? provider?.primaryModel ?? 'claude-sonnet-4-6';
   // Get display name for current model
   const currentModelName = provider ? getModelDisplayName(provider, currentModelId) : currentModelId;
 

@@ -82,7 +82,7 @@ function hasAnthropicSubscription(): boolean {
 export const ANTHROPIC_CONFIG: ProviderConfig = {
   id: 'anthropic-sub',
   name: 'Anthropic (Subscription)',
-  model: 'claude-haiku-4-5-20251001', // Haiku 4.5 - fast and cheap for testing
+  model: 'claude-haiku-4-5', // Haiku 4.5 - fast and cheap for testing
   isSubscription: true,
   // No baseUrl/apiKey - uses subscription auth
 };
