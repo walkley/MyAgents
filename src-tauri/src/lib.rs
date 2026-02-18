@@ -3,6 +3,7 @@
 
 mod commands;
 pub mod cron_task;
+pub mod im;
 pub mod logger;
 mod proxy_config;
 mod sidecar;
@@ -36,6 +37,9 @@ pub fn run() {
 
     // Create managed sidecar state (now supports multiple instances)
     let sidecar_state = create_sidecar_state();
+
+    // Create IM Bot managed state
+    let im_bot_state = im::create_im_bot_state();
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
@@ -65,6 +69,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .manage(sidecar_state)
         .manage(sse_proxy_state)
+        .manage(im_bot_state)
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -131,6 +136,11 @@ pub fn run() {
             // Background session completion
             cmd_start_background_completion,
             cmd_cancel_background_completion,
+            // IM Bot commands
+            im::cmd_start_im_bot,
+            im::cmd_stop_im_bot,
+            im::cmd_im_bot_status,
+            im::cmd_im_conversations,
         ])
         .setup(|app| {
             // Initialize logging for all builds
@@ -194,6 +204,10 @@ pub fn run() {
                 cron_task::initialize_cron_manager(cron_app_handle).await;
             });
             log::info!("[App] Cron task manager initialized");
+
+            // Auto-start IM Bot if previously enabled (3s delay)
+            im::schedule_auto_start(app.handle().clone());
+            log::info!("[App] IM Bot auto-start scheduled");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");

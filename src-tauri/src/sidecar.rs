@@ -253,6 +253,9 @@ pub enum SidecarOwner {
     /// Background completion owner - keeps Sidecar alive while AI finishes responding
     /// String is the session ID for identification
     BackgroundCompletion(String),
+    /// IM Bot owner - keeps Sidecar alive for IM message processing
+    /// String is the session_key (e.g. "im:telegram:private:12345")
+    ImBot(String),
 }
 
 /// Session-centric Sidecar instance
@@ -1632,6 +1635,12 @@ fn create_new_session_sidecar<R: Runtime>(
         .arg("--agent-dir")
         .arg(workspace_path);
 
+    // Pass session_id to Bun for real sessions (not pending-xxx)
+    // so Bun uses the same UUID as Rust/SDK, enabling resume on crash recovery
+    if !session_id.starts_with("pending-") {
+        cmd.arg("--session-id").arg(session_id);
+    }
+
     // Set working directory to script's parent directory
     if let Some(script_dir) = script_path.parent() {
         cmd.current_dir(script_dir);
@@ -1807,6 +1816,7 @@ pub fn cmd_ensure_session_sidecar(
     let owner = match ownerType.as_str() {
         "tab" => SidecarOwner::Tab(ownerId),
         "cron_task" => SidecarOwner::CronTask(ownerId),
+        "im_bot" => SidecarOwner::ImBot(ownerId),
         _ => return Err(format!("Invalid owner type: {}", ownerType)),
     };
 
@@ -1827,6 +1837,7 @@ pub fn cmd_release_session_sidecar(
         "tab" => SidecarOwner::Tab(ownerId),
         "cron_task" => SidecarOwner::CronTask(ownerId),
         "background_completion" => SidecarOwner::BackgroundCompletion(ownerId),
+        "im_bot" => SidecarOwner::ImBot(ownerId),
         _ => return Err(format!("Invalid owner type: {}", ownerType)),
     };
 

@@ -113,6 +113,11 @@ export type MessageWire = {
     previewUrl?: string;
     isImage?: boolean;
   }[];
+  metadata?: {
+    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    sourceId?: string;
+    senderName?: string;
+  };
 };
 
 const requireModule = createRequire(import.meta.url);
@@ -123,12 +128,22 @@ let sessionState: SessionState = 'idle';
 let querySession: Query | null = null;
 let isProcessing = false;
 let shouldAbortSession = false;
+// Deferred config restart: when MCP/Agents config changes during an active turn,
+// we defer the session restart until the current turn completes naturally.
+// This prevents Tab config sync from aborting a shared IM session mid-response.
+let pendingConfigRestart = false;
 let sessionTerminationPromise: Promise<void> | null = null;
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
 const messages: MessageWire[] = [];
 const streamIndexToToolId: Map<number, string> = new Map();
 const toolResultIndexToId: Map<number, string> = new Map();
+
+// IM Draft Stream: callback for streaming text to Telegram
+type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error', data: string) => void;
+let imStreamCallback: ImStreamCallback | null = null;
+// Track text block indices for detecting text-type content_block_stop
+const imTextBlockIndices = new Set<number>();
 const childToolToParent: Map<string, string> = new Map();
 let messageSequence = 0;
 let sessionId = randomUUID();
@@ -213,6 +228,11 @@ function waitForTurnComplete(): Promise<void> {
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
 function abortPersistentSession(): void {
   shouldAbortSession = true;
+  // Notify IM stream callback before abort
+  if (imStreamCallback) {
+    imStreamCallback('error', 'Session aborted');
+    imStreamCallback = null;
+  }
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -442,14 +462,23 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
 
   // If MCP changed and session is running, restart with resume to apply new config
   if (mcpChanged && querySession) {
-    if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
-    // sessionRegistered 已正确反映 resume 状态，无需额外设置
-    abortPersistentSession();
+    if (isProcessing && !isPreWarming) {
+      // Active user turn in progress (e.g. IM responding) — defer restart to avoid killing mid-response.
+      // The restart will fire after the current turn completes (see signalTurnComplete handler).
+      // Pre-warm sessions are safe to abort immediately (no user message to lose).
+      console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), deferring restart (active turn)`);
+      pendingConfigRestart = true;
+    } else {
+      if (isDebugMode) console.log(`[agent] MCP config changed (${currentIds || 'none'} -> ${newIds || 'none'}), restarting session with resume`);
+      abortPersistentSession();
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
   preWarmFailCount = 0; // Config changed — reset retry tracking
-  schedulePreWarm();
+  if (!isProcessing || isPreWarming) {
+    schedulePreWarm();
+  }
 }
 
 /**
@@ -476,14 +505,20 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
 
   // If agents changed and session is running, restart with resume
   if (agentsChanged && querySession) {
-    if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
-    // sessionRegistered 已正确反映 resume 状态，无需额外设置
-    abortPersistentSession();
+    if (isProcessing && !isPreWarming) {
+      console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart (active turn)`);
+      pendingConfigRestart = true;
+    } else {
+      if (isDebugMode) console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), restarting session with resume`);
+      abortPersistentSession();
+    }
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
   preWarmFailCount = 0; // Config changed — reset retry tracking
-  schedulePreWarm();
+  if (!isProcessing || isPreWarming) {
+    schedulePreWarm();
+  }
 }
 
 /**
@@ -1065,13 +1100,28 @@ export function handlePermissionResponse(
   if (decision === 'deny') {
     console.log(`[permission] ${pending.toolName}: user denied`);
     pending.resolve('deny');
-  } else if (decision === 'allow_once') {
-    console.log(`[permission] ${pending.toolName}: user allowed once`);
+  } else if (decision === 'allow_once' || decision === 'always_allow') {
+    if (decision === 'always_allow') {
+      console.log(`[permission] ${pending.toolName}: user granted session permission`);
+      sessionAlwaysAllowed.add(pending.toolName);
+    } else {
+      console.log(`[permission] ${pending.toolName}: user allowed once`);
+    }
     pending.resolve('allow');
-  } else if (decision === 'always_allow') {
-    console.log(`[permission] ${pending.toolName}: user granted session permission`);
-    sessionAlwaysAllowed.add(pending.toolName);
-    pending.resolve('allow');
+
+    // Cascade: auto-approve all other pending requests for the same tool.
+    // The frontend only shows one permission card at a time. When multiple requests
+    // for the same tool arrive in parallel (e.g., 3 WebSearch calls), the others
+    // are invisible to the user and would be stuck until the 10-minute timeout.
+    // Since the user already approved this tool (once or always), approve them all.
+    for (const [otherId, otherPending] of pendingPermissions) {
+      if (otherPending.toolName === pending.toolName) {
+        console.log(`[permission] ${otherPending.toolName}: cascade auto-approved (requestId=${otherId})`);
+        clearTimeout(otherPending.timer);
+        pendingPermissions.delete(otherId);
+        otherPending.resolve('allow');
+      }
+    }
   }
 
   return true;
@@ -1084,6 +1134,34 @@ export function clearSessionPermissions(): void {
   sessionAlwaysAllowed.clear();
   pendingPermissions.clear();
   pendingAskUserQuestions.clear();
+}
+
+/**
+ * Get pending interactive requests (permission + ask-user-question).
+ * Used to replay these to newly connected SSE clients (e.g., Tab joining shared session).
+ */
+export function getPendingInteractiveRequests(): Array<{
+  type: 'permission:request' | 'ask-user-question:request';
+  data: unknown;
+}> {
+  const result: Array<{ type: 'permission:request' | 'ask-user-question:request'; data: unknown }> = [];
+  for (const [requestId, p] of pendingPermissions) {
+    result.push({
+      type: 'permission:request',
+      data: {
+        requestId,
+        toolName: p.toolName,
+        input: typeof p.input === 'object' ? JSON.stringify(p.input).slice(0, 500) : String(p.input).slice(0, 500),
+      },
+    });
+  }
+  for (const [requestId, q] of pendingAskUserQuestions) {
+    result.push({
+      type: 'ask-user-question:request',
+      data: { requestId, questions: q.input.questions },
+    });
+  }
+  return result;
 }
 
 /**
@@ -1111,6 +1189,7 @@ function persistMessagesToStorage(
         mimeType: att.mimeType,
         path: att.relativePath ?? '', // Map relativePath to path for storage
       })),
+      metadata: msg.metadata,
       // Attach usage info only to the last assistant message if provided
       usage: isLastAssistant && lastAssistantUsage ? lastAssistantUsage : undefined,
       toolCount: isLastAssistant && lastAssistantToolCount ? lastAssistantToolCount : undefined,
@@ -1124,6 +1203,10 @@ function persistMessagesToStorage(
 
 export function getSessionId(): string {
   return sessionId;
+}
+
+export function setImStreamCallback(cb: ImStreamCallback | null): void {
+  imStreamCallback = cb;
 }
 
 function resetAbortFlag(): void {
@@ -1695,11 +1778,17 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
+  // Notify IM stream: turn complete
+  if (imStreamCallback) {
+    imStreamCallback('complete', '');
+    imStreamCallback = null;
+  }
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
+  imTextBlockIndices.clear();
   clearCronTaskContext();
 
   // Only transition to idle if no queued messages waiting.
@@ -1723,10 +1812,16 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
+  // Notify IM stream: turn complete (stopped)
+  if (imStreamCallback) {
+    imStreamCallback('complete', '');
+    imStreamCallback = null;
+  }
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
+  imTextBlockIndices.clear();
 
   // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
   if (messageQueue.length === 0) {
@@ -1755,6 +1850,11 @@ function handleMessageStopped(): void {
 
 function handleMessageError(error: string): void {
   isStreamingMessage = false;
+  // Notify IM stream: error
+  if (imStreamCallback) {
+    imStreamCallback('error', error);
+    imStreamCallback = null;
+  }
   setSessionState('idle');
 
   // Don't persist expected termination signals as errors
@@ -2046,8 +2146,54 @@ function clearMessageState(): void {
   streamIndexToToolId.clear();
   toolResultIndexToId.clear();
   childToolToParent.clear();
+  imTextBlockIndices.clear();
   isStreamingMessage = false;
   messageSequence = 0;
+  pendingConfigRestart = false;
+}
+
+/**
+ * Load persisted messages from SessionMessage[] into in-memory messages[].
+ * Sets messageSequence to continue from the last stored message ID.
+ * Used by initializeAgent (resume) and switchToSession to restore conversation state.
+ */
+function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
+  for (const storedMsg of storedMessages) {
+    let parsedContent: string | ContentBlock[] = storedMsg.content;
+    if (storedMsg.content.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(storedMsg.content);
+        if (Array.isArray(parsed)) {
+          parsedContent = parsed as ContentBlock[];
+        }
+      } catch {
+        // Keep as string if parse fails
+      }
+    }
+    messages.push({
+      id: storedMsg.id,
+      role: storedMsg.role,
+      content: parsedContent,
+      timestamp: storedMsg.timestamp,
+      sdkUuid: storedMsg.sdkUuid,
+      attachments: storedMsg.attachments?.map((att) => ({
+        id: att.id,
+        name: att.name,
+        size: 0,
+        mimeType: att.mimeType,
+        relativePath: att.path,
+      })),
+      metadata: storedMsg.metadata,
+    });
+  }
+  // Update messageSequence to continue from the last message
+  if (storedMessages.length > 0) {
+    const lastMsgId = storedMessages[storedMessages.length - 1].id;
+    const parsedId = parseInt(lastMsgId, 10);
+    if (!isNaN(parsedId)) {
+      messageSequence = parsedId + 1;
+    }
+  }
 }
 
 /**
@@ -2137,18 +2283,58 @@ export async function resetSession(): Promise<void> {
  * Initialize agent with a new working directory
  * Called when switching to a different project/workspace
  */
-export function initializeAgent(nextAgentDir: string, initialPrompt?: string | null): void {
+export async function initializeAgent(
+  nextAgentDir: string,
+  initialPrompt?: string | null,
+  initialSessionId?: string,
+): Promise<void> {
   agentDir = nextAgentDir;
   hasInitialPrompt = Boolean(initialPrompt && initialPrompt.trim());
   systemInitInfo = null;
-  sessionId = randomUUID();
+
+  if (initialSessionId) {
+    // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
+    sessionId = initialSessionId as typeof sessionId;
+
+    // Check if this session has any prior metadata → decide resume vs create.
+    // We check for metadata existence (not just sdkSessionId) because sdkSessionId
+    // is only written after system_init succeeds. If the previous Bun process crashed
+    // before system_init, metadata exists (with unifiedSession:true) but sdkSessionId
+    // is absent — yet the SDK session directory already exists on disk.
+    const meta = getSessionMetadata(initialSessionId);
+    if (meta) {
+      sessionRegistered = true;
+      console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+    } else {
+      sessionRegistered = false;
+      console.log(`[agent] initializeAgent: will create new session ${initialSessionId}`);
+    }
+  } else {
+    // No specified ID → auto-generate (standard Tab new conversation flow)
+    sessionId = randomUUID();
+    sessionRegistered = false; // Fresh session, no SDK data to resume
+  }
 
   // Clear message state (shared with resetSession)
   clearMessageState();
 
+  // For resume sessions: load existing messages from disk into memory.
+  // This is critical for shared Sidecar (IM + Desktop Tab):
+  // 1. SSE replay (chat:message-replay) includes old messages when Tab connects
+  // 2. messageSequence continues from last ID (prevents ID collision with disk messages)
+  // 3. saveSessionMessages incremental append works correctly (messages.slice(existingCount))
+  // Same pattern as switchToSession's message loading.
+  if (initialSessionId && sessionRegistered) {
+    const sessionData = getSessionData(initialSessionId);
+    if (sessionData?.messages?.length) {
+      loadMessagesFromStorage(sessionData.messages);
+      console.log(`[agent] initializeAgent: loaded ${sessionData.messages.length} existing messages, messageSequence=${messageSequence}`);
+    }
+  }
+
   // Initialize logger for new session (lazy file creation)
   initLogger(sessionId);
-  console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'}`);
+  console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'} sessionId=${sessionId} resume=${sessionRegistered}`);
   if (hasInitialPrompt) {
     void enqueueUserMessage(initialPrompt!.trim());
   } else {
@@ -2203,19 +2389,17 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     persistMessagesToStorage();
   }
 
-  // Reset all runtime state
+  // Reset message/queue/streaming state (shared with initializeAgent, resetSession)
+  clearMessageState();
+
+  // Reset session-level runtime state
   shouldAbortSession = false;
   isProcessing = false;
-  sessionRegistered = false; // New session context, will re-set from sessionMeta below
+  sessionRegistered = false; // Will re-set from sessionMeta below
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
   messageResolver = null;
   resolveTurnComplete = null;
   setSessionState('idle');
-  messages.length = 0;
-  messageQueue.length = 0;
-  streamIndexToToolId.clear();
-  toolResultIndexToId.clear();
-  childToolToParent.clear();
   systemInitInfo = null;
 
   // Clear SDK ready signal state
@@ -2233,46 +2417,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Load existing messages from storage into memory
   // This is critical for incremental save logic in saveSessionMessages
   const sessionData = getSessionData(targetSessionId);
-  if (sessionData?.messages) {
-    for (const storedMsg of sessionData.messages) {
-      // Convert SessionMessage to MessageWire format
-      // Content may be JSON-stringified ContentBlock[] or plain text
-      let parsedContent: string | ContentBlock[] = storedMsg.content;
-      if (storedMsg.content.startsWith('[')) {
-        try {
-          const parsed = JSON.parse(storedMsg.content);
-          if (Array.isArray(parsed)) {
-            parsedContent = parsed as ContentBlock[];
-          }
-        } catch {
-          // Keep as string if parse fails
-        }
-      }
-
-      const msgWire: MessageWire = {
-        id: storedMsg.id,
-        role: storedMsg.role,
-        content: parsedContent,
-        timestamp: storedMsg.timestamp,
-        sdkUuid: storedMsg.sdkUuid,
-        attachments: storedMsg.attachments?.map((att) => ({
-          id: att.id,
-          name: att.name,
-          size: 0,
-          mimeType: att.mimeType,
-          relativePath: att.path,
-        })),
-      };
-      messages.push(msgWire);
-    }
-    // Update messageSequence to continue from the last message
-    if (sessionData.messages.length > 0) {
-      const lastMsgId = sessionData.messages[sessionData.messages.length - 1].id;
-      const parsedId = parseInt(lastMsgId, 10);
-      if (!isNaN(parsedId)) {
-        messageSequence = parsedId + 1;
-      }
-    }
+  if (sessionData?.messages?.length) {
+    loadMessagesFromStorage(sessionData.messages);
     console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing messages`);
   }
 
@@ -2355,7 +2501,8 @@ export async function enqueueUserMessage(
   images?: ImagePayload[],
   permissionMode?: PermissionMode,
   model?: string,
-  providerEnv?: ProviderEnv
+  providerEnv?: ProviderEnv,
+  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
   if (rewindPromise) {
@@ -2431,6 +2578,7 @@ export async function enqueueUserMessage(
     // Clear stream state mappings (will be rebuilt by new session)
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
+    imTextBlockIndices.clear();
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
   } else if (providerEnv) {
     // Provider not changed (or first message with API provider), just update tracking
@@ -2579,6 +2727,7 @@ export async function enqueueUserMessage(
     content: trimmed,
     timestamp: new Date().toISOString(),
     attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+    metadata,
   };
   messages.push(userMessage);
   broadcast('chat:message-replay', { message: userMessage });
@@ -2841,7 +2990,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   isProcessing = true;
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
+  let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
   streamIndexToToolId.clear();
+  imTextBlockIndices.clear();
   // Don't broadcast 'running' during pre-warm — session is invisible to frontend
   if (!preWarm) {
     setSessionState('running');
@@ -2870,115 +3021,145 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
     console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
 
-    querySession = query({
-      prompt: messageGenerator(),
-      options: {
-        // sessionId 和 resume 互斥（SDK 约束）
-        // 新 session：传 sessionId 让 SDK 使用我们的 UUID
-        // Resume：传 resume 恢复对话上下文
-        ...(resumeFrom
-          ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
-          : { sessionId: sessionId }
-        ),
-        enableFileCheckpointing: true,
-        maxThinkingTokens: 32_000,
-        // Only use project-level settings from .claude/ directory
-        // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
-        // MCP is explicitly configured via mcpServers, not SDK auto-discovery
-        settingSources: buildSettingSources(),
-        // Permission mode mapping (uses mapToSdkPermissionMode):
-        // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
-        // - plan → plan
-        // - fullAgency → bypassPermissions (skip all checks)
-        // - custom → default (all tools go through canUseTool)
-        permissionMode: sdkPermissionMode,
-        // allowDangerouslySkipPermissions is required when using bypassPermissions
-        ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
-        model: currentModel, // Use currently selected model
-        pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
-        executable: 'bun',
-        env,
-        stderr: (message: string) => {
-          // Always log stderr to help diagnose subprocess issues (especially on older Windows)
-          console.error('[sdk-stderr]', message);
-          if (process.env.DEBUG === '1') {
-            broadcast('chat:debug-message', message);
-          }
-        },
-        systemPrompt: buildSystemPromptOption(),
-        cwd: agentDir,
-        includePartialMessages: true,
-        mcpServers: buildSdkMcpServers(),
-        // Sub-agents: inject custom agent definitions if configured
-        // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
-        ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
-          ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
-        // Custom permission handling - check rules and prompt user for unknown tools
-        // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
-        canUseTool: async (toolName, input, options) => {
-          console.debug(`[permission] canUseTool checking: ${toolName}`);
+    const promptGen = messageGenerator();
 
-          // First check MCP tool permission based on user's enabled MCP servers
-          const mcpCheck = checkMcpToolPermission(toolName);
-          if (!mcpCheck.allowed) {
-            if (isDebugMode) console.log(`[permission] MCP tool blocked: ${toolName} - ${mcpCheck.reason}`);
+    // Build common query options (shared between normal start and "already in use" fallback)
+    const commonQueryOptions = {
+      enableFileCheckpointing: true,
+      maxThinkingTokens: 32_000,
+      // Only use project-level settings from .claude/ directory
+      // We don't use 'user' (~/.claude/) because our config is in ~/.myagents/
+      // MCP is explicitly configured via mcpServers, not SDK auto-discovery
+      settingSources: buildSettingSources(),
+      // Permission mode mapping (uses mapToSdkPermissionMode):
+      // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
+      // - plan → plan
+      // - fullAgency → bypassPermissions (skip all checks)
+      // - custom → default (all tools go through canUseTool)
+      permissionMode: sdkPermissionMode,
+      // allowDangerouslySkipPermissions is required when using bypassPermissions
+      ...(sdkPermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
+      model: currentModel, // Use currently selected model
+      pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
+      executable: 'bun' as const,
+      env,
+      stderr: (message: string) => {
+        // Always log stderr to help diagnose subprocess issues (especially on older Windows)
+        console.error('[sdk-stderr]', message);
+        // Detect "Session ID already in use" early — stderr arrives before process exit error
+        if (message.includes('already in use')) {
+          detectedAlreadyInUse = true;
+        }
+        if (process.env.DEBUG === '1') {
+          broadcast('chat:debug-message', message);
+        }
+      },
+      systemPrompt: buildSystemPromptOption(),
+      cwd: agentDir,
+      includePartialMessages: true,
+      mcpServers: buildSdkMcpServers(),
+      // Sub-agents: inject custom agent definitions if configured
+      // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
+      ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
+        ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
+      // Custom permission handling - check rules and prompt user for unknown tools
+      // Effective when permissionMode is 'default' or 'acceptEdits' (not 'bypassPermissions')
+      canUseTool: async (toolName: string, input: unknown, options: { signal: AbortSignal }) => {
+        console.debug(`[permission] canUseTool checking: ${toolName}`);
+
+        // First check MCP tool permission based on user's enabled MCP servers
+        const mcpCheck = checkMcpToolPermission(toolName);
+        if (!mcpCheck.allowed) {
+          if (isDebugMode) console.log(`[permission] MCP tool blocked: ${toolName} - ${mcpCheck.reason}`);
+          return {
+            behavior: 'deny' as const,
+            message: mcpCheck.reason
+          };
+        }
+
+        // Special case: cron-tools is a built-in trusted server
+        // When allowed by checkMcpToolPermission, skip user confirmation entirely
+        // (AI should be able to exit cron task without user approval)
+        if (toolName.startsWith('mcp__cron-tools__')) {
+          console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        }
+
+        // Special handling for AskUserQuestion - always requires user interaction
+        if (toolName === 'AskUserQuestion') {
+          console.log('[canUseTool] AskUserQuestion detected, prompting user');
+          const answers = await handleAskUserQuestion(input, options.signal);
+          if (answers === null) {
             return {
               behavior: 'deny' as const,
-              message: mcpCheck.reason
+              message: '用户取消了问答'
             };
           }
+          // Return with answers filled in
+          const inputWithAnswers = input as Record<string, unknown>;
+          return {
+            behavior: 'allow' as const,
+            updatedInput: { ...inputWithAnswers, answers }
+          };
+        }
 
-          // Special case: cron-tools is a built-in trusted server
-          // When allowed by checkMcpToolPermission, skip user confirmation entirely
-          // (AI should be able to exit cron task without user approval)
-          if (toolName.startsWith('mcp__cron-tools__')) {
-            console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
-            return {
-              behavior: 'allow' as const,
-              updatedInput: input as Record<string, unknown>
-            };
-          }
+        const decision = await checkToolPermission(
+          toolName,
+          input,
+          currentPermissionMode,
+          options.signal
+        );
+        console.debug(`[permission] canUseTool result for ${toolName}: ${decision}`);
+        if (decision === 'allow') {
+          // Must include updatedInput for SDK to properly process the tool call
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input as Record<string, unknown>
+          };
+        } else {
+          return {
+            behavior: 'deny' as const,
+            message: '用户拒绝了此工具的使用权限'
+          };
+        }
+      },
+    };
 
-          // Special handling for AskUserQuestion - always requires user interaction
-          if (toolName === 'AskUserQuestion') {
-            console.log('[canUseTool] AskUserQuestion detected, prompting user');
-            const answers = await handleAskUserQuestion(input, options.signal);
-            if (answers === null) {
-              return {
-                behavior: 'deny' as const,
-                message: '用户取消了问答'
-              };
-            }
-            // Return with answers filled in
-            const inputWithAnswers = input as Record<string, unknown>;
-            return {
-              behavior: 'allow' as const,
-              updatedInput: { ...inputWithAnswers, answers }
-            };
-          }
+    // sessionId 和 resume 互斥（SDK 约束）
+    // 新 session：传 sessionId 让 SDK 使用我们的 UUID
+    // Resume：传 resume 恢复对话上下文
+    const sessionOption = resumeFrom
+      ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
+      : { sessionId: sessionId };
 
-          const decision = await checkToolPermission(
-            toolName,
-            input,
-            currentPermissionMode,
-            options.signal
-          );
-          console.debug(`[permission] canUseTool result for ${toolName}: ${decision}`);
-          if (decision === 'allow') {
-            // Must include updatedInput for SDK to properly process the tool call
-            return {
-              behavior: 'allow' as const,
-              updatedInput: input as Record<string, unknown>
-            };
-          } else {
-            return {
-              behavior: 'deny' as const,
-              message: '用户拒绝了此工具的使用权限'
-            };
-          }
-        },
+    try {
+      querySession = query({
+        prompt: promptGen,
+        options: { ...sessionOption, ...commonQueryOptions },
+      });
+    } catch (queryError: unknown) {
+      // Defensive fallback: metadata lost but SDK disk data exists → switch to resume
+      // Note: "already in use" may surface asynchronously during for-await iteration
+      // rather than synchronously here; this catch covers the sync case if SDK validates early.
+      const msg = queryError instanceof Error ? queryError.message : String(queryError);
+      if (!resumeFrom && msg.includes('already in use')) {
+        console.warn(`[agent] Session ${sessionId} already exists on disk, switching to resume`);
+        sessionRegistered = true;
+        querySession = query({
+          prompt: promptGen,
+          options: {
+            resume: sessionId,
+            ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}),
+            ...commonQueryOptions,
+          },
+        });
+      } else {
+        throw queryError;
       }
-    });
+    }
 
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
@@ -3095,6 +3276,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 if (!decorativeCheck.filtered) {
                   broadcast('chat:message-chunk', streamEvent.delta.text);
                   appendTextChunk(streamEvent.delta.text);
+                  // IM stream: forward non-subagent text delta
+                  imStreamCallback?.('delta', streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -3129,6 +3312,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
         } else if (streamEvent.type === 'content_block_start') {
+          // IM stream: track text block indices (non-subagent only)
+          if (imStreamCallback && streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
+            imTextBlockIndices.add(streamEvent.index);
+          }
           if (streamEvent.content_block.type === 'thinking') {
             broadcast('chat:thinking-start', { index: streamEvent.index });
             handleThinkingStart(streamEvent.index);
@@ -3261,6 +3448,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               toolId: toolId || undefined
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
+            // IM stream: signal text block end
+            if (imStreamCallback && imTextBlockIndices.has(streamEvent.index)) {
+              imStreamCallback('block-end', '');
+              imTextBlockIndices.delete(streamEvent.index);
+            }
           }
         }
       } else if (sdkMessage.type === 'user') {
@@ -3571,6 +3763,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         });
         handleMessageComplete();
         signalTurnComplete();  // 解锁 generator 进入下一轮
+
+        // Deferred config restart: MCP/Agents changed during this turn but we didn't
+        // abort mid-response. Now that the turn completed naturally, restart the session
+        // so the new config takes effect. The generator will see shouldAbortSession and exit.
+        // schedulePreWarm() ensures a new session starts after the abort completes.
+        // The 500ms timer gives enough time for the finally block to run (isProcessing=false)
+        // before the new startStreamingSession is called.
+        // sessionRegistered is preserved, so the new session will use resume.
+        if (pendingConfigRestart) {
+          console.log('[agent] Turn complete, applying deferred config restart');
+          pendingConfigRestart = false;
+          abortPersistentSession();
+          schedulePreWarm();
+        }
       }
     }
   } catch (error) {
@@ -3578,6 +3784,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const errorStack = error instanceof Error ? error.stack : String(error);
     console.error('[agent] session error:', errorMessage);
     console.error('[agent] session error stack:', errorStack);
+
+    // "Session ID already in use" recovery: SDK session dir exists on disk but our
+    // in-memory metadata was lost (fresh Bun process after crash/restart).
+    // Fix: switch to resume mode. Pre-warm retry (finally block) will use resume.
+    // For non-pre-warm: schedule pre-warm to establish resumed session; user's message
+    // is lost for this attempt, but the next message will work correctly.
+    if (detectedAlreadyInUse && !sessionRegistered) {
+      console.warn(`[agent] Session ${sessionId} exists on disk but metadata lost, switching to resume for retry`);
+      sessionRegistered = true;
+      if (!isPreWarming) {
+        schedulePreWarm(); // Establish resumed session so next user message works
+      }
+      return; // Skip error broadcast, let finally handle cleanup + pre-warm retry
+    }
 
     // Enhanced error diagnostics for Windows subprocess failures
     let userFacingError = errorMessage;

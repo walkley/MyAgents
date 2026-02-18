@@ -451,7 +451,7 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping message-replay (new session)');
                     break;
                 }
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string } } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } } } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 if (seenIdsRef.current.has(msg.id)) break;
@@ -1401,7 +1401,7 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }> }> } }>(`/sessions/${targetSessionId}`);
+            const response = await apiGetJson<{ success: boolean; session?: { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -1441,6 +1441,7 @@ export default function TabProvider({
                         previewUrl: att.previewUrl,
                         isImage: att.mimeType.startsWith('image/'),
                     })),
+                    metadata: msg.metadata,
                 };
             });
 

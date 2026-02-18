@@ -94,9 +94,11 @@ import {
   setSessionModel,
   resetSession,
   waitForSessionIdle,
+  setImStreamCallback,
   setSystemPromptConfig,
   clearSystemPromptConfig,
   rewindSession,
+  getPendingInteractiveRequests,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { getScriptDir } from './utils/runtime';
@@ -114,7 +116,7 @@ import {
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
-import { createSseClient, getClients } from './sse';
+import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyApiKey, verifySubscription } from './provider-verify';
 
 type ImagePayload = {
@@ -219,7 +221,7 @@ function buildCronSystemPromptAppend(
   return content;
 }
 
-function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; port: number } {
+function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; port: number; sessionId?: string } {
   const args = argv.slice(2);
   const getArgValue = (flag: string) => {
     const index = args.indexOf(flag);
@@ -232,12 +234,13 @@ function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; 
   const agentDir = getArgValue('--agent-dir') ?? '';
   const initialPrompt = getArgValue('--prompt') ?? undefined;
   const port = Number(getArgValue('--port') ?? 3000);
+  const sessionId = getArgValue('--session-id') ?? undefined;
 
   if (!agentDir) {
     throw new Error('Missing required argument: --agent-dir <path>');
   }
 
-  return { agentDir, initialPrompt, port: Number.isNaN(port) ? 3000 : port };
+  return { agentDir, initialPrompt, port: Number.isNaN(port) ? 3000 : port, sessionId };
 }
 
 /**
@@ -581,7 +584,7 @@ interface SwitchPayload {
 }
 
 async function main() {
-  const { agentDir, initialPrompt, port } = parseArgs(process.argv);
+  const { agentDir, initialPrompt, port, sessionId: initialSessionId } = parseArgs(process.argv);
   let currentAgentDir = await ensureAgentDir(agentDir);
 
   // Initialize unified logging system (intercepts console.log and sends to SSE)
@@ -594,7 +597,7 @@ async function main() {
   // Seed bundled skills to ~/.myagents/skills/ on first launch
   seedBundledSkills();
 
-  initializeAgent(currentAgentDir, initialPrompt);
+  await initializeAgent(currentAgentDir, initialPrompt, initialSessionId);
 
   Bun.serve({
     port,
@@ -652,6 +655,11 @@ async function main() {
         const systemInitInfo = getSystemInitInfo();
         if (systemInitInfo) {
           client.send('chat:system-init', { info: systemInitInfo });
+        }
+        // Replay pending interactive requests (permission, ask-user-question)
+        // so that a Tab joining mid-session can display and respond to them.
+        for (const pending of getPendingInteractiveRequests()) {
+          client.send(pending.type, pending.data);
         }
         return response;
       }
@@ -1313,10 +1321,42 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
+        // If this is the currently active session, merge in-memory messages.
+        // In-memory messages include the current turn's in-progress content
+        // (thinking, text, tool_use) that hasn't been persisted to disk yet.
+        // This is critical for shared Sidecar: when a Tab opens an IM session
+        // mid-turn, it needs to see the partial assistant response.
+        let mergedMessages = session.messages;
+        if (sessionId === getSessionId()) {
+          const inMemory = getMessages();
+          if (inMemory.length > 0) {
+            const diskIds = new Set(session.messages.map(m => m.id));
+            const newMessages = inMemory
+              .filter(m => !diskIds.has(m.id))
+              .map(m => ({
+                id: m.id,
+                role: m.role,
+                content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+                timestamp: m.timestamp,
+                sdkUuid: m.sdkUuid,
+                attachments: m.attachments?.map(a => ({
+                  id: a.id,
+                  name: a.name,
+                  mimeType: a.mimeType,
+                  path: a.savedPath ?? a.relativePath ?? '',
+                })),
+                metadata: m.metadata,
+              }));
+            if (newMessages.length > 0) {
+              mergedMessages = [...session.messages, ...newMessages];
+            }
+          }
+        }
+
         // Add previewUrl for image attachments
         const sessionWithPreview = {
           ...session,
-          messages: session.messages.map((msg) => ({
+          messages: mergedMessages.map((msg) => ({
             ...msg,
             attachments: msg.attachments?.map((att) => ({
               ...att,
@@ -1422,7 +1462,7 @@ async function main() {
         try {
           console.log(`[agent] switch to dir="${newDir}"`);
           currentAgentDir = await ensureAgentDir(newDir);
-          initializeAgent(currentAgentDir, payload.initialPrompt);
+          await initializeAgent(currentAgentDir, payload.initialPrompt);
           return jsonResponse({
             success: true,
             agentDir: currentAgentDir
@@ -2323,7 +2363,7 @@ async function main() {
           }
 
           // Use provided model or default to a reasonable fallback
-          const testModel = model || 'claude-sonnet-4-5-20250929';
+          const testModel = model || 'claude-sonnet-4-6-20250514';
 
           console.log(`[api/provider/verify] =========================`);
           console.log(`[api/provider/verify] baseUrl: ${baseUrl}`);
@@ -4405,6 +4445,223 @@ async function main() {
       }
 
       // ============= END SLASH COMMANDS API =============
+
+      // ============= IM BOT API =============
+      // These endpoints are called by the Rust IM layer (SessionRouter)
+
+      // POST /api/im/chat — Process an IM message through the AI agent
+      if (pathname === '/api/im/chat' && request.method === 'POST') {
+        try {
+          const payload = (await request.json()) as {
+            message: string;
+            source: 'telegram_private' | 'telegram_group';
+            sourceId: string;
+            senderName?: string;
+            permissionMode?: string;
+          };
+
+          if (!payload.message?.trim()) {
+            return jsonResponse({ success: false, error: 'Message is required' }, 400);
+          }
+
+          const metadata = {
+            source: payload.source,
+            sourceId: payload.sourceId,
+            senderName: payload.senderName,
+          };
+
+          // Use enqueueUserMessage — shares the same persistent generator as Desktop
+          const result = await enqueueUserMessage(
+            payload.message,
+            undefined, // no images from IM
+            (payload.permissionMode as PermissionMode) ?? 'plan',
+            undefined, // use current model
+            undefined, // use current provider
+            metadata,
+          );
+
+          if (result.error) {
+            return jsonResponse({ success: false, error: result.error }, 503);
+          }
+
+          // Mark session source (only on first IM message for this session)
+          const currentSessionId = getSessionId();
+          if (currentSessionId) {
+            const sessionMeta = getSessionMetadata(currentSessionId);
+            if (sessionMeta && !sessionMeta.source) {
+              updateSessionMetadata(currentSessionId, { source: payload.source });
+            }
+          }
+
+          // Notify Desktop: a new IM user message was enqueued
+          broadcast('im:message_received', {
+            sessionId: currentSessionId,
+            source: payload.source,
+            senderName: payload.senderName ?? payload.sourceId,
+            content: payload.message,
+          });
+
+          // === SSE Stream: stream text deltas to Rust IM for Telegram draft editing ===
+          const encoder = new TextEncoder();
+          let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+          let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+          let closed = false;
+          let imAccText = ''; // Current block's accumulated text
+
+          const stream = new ReadableStream({
+            start(controller) {
+              // Immediately flush headers by sending an SSE comment
+              // (Bun buffers the response until the first body chunk is written)
+              controller.enqueue(encoder.encode(': connected\n\n'));
+
+              // 15s heartbeat (keep-alive during tool calls; Rust read_timeout=60s)
+              heartbeatTimer = setInterval(() => {
+                try { if (!closed) controller.enqueue(encoder.encode(': ping\n\n')); }
+                catch { /* stream closed */ }
+              }, 15000);
+
+              const sendEvent = (data: object) => {
+                if (closed) return;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+              };
+              const closeStream = () => {
+                if (closed) return;
+                closed = true;
+                if (heartbeatTimer) clearInterval(heartbeatTimer);
+                if (safetyTimer) clearTimeout(safetyTimer);
+                setImStreamCallback(null);
+                try { controller.close(); } catch { /* already closed */ }
+              };
+
+              // 600s safety timeout
+              safetyTimer = setTimeout(() => {
+                if (!closed) {
+                  // Flush any remaining text as final block
+                  if (imAccText) {
+                    sendEvent({ type: 'block-end', text: imAccText });
+                    imAccText = '';
+                  }
+                  sendEvent({ type: 'complete', sessionId: getSessionId() });
+                  closeStream();
+                }
+              }, 600000);
+
+              setImStreamCallback((event, data) => {
+                if (event === 'delta') {
+                  imAccText += data;
+                  sendEvent({ type: 'partial', text: imAccText });
+                } else if (event === 'block-end') {
+                  sendEvent({ type: 'block-end', text: imAccText });
+                  imAccText = ''; // Reset for next block
+                } else if (event === 'complete') {
+                  // Flush any un-ended text
+                  if (imAccText) {
+                    sendEvent({ type: 'block-end', text: imAccText });
+                    imAccText = '';
+                  }
+                  sendEvent({ type: 'complete', sessionId: getSessionId() });
+                  // Notify Desktop: IM turn completed
+                  broadcast('im:response_sent', {
+                    sessionId: getSessionId(),
+                  });
+                  closeStream();
+                } else if (event === 'error') {
+                  sendEvent({ type: 'error', error: data });
+                  closeStream();
+                }
+              });
+            },
+            cancel() {
+              closed = true;
+              if (heartbeatTimer) clearInterval(heartbeatTimer);
+              if (safetyTimer) clearTimeout(safetyTimer);
+              setImStreamCallback(null);
+            }
+          });
+
+          return new Response(stream, {
+            headers: {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache, no-transform',
+              'Connection': 'keep-alive',
+              'X-Accel-Buffering': 'no',
+            },
+          });
+        } catch (error) {
+          console.error('[im/chat] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'IM chat error' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/im/session/new — Start a new session (preserving workspace)
+      if (pathname === '/api/im/session/new' && request.method === 'POST') {
+        try {
+          await resetSession();
+          return jsonResponse({
+            sessionId: getSessionId(),
+          });
+        } catch (error) {
+          console.error('[im/session/new] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Reset error' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/im/session/switch-workspace — Switch workspace and start new session
+      if (pathname === '/api/im/session/switch-workspace' && request.method === 'POST') {
+        try {
+          const payload = (await request.json()) as { workspacePath: string };
+          if (!payload.workspacePath) {
+            return jsonResponse({ success: false, error: 'workspacePath is required' }, 400);
+          }
+          // Reset session (workspace change will be handled by Rust layer restarting the Sidecar)
+          await resetSession();
+          return jsonResponse({
+            sessionId: getSessionId(),
+            workspacePath: payload.workspacePath,
+          });
+        } catch (error) {
+          console.error('[im/session/switch-workspace] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Switch error' },
+            500,
+          );
+        }
+      }
+
+      // GET /api/im/session/:key/messages — Get messages for an IM session
+      if (pathname.startsWith('/api/im/session/') && pathname.endsWith('/messages') && request.method === 'GET') {
+        try {
+          // Currently returns messages from the active session
+          // In the future, could look up by session key
+          const allMessages = getMessages();
+          return jsonResponse({
+            messages: allMessages.map(m => ({
+              id: m.id,
+              role: m.role,
+              content: typeof m.content === 'string' ? m.content : m.content
+                .filter((b: { type: string; text?: string }) => b.type === 'text')
+                .map((b: { text?: string }) => b.text ?? '')
+                .join('\n'),
+              timestamp: m.timestamp,
+              metadata: m.metadata,
+            })),
+          });
+        } catch (error) {
+          console.error('[im/session/messages] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Messages error' },
+            500,
+          );
+        }
+      }
+
+      // ============= END IM BOT API =============
 
       const staticResponse = await serveStatic(pathname);
       if (staticResponse) {

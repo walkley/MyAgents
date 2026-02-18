@@ -243,6 +243,14 @@ export default function SessionHistoryDropdown({
                                                     当前
                                                 </span>
                                             )}
+                                            {(session.source === 'telegram_private' || session.source === 'telegram_group') && (
+                                                <span
+                                                    className="flex-shrink-0 text-[11px]"
+                                                    title={session.source === 'telegram_private' ? 'Telegram 私聊' : 'Telegram 群聊'}
+                                                >
+                                                    {session.source === 'telegram_private' ? '\u{1F4F1}' : '\u{1F465}'}
+                                                </span>
+                                            )}
                                             {sessionCronTaskMap.has(session.id) && (
                                                 <span className="flex-shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
                                                     心跳

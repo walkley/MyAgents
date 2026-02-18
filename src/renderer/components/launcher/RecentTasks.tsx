@@ -28,6 +28,7 @@ function getFolderName(path: string): string {
 interface RecentTasksProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
+    isActive?: boolean;
 }
 
 // Constants for retry behavior
@@ -43,7 +44,7 @@ function SectionHeader() {
     );
 }
 
-export default memo(function RecentTasks({ projects, onOpenTask }: RecentTasksProps) {
+export default memo(function RecentTasks({ projects, onOpenTask, isActive }: RecentTasksProps) {
     const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([]);
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -107,6 +108,16 @@ export default memo(function RecentTasks({ projects, onOpenTask }: RecentTasksPr
             }
         };
     }, [fetchSessions]);
+
+    // Refresh sessions when tab becomes active (inactive → active transition).
+    // Without this, sessions created/modified in other tabs remain stale.
+    const prevIsActiveRef = useRef(isActive);
+    useEffect(() => {
+        const wasInactive = !prevIsActiveRef.current;
+        prevIsActiveRef.current = isActive;
+        if (!wasInactive || !isActive) return;
+        void fetchSessions(0);
+    }, [isActive, fetchSessions]);
 
     // Listen for cron task stopped events to refresh the badge display
     useEffect(() => {
@@ -214,6 +225,12 @@ export default memo(function RecentTasks({ projects, onOpenTask }: RecentTasksPr
 
                     const hasCronTask = sessionCronTaskMap.has(session.id);
 
+                    const sourceIcon = session.source === 'telegram_private'
+                        ? '\u{1F4F1}' // 📱
+                        : session.source === 'telegram_group'
+                            ? '\u{1F465}' // 👥
+                            : null;
+
                     return (
                         <button
                             key={session.id}
@@ -225,6 +242,13 @@ export default memo(function RecentTasks({ projects, onOpenTask }: RecentTasksPr
                                 <Clock className="h-2.5 w-2.5" />
                                 <span>{formatTime(session.lastActiveAt)}</span>
                             </div>
+
+                            {/* IM source tag */}
+                            {sourceIcon && (
+                                <span className="flex-shrink-0 text-[11px]" title={session.source === 'telegram_private' ? 'Telegram 私聊' : 'Telegram 群聊'}>
+                                    {sourceIcon}
+                                </span>
+                            )}
 
                             {/* Cron task tag */}
                             {hasCronTask && (

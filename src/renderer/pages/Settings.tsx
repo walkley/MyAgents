@@ -11,6 +11,7 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
+import { ImSettings } from '@/components/ImSettings';
 import {
     getModelsDisplay,
     PRESET_PROVIDERS,
@@ -47,7 +48,7 @@ import type { LogEntry } from '@/types/log';
 import { compareVersions } from '../../shared/utils';
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -96,6 +97,8 @@ interface SettingsProps {
     initialSection?: string;
     /** Callback when section changes (to clear initialSection) */
     onSectionChange?: () => void;
+    /** Whether this tab is currently active/visible */
+    isActive?: boolean;
     /** Whether an update is ready to install (from useUpdater) */
     updateReady?: boolean;
     /** Version ready to install (from useUpdater) */
@@ -110,7 +113,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'im', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -189,7 +192,7 @@ const ModelTagList = React.memo(function ModelTagList({
     );
 });
 
-export default function Settings({ initialSection, onSectionChange, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -207,6 +210,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
+        reload: reloadConfig,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -237,6 +241,7 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
             onSectionChangeRef.current?.();
         }
     }, [initialSection]);
+
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
     // Provider edit/manage panel state
@@ -534,6 +539,29 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
         };
         loadMcp();
     }, []);
+
+    // Refresh all local state when tab becomes active (inactive → active transition).
+    // useConfig() and MCP state are standalone per-component — changes from other pages don't propagate.
+    const prevIsActiveRef = useRef(isActive);
+    useEffect(() => {
+        const wasInactive = !prevIsActiveRef.current;
+        prevIsActiveRef.current = isActive;
+        if (!wasInactive || !isActive) return;
+
+        // Reload config from disk (projects, providers, apiKeys, etc.)
+        void reloadConfig();
+        // Reload MCP servers & enabled IDs
+        void (async () => {
+            try {
+                const servers = await getAllMcpServers();
+                const enabledIds = await getEnabledMcpServerIds();
+                setMcpServersState(servers);
+                setMcpEnabledIds(enabledIds);
+            } catch (err) {
+                console.warn('[Settings] Failed to reload MCP servers on activation:', err);
+            }
+        })();
+    }, [isActive, reloadConfig]);
 
     // Toggle MCP server enabled status
     // For preset MCP (npx): warmup bun cache
@@ -1268,6 +1296,15 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                         工具 & MCP
                     </button>
                     <button
+                        onClick={() => setActiveSection('im')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'im'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        IM 集成
+                    </button>
+                    <button
                         onClick={() => setActiveSection('general')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1301,6 +1338,13 @@ export default function Settings({ initialSection, onSectionChange, updateReady:
                 {activeSection === 'agents' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
                         <GlobalAgentsPanel />
+                    </div>
+                )}
+
+                {/* IM integration section */}
+                {activeSection === 'im' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <ImSettings />
                     </div>
                 )}
 
