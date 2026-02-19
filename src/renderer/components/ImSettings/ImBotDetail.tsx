@@ -426,7 +426,14 @@ export default function ImBotDetail({
                             <FeishuCredentialInput
                                 appId={botConfig.feishuAppId ?? ''}
                                 appSecret={botConfig.feishuAppSecret ?? ''}
-                                onAppIdChange={(appId) => saveBotField({ feishuAppId: appId })}
+                                onAppIdChange={(appId) => {
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
+                                    if (others.some(b => b.feishuAppId === appId)) {
+                                        toastRef.current.error('该飞书应用凭证已被其他 Bot 使用');
+                                        return;
+                                    }
+                                    saveBotField({ feishuAppId: appId });
+                                }}
                                 onAppSecretChange={(appSecret) => saveBotField({ feishuAppSecret: appSecret })}
                                 verifyStatus={verifyStatus}
                                 botName={botUsername}
@@ -435,7 +442,7 @@ export default function ImBotDetail({
                             <BotTokenInput
                                 value={botConfig.botToken}
                                 onChange={(token) => {
-                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId);
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
                                     if (others.some(b => b.botToken === token)) {
                                         toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
                                         return;

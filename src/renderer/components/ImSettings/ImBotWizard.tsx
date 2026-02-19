@@ -169,15 +169,15 @@ export default function ImBotWizard({
             return;
         }
 
-        // Check for duplicate credentials
-        const existingBots = config.imBotConfigs ?? [];
+        // Check for duplicate credentials — only against fully set-up bots
+        const completedBots = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
         if (isFeishu) {
-            if (existingBots.some(b => b.feishuAppId === feishuAppId.trim())) {
+            if (completedBots.some(b => b.feishuAppId === feishuAppId.trim())) {
                 toastRef.current.error('该飞书应用凭证已被其他 Bot 使用');
                 return;
             }
         } else {
-            if (existingBots.some(b => b.botToken === botToken.trim())) {
+            if (completedBots.some(b => b.botToken === botToken.trim())) {
                 toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
                 return;
             }
