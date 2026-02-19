@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
-use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImSourceType, TelegramError};
-use crate::proxy_config;
+use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError};
+use super::ApprovalCallback;
+use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
 
 /// Telegram long-poll timeout (seconds)
 const LONG_POLL_TIMEOUT: u64 = 30;
@@ -40,9 +41,10 @@ struct PendingBatch {
     last_received: Instant,
     // Preserve sender metadata from the first fragment
     chat_id: String,
-    sender_id: i64,
+    sender_id: String,
     sender_name: Option<String>,
     source_type: ImSourceType,
+    platform: ImPlatform,
 }
 
 /// Merges fragmented messages (Telegram splits >4096 char pastes)
@@ -76,6 +78,7 @@ impl MessageCoalescer {
         let now = Instant::now();
         let is_fragment = msg.text.len() >= FRAGMENT_MIN_LENGTH;
         let chat_id = &msg.chat_id;
+        let msg_id_i64 = msg.message_id.parse::<i64>().unwrap_or(0);
         let mut ready = Vec::new();
 
         if let Some(batch) = self.pending.get_mut(chat_id) {
@@ -83,7 +86,7 @@ impl MessageCoalescer {
 
             // Check if this is a continuation fragment
             let is_continuation = is_fragment
-                && msg.message_id == batch.last_msg_id + 1
+                && msg_id_i64 == batch.last_msg_id + 1
                 && time_since_last < self.fragment_merge_ms;
 
             if is_continuation
@@ -93,7 +96,7 @@ impl MessageCoalescer {
                 // Append to existing batch
                 batch.total_length += msg.text.len();
                 batch.fragments.push(msg.text.clone());
-                batch.last_msg_id = msg.message_id;
+                batch.last_msg_id = msg_id_i64;
                 batch.last_received = now;
                 return ready; // Still waiting for more fragments
             }
@@ -111,13 +114,14 @@ impl MessageCoalescer {
                 PendingBatch {
                     fragments: vec![msg.text.clone()],
                     total_length: msg.text.len(),
-                    first_msg_id: msg.message_id,
-                    last_msg_id: msg.message_id,
+                    first_msg_id: msg_id_i64,
+                    last_msg_id: msg_id_i64,
                     last_received: now,
                     chat_id: msg.chat_id.clone(),
-                    sender_id: msg.sender_id,
+                    sender_id: msg.sender_id.clone(),
                     sender_name: msg.sender_name.clone(),
                     source_type: msg.source_type.clone(),
+                    platform: msg.platform.clone(),
                 },
             );
         } else {
@@ -155,11 +159,12 @@ impl MessageCoalescer {
     fn flush_batch_to_msg(&mut self, chat_id: &str) -> Option<ImMessage> {
         self.pending.remove(chat_id).map(|batch| ImMessage {
             chat_id: batch.chat_id,
-            message_id: batch.last_msg_id,
+            message_id: batch.last_msg_id.to_string(),
             text: batch.fragments.join("\n"),
             sender_id: batch.sender_id,
             sender_name: batch.sender_name,
             source_type: batch.source_type,
+            platform: batch.platform,
             timestamp: chrono::Utc::now(),
             attachments: Vec::new(),
             media_group_id: None,
@@ -176,6 +181,10 @@ pub struct TelegramAdapter {
     message_tx: mpsc::Sender<ImMessage>,
     coalescer: Arc<Mutex<MessageCoalescer>>,
     bot_username: Arc<Mutex<Option<String>>>,
+    /// Channel for forwarding approval callbacks from inline keyboard button clicks
+    approval_tx: mpsc::Sender<ApprovalCallback>,
+    /// Short ID → (full request_id, created_at) mapping (callback_data has 64 byte limit)
+    short_id_map: Arc<Mutex<HashMap<String, (String, Instant)>>>,
 }
 
 impl TelegramAdapter {
@@ -183,12 +192,13 @@ impl TelegramAdapter {
         config: &ImConfig,
         message_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
+        approval_tx: mpsc::Sender<ApprovalCallback>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
         let client = proxy_config::build_client_with_proxy(client_builder)
             .unwrap_or_else(|e| {
-                log::warn!("[telegram] Failed to build client with proxy: {}, falling back to direct", e);
+                ulog_warn!("[telegram] Failed to build client with proxy: {}, falling back to direct", e);
                 Client::builder()
                     .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
                     .build()
@@ -202,6 +212,8 @@ impl TelegramAdapter {
             message_tx,
             coalescer: Arc::new(Mutex::new(MessageCoalescer::new())),
             bot_username: Arc::new(Mutex::new(None)),
+            approval_tx,
+            short_id_map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -244,7 +256,7 @@ impl TelegramAdapter {
                     .ok()
                     .and_then(|v| v["parameters"]["retry_after"].as_u64())
                     .unwrap_or(5);
-                log::warn!(
+                ulog_warn!(
                     "[telegram] Rate limited on {}, retry after {}s",
                     method,
                     retry_after
@@ -291,7 +303,7 @@ impl TelegramAdapter {
                             error_code, description
                         )));
                     }
-                    log::warn!(
+                    ulog_warn!(
                         "[telegram] Transient error on {} (attempt {}): {}",
                         method,
                         retries,
@@ -333,7 +345,7 @@ impl TelegramAdapter {
             "offset": offset,
             "limit": 100,
             "timeout": LONG_POLL_TIMEOUT,
-            "allowed_updates": ["message"]
+            "allowed_updates": ["message", "callback_query"]
         });
         let result = self.api_call("getUpdates", &body).await?;
         Ok(result.as_array().cloned().unwrap_or_default())
@@ -378,7 +390,7 @@ impl TelegramAdapter {
                 return Ok(result["message_id"].as_i64().unwrap_or(0));
             }
             Err(TelegramError::MarkdownParseError) => {
-                log::debug!("[telegram] Markdown parse failed, falling back to plain text");
+                ulog_debug!("[telegram] Markdown parse failed, falling back to plain text");
             }
             Err(e) => return Err(e),
         }
@@ -502,6 +514,145 @@ impl TelegramAdapter {
             .await;
     }
 
+    // ===== Approval card operations =====
+
+    /// Generate a short ID for callback_data (Telegram 64-byte limit).
+    /// Stores the mapping for later resolution. Cleans up entries older than 15 minutes.
+    async fn make_short_id(&self, full_id: &str) -> String {
+        let short = &full_id[full_id.len().saturating_sub(8)..];
+        let mut map = self.short_id_map.lock().await;
+        // Periodic cleanup: remove entries older than 15 minutes (Sidecar times out at 10 min)
+        let now = Instant::now();
+        map.retain(|_, (_, created)| now.duration_since(*created) < Duration::from_secs(15 * 60));
+        map.insert(short.to_string(), (full_id.to_string(), now));
+        short.to_string()
+    }
+
+    /// Resolve a short ID back to the full request_id.
+    async fn resolve_short_id(&self, short: &str) -> Option<String> {
+        self.short_id_map.lock().await.remove(short).map(|(id, _)| id)
+    }
+
+    /// Send an approval message with inline keyboard buttons.
+    pub async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> Result<Option<String>, TelegramError> {
+        // Truncate input for display (char-boundary safe)
+        let display_input = if tool_input.chars().count() > 200 {
+            let end: usize = tool_input.char_indices().nth(200).map(|(i, _)| i).unwrap_or(tool_input.len());
+            format!("{}...", &tool_input[..end])
+        } else {
+            tool_input.to_string()
+        };
+
+        let short_id = self.make_short_id(request_id).await;
+        let text = format!(
+            "🔒 *工具使用请求*\n\n*工具*: `{}`\n*内容*: `{}`\n\n也可直接回复「允许」「始终允许」或「拒绝」",
+            tool_name, display_input
+        );
+
+        let body = json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": {
+                "inline_keyboard": [[
+                    { "text": "✅ 允许", "callback_data": format!("pa:{}:ao", short_id) },
+                    { "text": "✅ 始终允许", "callback_data": format!("pa:{}:aa", short_id) },
+                    { "text": "❌ 拒绝", "callback_data": format!("pa:{}:d", short_id) }
+                ]]
+            }
+        });
+
+        match self.api_call("sendMessage", &body).await {
+            Ok(result) => {
+                let msg_id = result["message_id"].as_i64().unwrap_or(0);
+                Ok(Some(msg_id.to_string()))
+            }
+            Err(TelegramError::MarkdownParseError) => {
+                // Fallback without markdown
+                let plain_text = format!(
+                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n也可直接回复「允许」「始终允许」或「拒绝」",
+                    tool_name, display_input
+                );
+                let body = json!({
+                    "chat_id": chat_id,
+                    "text": plain_text,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            { "text": "✅ 允许", "callback_data": format!("pa:{}:ao", short_id) },
+                            { "text": "✅ 始终允许", "callback_data": format!("pa:{}:aa", short_id) },
+                            { "text": "❌ 拒绝", "callback_data": format!("pa:{}:d", short_id) }
+                        ]]
+                    }
+                });
+                let result = self.api_call("sendMessage", &body).await?;
+                let msg_id = result["message_id"].as_i64().unwrap_or(0);
+                Ok(Some(msg_id.to_string()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Update an approval message to show resolved status (remove inline keyboard).
+    pub async fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> Result<(), TelegramError> {
+        let (emoji, label) = if status == "denied" {
+            ("❌", "已拒绝")
+        } else {
+            ("✅", "已允许")
+        };
+
+        let mid = message_id.parse::<i64>().unwrap_or(0);
+        let _ = self.api_call("editMessageText", &json!({
+            "chat_id": chat_id,
+            "message_id": mid,
+            "text": format!("🔒 工具使用请求 — {} {}", emoji, label),
+        })).await;
+        Ok(())
+    }
+
+    /// Process a callback_query update (inline keyboard button click).
+    async fn process_callback_query(&self, update: &Value) -> Option<ApprovalCallback> {
+        let cq = update.get("callback_query")?;
+        let cq_id = cq["id"].as_str()?;
+        let data = cq["data"].as_str()?;
+
+        // Parse "pa:<short_id>:<action>"
+        let parts: Vec<&str> = data.splitn(3, ':').collect();
+        if parts.len() != 3 || parts[0] != "pa" {
+            return None;
+        }
+
+        let request_id = self.resolve_short_id(parts[1]).await?;
+        let decision = match parts[2] {
+            "ao" => "allow_once",
+            "aa" => "always_allow",
+            "d" => "deny",
+            _ => return None,
+        }.to_string();
+
+        // MUST answer callback query (otherwise button shows spinner)
+        let answer_text = if decision == "deny" { "已拒绝" } else { "已允许" };
+        let _ = self.api_call("answerCallbackQuery", &json!({
+            "callback_query_id": cq_id,
+            "text": answer_text,
+        })).await;
+
+        let user_id = cq["from"]["id"].as_i64().unwrap_or(0).to_string();
+
+        ulog_info!("[telegram] Callback query: decision={}, rid={}", decision, &request_id[..request_id.len().min(16)]);
+        Some(ApprovalCallback { request_id, decision, user_id })
+    }
+
     // ===== Long-polling loop =====
 
     /// Main listen loop — runs indefinitely, emitting ImMessages to message_tx.
@@ -510,12 +661,12 @@ impl TelegramAdapter {
         let mut offset: i64 = 0;
         let mut backoff_secs = INITIAL_BACKOFF_SECS;
 
-        log::info!("[telegram] Starting long-poll loop");
+        ulog_info!("[telegram] Starting long-poll loop");
 
         loop {
             // Check shutdown signal
             if *shutdown_rx.borrow() {
-                log::info!("[telegram] Shutdown signal received, stopping listen loop");
+                ulog_info!("[telegram] Shutdown signal received, stopping listen loop");
                 break;
             }
 
@@ -529,6 +680,14 @@ impl TelegramAdapter {
                             offset = update_id + 1;
                         }
 
+                        // Handle callback_query (inline keyboard button clicks)
+                        if let Some(cb) = self.process_callback_query(&update).await {
+                            if self.approval_tx.send(cb).await.is_err() {
+                                ulog_error!("[telegram] Approval channel closed");
+                            }
+                            continue;
+                        }
+
                         if let Some(msg) = self.process_update(&update).await {
                             // Push through coalescer — returns messages ready to send
                             let ready_msgs = {
@@ -537,20 +696,22 @@ impl TelegramAdapter {
                             };
 
                             for ready_msg in ready_msgs {
-                                log::info!(
+                                ulog_info!(
                                     "[telegram] Dispatching message from {} (chat {}): {} chars",
                                     ready_msg.sender_name.as_deref().unwrap_or("?"),
                                     ready_msg.chat_id,
                                     ready_msg.text.len(),
                                 );
                                 if self.message_tx.send(ready_msg).await.is_err() {
-                                    log::error!("[telegram] Message channel closed");
+                                    ulog_error!("[telegram] Message channel closed");
                                     return;
                                 }
                             }
 
                             // ACK received
-                            self.ack_received(&msg.chat_id, msg.message_id).await;
+                            if let Ok(mid) = msg.message_id.parse::<i64>() {
+                                self.ack_received(&msg.chat_id, mid).await;
+                            }
                         }
                     }
 
@@ -560,22 +721,22 @@ impl TelegramAdapter {
                         coalescer.flush_expired()
                     };
                     for expired_msg in expired_msgs {
-                        log::info!(
+                        ulog_info!(
                             "[telegram] Flushing expired fragment batch for chat {}",
                             expired_msg.chat_id,
                         );
                         if self.message_tx.send(expired_msg).await.is_err() {
-                            log::error!("[telegram] Message channel closed");
+                            ulog_error!("[telegram] Message channel closed");
                             return;
                         }
                     }
                 }
                 Err(TelegramError::TokenUnauthorized) => {
-                    log::error!("[telegram] Bot token is unauthorized, stopping");
+                    ulog_error!("[telegram] Bot token is unauthorized, stopping");
                     break;
                 }
                 Err(e) => {
-                    log::warn!(
+                    ulog_warn!(
                         "[telegram] Long-poll error: {}, retrying in {}s",
                         e,
                         backoff_secs
@@ -586,7 +747,7 @@ impl TelegramAdapter {
                         _ = sleep(Duration::from_secs(backoff_secs)) => {}
                         _ = shutdown_rx.changed() => {
                             if *shutdown_rx.borrow() {
-                                log::info!("[telegram] Shutdown during backoff");
+                                ulog_info!("[telegram] Shutdown during backoff");
                                 break;
                             }
                         }
@@ -598,7 +759,7 @@ impl TelegramAdapter {
             }
         }
 
-        log::info!("[telegram] Listen loop exited");
+        ulog_info!("[telegram] Listen loop exited");
     }
 
     /// Download a file from Telegram by file_id.
@@ -666,8 +827,9 @@ impl TelegramAdapter {
         let from = &message["from"];
 
         let chat_id = chat["id"].as_i64()?.to_string();
-        let message_id = message["message_id"].as_i64()?;
+        let message_id = message["message_id"].as_i64()?.to_string();
         let sender_id = from["id"].as_i64()?;
+        let sender_id_str = sender_id.to_string();
         let sender_name = from["username"]
             .as_str()
             .or_else(|| from["first_name"].as_str())
@@ -706,7 +868,7 @@ impl TelegramAdapter {
                                 attachment_type: ImAttachmentType::Image,
                             });
                         }
-                        Err(e) => log::warn!("[telegram] Failed to download photo: {}", e),
+                        Err(e) => ulog_warn!("[telegram] Failed to download photo: {}", e),
                     }
                 }
             }
@@ -730,7 +892,7 @@ impl TelegramAdapter {
                             text_parts.push("[语音消息]".into());
                         }
                     }
-                    Err(e) => log::warn!("[telegram] Failed to download voice: {}", e),
+                    Err(e) => ulog_warn!("[telegram] Failed to download voice: {}", e),
                 }
             }
         }
@@ -757,7 +919,7 @@ impl TelegramAdapter {
                         });
                         text_parts.push(format!("[音频: {}]", title));
                     }
-                    Err(e) => log::warn!("[telegram] Failed to download audio: {}", e),
+                    Err(e) => ulog_warn!("[telegram] Failed to download audio: {}", e),
                 }
             }
         }
@@ -784,7 +946,7 @@ impl TelegramAdapter {
                             text_parts.push("[视频]".into());
                         }
                     }
-                    Err(e) => log::warn!("[telegram] Failed to download video: {}", e),
+                    Err(e) => ulog_warn!("[telegram] Failed to download video: {}", e),
                 }
             }
         }
@@ -807,7 +969,7 @@ impl TelegramAdapter {
                         });
                         text_parts.push(format!("[文件: {}]", file_name));
                     }
-                    Err(e) => log::warn!("[telegram] Failed to download document: {}", e),
+                    Err(e) => ulog_warn!("[telegram] Failed to download document: {}", e),
                 }
             }
         }
@@ -832,7 +994,7 @@ impl TelegramAdapter {
                                 text_parts.push(format!("[贴纸: {}]", emoji));
                             }
                         }
-                        Err(e) => log::warn!("[telegram] Failed to download sticker: {}", e),
+                        Err(e) => ulog_warn!("[telegram] Failed to download sticker: {}", e),
                     }
                 }
             } else {
@@ -877,7 +1039,7 @@ impl TelegramAdapter {
 
         // Whitelist check (bypassed for bind requests)
         if !is_bind_request && !self.is_allowed(sender_id, sender_name.as_deref()).await {
-            log::debug!(
+            ulog_debug!(
                 "[telegram] Rejected message from non-whitelisted user: {} ({:?})",
                 sender_id,
                 sender_name
@@ -911,9 +1073,10 @@ impl TelegramAdapter {
             chat_id,
             message_id,
             text: cleaned_text,
-            sender_id,
+            sender_id: sender_id_str,
             sender_name,
             source_type,
+            platform: ImPlatform::Telegram,
             timestamp: chrono::Utc::now(),
             attachments,
             media_group_id,
@@ -1063,20 +1226,95 @@ impl super::adapter::ImAdapter for TelegramAdapter {
             .map_err(|e| e.to_string())
     }
 
-    async fn ack_received(&self, chat_id: &str, message_id: i64) {
-        self.ack_received(chat_id, message_id).await;
+    async fn ack_received(&self, chat_id: &str, message_id: &str) {
+        if let Ok(mid) = message_id.parse::<i64>() {
+            self.ack_received(chat_id, mid).await;
+        }
     }
 
-    async fn ack_processing(&self, chat_id: &str, message_id: i64) {
-        self.ack_processing(chat_id, message_id).await;
+    async fn ack_processing(&self, chat_id: &str, message_id: &str) {
+        if let Ok(mid) = message_id.parse::<i64>() {
+            self.ack_processing(chat_id, mid).await;
+        }
     }
 
-    async fn ack_clear(&self, chat_id: &str, message_id: i64) {
-        self.ack_clear(chat_id, message_id).await;
+    async fn ack_clear(&self, chat_id: &str, message_id: &str) {
+        if let Ok(mid) = message_id.parse::<i64>() {
+            self.ack_clear(chat_id, mid).await;
+        }
     }
 
     async fn send_typing(&self, chat_id: &str) {
         self.send_typing(chat_id).await;
+    }
+}
+
+// ── ImStreamAdapter trait implementation ─────────────────────────
+
+impl super::adapter::ImStreamAdapter for TelegramAdapter {
+    async fn send_message_returning_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<Option<String>> {
+        self.send_message(chat_id, text)
+            .await
+            .map(|opt_id| opt_id.map(|id| id.to_string()))
+            .map_err(|e| e.to_string())
+    }
+
+    async fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        let mid = message_id
+            .parse::<i64>()
+            .map_err(|e| format!("Invalid message_id: {}", e))?;
+        self.edit_message(chat_id, mid, text)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        let mid = message_id
+            .parse::<i64>()
+            .map_err(|e| format!("Invalid message_id: {}", e))?;
+        self.delete_message(chat_id, mid)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn max_message_length(&self) -> usize {
+        4096
+    }
+
+    async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> super::adapter::AdapterResult<Option<String>> {
+        self.send_approval_card(chat_id, request_id, tool_name, tool_input)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        self.update_approval_status(chat_id, message_id, status)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1123,11 +1361,12 @@ mod tests {
     fn make_test_msg(chat_id: &str, msg_id: i64, text: &str) -> ImMessage {
         ImMessage {
             chat_id: chat_id.to_string(),
-            message_id: msg_id,
+            message_id: msg_id.to_string(),
             text: text.to_string(),
-            sender_id: 42,
+            sender_id: "42".to_string(),
             sender_name: Some("testuser".to_string()),
             source_type: ImSourceType::Private,
+            platform: ImPlatform::Telegram,
             timestamp: chrono::Utc::now(),
             attachments: Vec::new(),
             media_group_id: None,
@@ -1142,7 +1381,7 @@ mod tests {
         let result = c.push(&msg);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "hello");
-        assert_eq!(result[0].sender_id, 42);
+        assert_eq!(result[0].sender_id, "42");
         assert_eq!(result[0].sender_name.as_deref(), Some("testuser"));
     }
 
@@ -1167,7 +1406,7 @@ mod tests {
         assert_eq!(result.len(), 2); // flushed batch + new message
         assert!(result[0].text.contains("aaa"));
         assert!(result[0].text.contains("bbb"));
-        assert_eq!(result[0].sender_id, 42); // sender metadata preserved
+        assert_eq!(result[0].sender_id, "42"); // sender metadata preserved
         assert_eq!(result[1].text, "new message");
     }
 }

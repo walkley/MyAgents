@@ -140,7 +140,7 @@ const streamIndexToToolId: Map<number, string> = new Map();
 const toolResultIndexToId: Map<number, string> = new Map();
 
 // IM Draft Stream: callback for streaming text to Telegram
-type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error', data: string) => void;
+type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
@@ -1042,12 +1042,19 @@ async function checkToolPermission(
 
   const requestId = `perm_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
+  const inputPreview = typeof input === 'object' ? JSON.stringify(input).slice(0, 500) : String(input).slice(0, 500);
+
   // Broadcast permission request to frontend
   broadcast('permission:request', {
     requestId,
     toolName,
-    input: typeof input === 'object' ? JSON.stringify(input).slice(0, 500) : String(input).slice(0, 500),
+    input: inputPreview,
   });
+
+  // Forward to IM stream if active (for interactive approval cards)
+  if (imStreamCallback) {
+    imStreamCallback('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
+  }
 
   // Wait for user response or abort
   return new Promise((resolve) => {

@@ -887,84 +887,120 @@ fn is_port_available(port: u16) -> bool {
     std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
 }
 
+/// Helper: check if bun exists at the given directory with platform-specific names
+#[cfg(target_os = "windows")]
+fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
+    let win_bun = dir.join("bun-x86_64-pc-windows-msvc.exe");
+    if win_bun.exists() {
+        log::info!("[sidecar] Using bundled bun from {} (platform): {:?}", label, win_bun);
+        return Some(win_bun);
+    }
+    let win_bun_simple = dir.join("bun.exe");
+    if win_bun_simple.exists() {
+        log::info!("[sidecar] Using bundled bun from {} (simple): {:?}", label, win_bun_simple);
+        return Some(win_bun_simple);
+    }
+    None
+}
+
 /// Find the bun executable path
 fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    // First, try to find bundled bun
-    if let Ok(resource_dir) = app_handle.path().resource_dir() {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(contents_dir) = resource_dir.parent() {
-                // externalBin places binaries in MacOS/ with platform suffix
+    // First, try to find bundled bun via resource_dir
+    match app_handle.path().resource_dir() {
+        Ok(resource_dir) => {
+            log::info!("[sidecar] resource_dir resolved to: {:?}", resource_dir);
+
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(contents_dir) = resource_dir.parent() {
+                    // externalBin places binaries in MacOS/ with platform suffix
+                    #[cfg(target_arch = "aarch64")]
+                    let macos_bun = contents_dir.join("MacOS").join("bun-aarch64-apple-darwin");
+                    #[cfg(target_arch = "x86_64")]
+                    let macos_bun = contents_dir.join("MacOS").join("bun-x86_64-apple-darwin");
+
+                    if macos_bun.exists() {
+                        log::info!("Using bundled bun from MacOS: {:?}", macos_bun);
+                        return Some(macos_bun);
+                    }
+
+                    // Also check without suffix (for backward compatibility)
+                    let macos_bun_simple = contents_dir.join("MacOS").join("bun");
+                    if macos_bun_simple.exists() {
+                        log::info!("Using bundled bun from MacOS (simple): {:?}", macos_bun_simple);
+                        return Some(macos_bun_simple);
+                    }
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                // Windows NSIS: bun.exe is in the same directory as the main executable.
+                // resource_dir() may return either $INSTDIR or $INSTDIR\resources depending
+                // on the Tauri version and Windows config. Check both resource_dir itself
+                // and its parent to handle both cases.
+                if let Some(found) = check_bun_in_dir(&resource_dir, "resource_dir") {
+                    return Some(found);
+                }
+                if let Some(parent) = resource_dir.parent() {
+                    if let Some(found) = check_bun_in_dir(parent, "resource_dir parent") {
+                        return Some(found);
+                    }
+                }
+            }
+
+            // Check in resource_dir/binaries/ for development mode
+            #[cfg(target_os = "windows")]
+            let bundled_bun = resource_dir.join("binaries").join("bun.exe");
+            #[cfg(not(target_os = "windows"))]
+            let bundled_bun = resource_dir.join("binaries").join("bun");
+
+            if bundled_bun.exists() {
+                log::info!("Using bundled bun: {:?}", bundled_bun);
+                return Some(bundled_bun);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
                 #[cfg(target_arch = "aarch64")]
-                let macos_bun = contents_dir.join("MacOS").join("bun-aarch64-apple-darwin");
+                let platform_bun = resource_dir.join("binaries").join("bun-aarch64-apple-darwin");
                 #[cfg(target_arch = "x86_64")]
-                let macos_bun = contents_dir.join("MacOS").join("bun-x86_64-apple-darwin");
+                let platform_bun = resource_dir.join("binaries").join("bun-x86_64-apple-darwin");
 
-                if macos_bun.exists() {
-                    log::info!("Using bundled bun from MacOS: {:?}", macos_bun);
-                    return Some(macos_bun);
+                if platform_bun.exists() {
+                    log::info!("Using bundled platform bun: {:?}", platform_bun);
+                    return Some(platform_bun);
                 }
+            }
 
-                // Also check without suffix (for backward compatibility)
-                let macos_bun_simple = contents_dir.join("MacOS").join("bun");
-                if macos_bun_simple.exists() {
-                    log::info!("Using bundled bun from MacOS (simple): {:?}", macos_bun_simple);
-                    return Some(macos_bun_simple);
+            #[cfg(target_os = "windows")]
+            {
+                let platform_bun = resource_dir.join("binaries").join("bun-x86_64-pc-windows-msvc.exe");
+                if platform_bun.exists() {
+                    log::info!("Using bundled platform bun: {:?}", platform_bun);
+                    return Some(platform_bun);
                 }
             }
         }
+        Err(e) => {
+            log::warn!("[sidecar] resource_dir() failed: {}, will try exe-relative fallback", e);
+        }
+    }
 
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: bun.exe is in the same directory as the main executable
-            // resource_dir = .../MyAgents/resources (where server-dist.js is)
-            // Bun should be at .../MyAgents/bun-x86_64-pc-windows-msvc.exe
-            if let Some(app_dir) = resource_dir.parent() {
-                let win_bun = app_dir.join("bun-x86_64-pc-windows-msvc.exe");
-                if win_bun.exists() {
-                    log::info!("Using bundled bun from app dir: {:?}", win_bun);
-                    return Some(win_bun);
-                }
-
-                // Also check without suffix
-                let win_bun_simple = app_dir.join("bun.exe");
-                if win_bun_simple.exists() {
-                    log::info!("Using bundled bun from app dir (simple): {:?}", win_bun_simple);
-                    return Some(win_bun_simple);
+    // Fallback: find bun relative to the current executable (most reliable on Windows)
+    #[cfg(target_os = "windows")]
+    {
+        match std::env::current_exe() {
+            Ok(exe_path) => {
+                log::info!("[sidecar] current_exe: {:?}", exe_path);
+                if let Some(exe_dir) = exe_path.parent() {
+                    if let Some(found) = check_bun_in_dir(exe_dir, "exe_dir") {
+                        return Some(found);
+                    }
                 }
             }
-        }
-
-        // Check in resource_dir/binaries/ for development mode
-        #[cfg(target_os = "windows")]
-        let bundled_bun = resource_dir.join("binaries").join("bun.exe");
-        #[cfg(not(target_os = "windows"))]
-        let bundled_bun = resource_dir.join("binaries").join("bun");
-
-        if bundled_bun.exists() {
-            log::info!("Using bundled bun: {:?}", bundled_bun);
-            return Some(bundled_bun);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            #[cfg(target_arch = "aarch64")]
-            let platform_bun = resource_dir.join("binaries").join("bun-aarch64-apple-darwin");
-            #[cfg(target_arch = "x86_64")]
-            let platform_bun = resource_dir.join("binaries").join("bun-x86_64-apple-darwin");
-
-            if platform_bun.exists() {
-                log::info!("Using bundled platform bun: {:?}", platform_bun);
-                return Some(platform_bun);
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let platform_bun = resource_dir.join("binaries").join("bun-x86_64-pc-windows-msvc.exe");
-            if platform_bun.exists() {
-                log::info!("Using bundled platform bun: {:?}", platform_bun);
-                return Some(platform_bun);
+            Err(e) => {
+                log::warn!("[sidecar] current_exe() failed: {}", e);
             }
         }
     }
@@ -987,8 +1023,8 @@ fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf>
             ),
         ];
 
-        for candidate in candidates {
-            let path = PathBuf::from(&candidate);
+        for candidate in &candidates {
+            let path = PathBuf::from(candidate);
             if path.exists() {
                 log::info!("Using system bun: {:?}", path);
                 return Some(path);
@@ -1005,6 +1041,7 @@ fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf>
             return Some(path);
         }
 
+        log::error!("[sidecar] Bun executable not found in any location. Checked: resource_dir, exe_dir, system locations, PATH");
         return None;
     }
 
@@ -1040,18 +1077,37 @@ fn find_server_script<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<PathBuf>
     log::info!("[sidecar] Debug mode detected, SKIPPING bundled script check (forcing source usage)");
 
     #[cfg(not(debug_assertions))]
-    if let Ok(resource_dir) = _app_handle.path().resource_dir() {
-        let bundled_script = resource_dir.join("server-dist.js");
-        if bundled_script.exists() {
-            log::info!("Using bundled server script (bundled): {:?}", bundled_script);
-            return Some(bundled_script);
+    {
+        match _app_handle.path().resource_dir() {
+            Ok(resource_dir) => {
+                let bundled_script = resource_dir.join("server-dist.js");
+                if bundled_script.exists() {
+                    log::info!("Using bundled server script (bundled): {:?}", bundled_script);
+                    return Some(bundled_script);
+                }
+
+                // Legacy check: Check for server/index.ts (Development / Legacy)
+                let legacy_script = resource_dir.join("server").join("index.ts");
+                if legacy_script.exists() {
+                    log::info!("Using bundled server script (legacy): {:?}", legacy_script);
+                    return Some(legacy_script);
+                }
+            }
+            Err(e) => {
+                log::warn!("[sidecar] resource_dir() failed for script search: {}", e);
+            }
         }
 
-        // 2. Legacy check: Check for server/index.ts (Development / Legacy)
-        let legacy_script = resource_dir.join("server").join("index.ts");
-        if legacy_script.exists() {
-             log::info!("Using bundled server script (legacy): {:?}", legacy_script);
-             return Some(legacy_script);
+        // Fallback: find server-dist.js relative to current executable
+        #[cfg(target_os = "windows")]
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let script = exe_dir.join("server-dist.js");
+                if script.exists() {
+                    log::info!("[sidecar] Using server script from exe_dir: {:?}", script);
+                    return Some(script);
+                }
+            }
         }
     }
 
@@ -1076,7 +1132,7 @@ fn find_server_script<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<PathBuf>
         }
     }
 
-    log::error!("Server script not found in any location");
+    log::error!("[sidecar] Server script not found in any location");
     None
 }
 

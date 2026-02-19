@@ -16,7 +16,7 @@
 
 | 层 | 职责 | 实现语言 | 理由 |
 |----|------|---------|------|
-| **IM 适配层** | Telegram 连接管理、消息收发、重连、白名单 | Rust | I/O 密集型，零 GC、稳定性高，崩溃不影响 IM 连接 |
+| **IM 适配层** | Telegram/飞书 连接管理、消息收发、重连、白名单 | Rust | I/O 密集型，零 GC、稳定性高，崩溃不影响 IM 连接 |
 | **Session 路由层** | peer→Sidecar 映射、按需启停、消息缓冲 | Rust | 复用 SidecarManager，统一进程生命周期管理 |
 | **AI 对话层** | Claude SDK、MCP、工具系统、Session 管理 | Bun Sidecar | 已有完整生态，不值得用 Rust 重写 |
 
@@ -366,6 +366,74 @@ Rust 调用 Bun /api/im/chat (SSE stream)
 |------|---------|---------|
 | `im:user-bound` | `{ botId, userId, username? }` | 用户通过 QR 码绑定成功 |
 
+### 2.11 交互式权限审批
+
+当 IM Bot 使用非 `fullAgency` 模式时，SDK 的 `canUseTool()` 会阻塞等待审批。审批请求通过飞书交互卡片 / Telegram Inline Keyboard 展示给用户。
+
+#### 数据流
+
+```
+canUseTool() 阻塞 → checkToolPermission() 注入 imStreamCallback('permission-request')
+  → SSE 流发出 permission-request 事件
+  → Rust stream_to_im() 解析 → adapter.send_approval_card()
+  → 存储 PendingApproval{request_id, sidecar_port, chat_id, card_message_id}
+  → SSE 流自然暂停（canUseTool 在等 Promise）
+
+--- 用户点击按钮 / 回复文本 ---
+
+  → approval_tx 通道 → POST /api/im/permission-response
+  → handlePermissionResponse() 解除 Promise → SSE 流恢复
+  → 更新卡片/消息为"已允许"或"已拒绝"
+```
+
+#### 核心类型
+
+```rust
+struct ApprovalCallback {
+    request_id: String,
+    decision: String,   // "allow_once" | "always_allow" | "deny"
+    user_id: String,
+}
+
+struct PendingApproval {
+    sidecar_port: u16,
+    chat_id: String,
+    card_message_id: String,  // 空 = 卡片发送失败，文本降级
+    created_at: Instant,      // 用于 15 分钟 TTL 清理
+}
+
+type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
+```
+
+#### 文本命令降级
+
+即使交互卡片/按钮不可用，用户也能通过文本完成审批：
+
+| 用户回复 | 等效操作 |
+|---------|---------|
+| `同意` / `approve` | allow_once |
+| `始终同意` / `always approve` | always_allow |
+| `拒绝` / `deny` | deny |
+
+系统自动匹配该 chat 最近的 pending approval，无需输入 request_id。
+
+#### 平台实现
+
+- **飞书**：`msg_type: "interactive"` 交互卡片，3 个按钮（允许/始终允许/拒绝），`card.action.trigger` 事件回调
+- **Telegram**：`inline_keyboard` + `callback_query`，short_id 映射解决 64 byte `callback_data` 限制
+
+### 2.12 飞书 WebSocket 事件 ACK
+
+飞书 WS 协议要求客户端对数据帧发送 ACK 确认。未 ACK 的事件在 WebSocket 重连后会被服务端重放。
+
+```rust
+// 收到数据帧后立即发送 ACK（相同 seq_id，type: "ack"）
+let ack_data = Self::build_ack_frame(&frame);
+ws_write.send(WsMessage::Binary(ack_data.into())).await;
+```
+
+配合 24 小时 dedup 缓存 TTL 作为防御兜底，防止长时间运行后重连导致消息重复处理。
+
 ---
 
 ## 三、前端实现
@@ -665,9 +733,14 @@ ImBotList（读取 config.imBotConfigs + 轮询 statuses）
 ```
 src-tauri/src/
 ├── im/
-│   ├── mod.rs          # 模块入口 + Commands + 消息处理循环 + Bot 生命周期
-│   ├── telegram.rs     # TelegramAdapter + MessageCoalescer + ImAdapter trait
-│   └── health.rs       # HealthManager + 状态持久化 + 遗留文件迁移
+│   ├── mod.rs          # 模块入口 + Commands + 消息处理循环 + Bot 生命周期 + 权限审批
+│   ├── adapter.rs      # ImAdapter + ImStreamAdapter trait 定义 + AnyAdapter enum
+│   ├── telegram.rs     # TelegramAdapter + MessageCoalescer + Inline Keyboard 审批
+│   ├── feishu.rs       # FeishuAdapter + WebSocket + 交互卡片审批 + ACK 机制
+│   ├── health.rs       # HealthManager + 状态持久化
+│   ├── router.rs       # SessionRouter: peer→Sidecar 映射
+│   ├── buffer.rs       # MessageBuffer: 离线消息缓冲 + 磁盘持久化
+│   └── types.rs        # ImConfig, ImMessage, ImPlatform 等共享类型
 └── lib.rs              # Command 注册
 ```
 
@@ -726,7 +799,7 @@ src/shared/types/im.ts         # ImBotConfig, ImBotStatus, DEFAULT_IM_BOT_CONFIG
 
 ### 9.3 更多 IM 平台
 
-`ImAdapter` trait 已定义，可扩展 Feishu（飞书）、Slack 等平台，复用 Session Router 和消息处理循环。
+`ImAdapter` trait 已定义（Telegram 和飞书已实现），可扩展 Slack、Discord 等平台，复用 Session Router 和消息处理循环。
 
 ---
 

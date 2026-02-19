@@ -1,7 +1,13 @@
 // Unified logger for Rust - sends logs to frontend AND persists to file
 //
-// Usage:
-//   emit_log!(app, LogLevel::Info, "Message {}", arg);
+// Two usage modes:
+//
+// 1. With explicit AppHandle (original):
+//      emit_log!(app, LogLevel::Info, "Message {}", arg);
+//
+// 2. Via global handle (no AppHandle needed — for IM module etc.):
+//      ulog_info!("[feishu] Connected");
+//      ulog_warn!("[im] Timeout: {}", err);
 //
 // Features:
 // - Sends to frontend via "log:rust" Tauri event
@@ -129,7 +135,7 @@ pub fn emit_log<R: Runtime>(app: &AppHandle<R>, level: LogLevel, message: String
     }
 }
 
-/// Macro for convenient logging with format strings
+/// Macro for convenient logging with format strings (requires AppHandle)
 #[macro_export]
 macro_rules! emit_log {
     ($app:expr, $level:expr, $($arg:tt)*) => {{
@@ -137,7 +143,7 @@ macro_rules! emit_log {
     }};
 }
 
-/// Convenience functions
+/// Convenience functions (require AppHandle)
 pub fn info<R: Runtime>(app: &AppHandle<R>, message: impl Into<String>) {
     emit_log(app, LogLevel::Info, message.into());
 }
@@ -152,4 +158,65 @@ pub fn error<R: Runtime>(app: &AppHandle<R>, message: impl Into<String>) {
 
 pub fn debug<R: Runtime>(app: &AppHandle<R>, message: impl Into<String>) {
     emit_log(app, LogLevel::Debug, message.into());
+}
+
+// ── Global AppHandle for modules without direct access ──────────────
+
+/// Global AppHandle stored at app startup.
+/// Enables unified logging from any Rust module without threading AppHandle through every struct.
+static GLOBAL_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// Initialize the global AppHandle. Call once during app setup.
+pub fn init_app_handle(app: AppHandle) {
+    if GLOBAL_APP_HANDLE.set(app).is_err() {
+        log::warn!("Global AppHandle already initialized");
+    }
+}
+
+/// Log via the global AppHandle — writes to stdout, unified log file, and frontend.
+/// Falls back to stdout-only if called before init_app_handle().
+pub fn unified_log(level: LogLevel, message: String) {
+    if let Some(app) = GLOBAL_APP_HANDLE.get() {
+        emit_log(app, level, message);
+    } else {
+        // Fallback: stdout + file only (no frontend event)
+        match level {
+            LogLevel::Info => log::info!("{}", message),
+            LogLevel::Warn => log::warn!("{}", message),
+            LogLevel::Error => log::error!("{}", message),
+            LogLevel::Debug => log::debug!("{}", message),
+        }
+        let entry = create_log_entry(level, message);
+        persist_log(&entry);
+    }
+}
+
+/// Global unified log macros — no AppHandle needed.
+/// Usage: ulog_info!("[module] message {}", arg);
+#[macro_export]
+macro_rules! ulog_info {
+    ($($arg:tt)*) => {{
+        $crate::logger::unified_log($crate::logger::LogLevel::Info, format!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! ulog_warn {
+    ($($arg:tt)*) => {{
+        $crate::logger::unified_log($crate::logger::LogLevel::Warn, format!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! ulog_error {
+    ($($arg:tt)*) => {{
+        $crate::logger::unified_log($crate::logger::LogLevel::Error, format!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! ulog_debug {
+    ($($arg:tt)*) => {{
+        $crate::logger::unified_log($crate::logger::LogLevel::Debug, format!($($arg)*));
+    }};
 }

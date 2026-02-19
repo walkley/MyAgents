@@ -362,6 +362,8 @@ await updateImBotConfig(botId, updates);
 
 ## 错误处理 & 日志
 
+### 日志编写规范
+
 **Rust 侧**：
 ```rust
 fn some_command() -> Result<Data, String> {
@@ -385,6 +387,56 @@ try {
 import { isDebugMode } from '@/utils/debug';
 if (isDebugMode()) console.log('[module] debug message');
 ```
+
+### 日志架构：三来源 + 两存储
+
+产品日志来自三个进程层，汇入两个持久化位置。**排查问题时必须主动查看对应日志，而非等用户粘贴。**
+
+#### 三个日志来源
+
+| 来源 | 机制 | 统一日志文件 | 客户端面板 | 系统日志文件 |
+|------|------|:---:|:---:|:---:|
+| **React** (前端 `console.*`) | `frontendLogger.ts` 拦截 → 缓冲 → POST `/api/unified-log` | ✅ | ✅ | ❌ |
+| **Bun Sidecar** (后端 `console.*`) | `logger.ts` 拦截 → SSE `chat:log` 广播 + 直写文件 | ✅ | ✅ | ❌ |
+| **Rust** (`ulog_info!` / `emit_log!`) | 写文件 + 发 Tauri 事件 `log:rust` + 标准 `log::` | ✅ | ✅ | ✅ |
+
+#### 两个持久化位置
+
+| 位置 | 内容 | 谁写 |
+|------|------|------|
+| **`~/.myagents/logs/unified-{YYYY-MM-DD}.log`** | 三来源汇聚的统一日志（React/Bun/Rust） | Bun `UnifiedLogger.ts` + Rust `logger.rs` |
+| **`/Users/{user}/Library/Logs/com.myagents.app/MyAgents.log`** (macOS) | Rust 侧 `log::` 宏的 tauri-plugin-log 输出（有轮转） | tauri-plugin-log |
+
+> **注意**：`~/.myagents/logs/` 下还有 `{YYYY-MM-DD}-{sessionId}.log` 是 Agent 对话历史日志（由 `AgentLogger.ts` 写入），非通用日志。
+
+#### Rust 侧日志宏选择
+
+```rust
+// ✅ IM 模块及其他需要在客户端面板可见的模块：使用 ulog_* 宏（无需 AppHandle）
+ulog_info!("[feishu] WebSocket connected");
+ulog_warn!("[im] Stream timeout for session {}", key);
+
+// ✅ 有 AppHandle 的上下文：使用 emit_log! 宏
+emit_log!(app, LogLevel::Info, "[sidecar] Started on port {}", port);
+
+// ⚠️ 仅限第三方 crate 或 logger.rs 内部：标准 log:: 宏（不进统一日志，不显示在客户端）
+log::info!("internal message");
+```
+
+### 问题排查：主动查看哪些日志
+
+> **核心原则**：用户报告问题时，**必须主动读取相关日志**来定位问题，不等用户粘贴。
+
+| 问题类别 | 先查什么日志 | 文件/命令 |
+|----------|-------------|-----------|
+| **IM Bot 不工作**（飞书/Telegram 连接、消息、绑定） | 统一日志中的 `[feishu]` `[im]` `[telegram]` `[im-router]` | `~/.myagents/logs/unified-{today}.log`，搜 `[feishu]` `[im]` |
+| **AI 对话/Agent 异常**（无响应、报错、工具失败） | Bun Sidecar 日志中的 `[agent]` `[messageGenerator]` | `~/.myagents/logs/unified-{today}.log`，搜 `[agent]` |
+| **Pre-warm/SDK 启动超时** | Sidecar 日志中的 `[agent] Startup timeout` `pre-warm failed` | `~/.myagents/logs/unified-{today}.log` 或系统日志 |
+| **MCP 服务器问题** | Sidecar 日志中的 `[agent] MCP` | `~/.myagents/logs/unified-{today}.log`，搜 `MCP` |
+| **Rust 代理层/Sidecar 管理** | 系统日志中的 `[proxy]` `[sidecar]` `[sse-proxy]` | 系统日志文件（见上表） |
+| **前端 UI 异常**（白屏、组件报错） | 统一日志中的 React 来源日志 | `~/.myagents/logs/unified-{today}.log`，搜 `[REACT]` |
+| **配置/持久化问题** | 直接读配置文件 | `~/.myagents/config.json` |
+| **IM Bot 运行状态** | 健康状态文件 | `~/.myagents/im_{botId}_state.json` |
 
 ---
 
@@ -431,6 +483,8 @@ if (isDebugMode()) console.log('[module] debug message');
 | 新对话后旧消息重现 | 使用 `resetSession()` 而非直接清理状态 |
 | IM Bot 列表数据不刷新 | 写盘后未调用 `refreshConfig()`，React state 过期 |
 | IM Bot 启停按钮不响应 | 检查 `cmd_start/stop_im_bot` 参数、Sidecar 端口冲突 |
+| IM Bot 连接/消息异常 | **主动查** `~/.myagents/logs/unified-{today}.log` 搜 `[feishu]` `[im]` `[telegram]` |
+| AI 无响应/超时 | **主动查** 统一日志搜 `[agent]` `pre-warm` `timeout` |
 
 ---
 

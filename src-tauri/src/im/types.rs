@@ -5,6 +5,23 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// IM platform type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImPlatform {
+    Telegram,
+    Feishu,
+}
+
+impl std::fmt::Display for ImPlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Telegram => write!(f, "telegram"),
+            Self::Feishu => write!(f, "feishu"),
+        }
+    }
+}
+
 /// IM Bot operational status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -41,15 +58,16 @@ pub struct ImAttachment {
     pub attachment_type: ImAttachmentType,
 }
 
-/// Incoming IM message (from Telegram adapter)
+/// Incoming IM message (from adapter)
 #[derive(Debug, Clone)]
 pub struct ImMessage {
     pub chat_id: String,
-    pub message_id: i64,
+    pub message_id: String,
     pub text: String,
-    pub sender_id: i64,
+    pub sender_id: String,
     pub sender_name: Option<String>,
     pub source_type: ImSourceType,
+    pub platform: ImPlatform,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub attachments: Vec<ImAttachment>,
     pub media_group_id: Option<String>,
@@ -62,7 +80,7 @@ impl ImMessage {
             ImSourceType::Private => "private",
             ImSourceType::Group => "group",
         };
-        format!("im:telegram:{}:{}", source, self.chat_id)
+        format!("im:{}:{}:{}", self.platform, source, self.chat_id)
     }
 }
 
@@ -70,12 +88,19 @@ impl ImMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImConfig {
+    #[serde(default = "default_platform")]
+    pub platform: ImPlatform,
     pub bot_token: String,
     pub allowed_users: Vec<String>,
     pub permission_mode: String,
     pub default_workspace_path: Option<String>,
     pub enabled: bool,
-    // ===== AI config (new) =====
+    // ===== Feishu-specific credentials =====
+    #[serde(default)]
+    pub feishu_app_id: Option<String>,
+    #[serde(default)]
+    pub feishu_app_secret: Option<String>,
+    // ===== AI config =====
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -87,14 +112,21 @@ pub struct ImConfig {
     pub available_providers_json: Option<String>,
 }
 
+fn default_platform() -> ImPlatform {
+    ImPlatform::Telegram
+}
+
 impl Default for ImConfig {
     fn default() -> Self {
         Self {
+            platform: ImPlatform::Telegram,
             bot_token: String::new(),
             allowed_users: Vec::new(),
             permission_mode: "plan".to_string(),
             default_workspace_path: None,
             enabled: false,
+            feishu_app_id: None,
+            feishu_app_secret: None,
             model: None,
             provider_env_json: None,
             mcp_servers_json: None,
@@ -129,6 +161,8 @@ pub struct ImBotStatus {
     pub buffered_messages: usize,
     /// Deep link URL for QR code (e.g. https://t.me/BotName?start=BIND_xxxx)
     pub bind_url: Option<String>,
+    /// Plain bind code for platforms without deep links (e.g. Feishu)
+    pub bind_code: Option<String>,
 }
 
 impl Default for ImBotStatus {
@@ -143,6 +177,7 @@ impl Default for ImBotStatus {
             restart_count: 0,
             buffered_messages: 0,
             bind_url: None,
+            bind_code: None,
         }
     }
 }
@@ -177,11 +212,13 @@ pub struct PeerSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferedMessage {
     pub chat_id: String,
-    pub message_id: i64,
+    pub message_id: String,
     pub text: String,
-    pub sender_id: i64,
+    pub sender_id: String,
     pub sender_name: Option<String>,
     pub source_type: ImSourceType,
+    #[serde(default = "default_platform")]
+    pub platform: ImPlatform,
     pub timestamp: String,
     pub retry_count: u32,
     /// Cached session key for efficient pop_for_session matching
@@ -194,11 +231,12 @@ impl BufferedMessage {
         Self {
             session_key: msg.session_key(),
             chat_id: msg.chat_id.clone(),
-            message_id: msg.message_id,
+            message_id: msg.message_id.clone(),
             text: msg.text.clone(),
-            sender_id: msg.sender_id,
+            sender_id: msg.sender_id.clone(),
             sender_name: msg.sender_name.clone(),
             source_type: msg.source_type.clone(),
+            platform: msg.platform.clone(),
             timestamp: msg.timestamp.to_rfc3339(),
             retry_count: 0,
         }
@@ -209,11 +247,12 @@ impl BufferedMessage {
     pub fn to_im_message(&self) -> ImMessage {
         ImMessage {
             chat_id: self.chat_id.clone(),
-            message_id: self.message_id,
+            message_id: self.message_id.clone(),
             text: self.text.clone(),
-            sender_id: self.sender_id,
+            sender_id: self.sender_id.clone(),
             sender_name: self.sender_name.clone(),
             source_type: self.source_type.clone(),
+            platform: self.platform.clone(),
             timestamp: chrono::DateTime::parse_from_rfc3339(&self.timestamp)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),

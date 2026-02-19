@@ -7,6 +7,7 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { getAllMcpServers, getEnabledMcpServerIds, updateImBotConfig } from '@/config/configService';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
+import feishuIcon from './assets/feishu.jpeg';
 
 export default function ImBotList({
     configs,
@@ -20,7 +21,7 @@ export default function ImBotList({
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { providers, apiKeys } = useConfig();
+    const { providers, apiKeys, refreshConfig } = useConfig();
     const isMountedRef = useRef(true);
 
     // Bot statuses: botId → status
@@ -108,6 +109,9 @@ export default function ImBotList({
             providerEnvJson: providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
             availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
+            platform: cfg.platform,
+            feishuAppId: cfg.feishuAppId || null,
+            feishuAppSecret: cfg.feishuAppSecret || null,
         };
     }, [providers, apiKeys]);
 
@@ -137,10 +141,14 @@ export default function ImBotList({
                     });
                     toastRef.current.success(`${cfg.name} 已停止`);
                     await updateImBotConfig(botId, { enabled: false });
+                    await refreshConfig();
                 }
             } else {
-                if (!cfg.botToken) {
-                    toastRef.current.error('请先配置 Bot Token');
+                const hasCredentials = cfg.platform === 'feishu'
+                    ? (cfg.feishuAppId && cfg.feishuAppSecret)
+                    : cfg.botToken;
+                if (!hasCredentials) {
+                    toastRef.current.error(cfg.platform === 'feishu' ? '请先配置应用凭证' : '请先配置 Bot Token');
                     return;
                 }
                 const params = await buildStartParams(cfg);
@@ -149,6 +157,7 @@ export default function ImBotList({
                     setStatuses(prev => ({ ...prev, [botId]: newStatus }));
                     toastRef.current.success(`${cfg.name} 已启动`);
                     await updateImBotConfig(botId, { enabled: true });
+                    await refreshConfig();
                 }
             }
         } catch (err) {
@@ -164,12 +173,12 @@ export default function ImBotList({
                 });
             }
         }
-    }, [buildStartParams]);
+    }, [buildStartParams, refreshConfig]);
 
     // Platform icon
     const platformIcon = (platform: string) => {
         if (platform === 'telegram') return <img src={telegramIcon} alt="Telegram" className="h-5 w-5" />;
-        if (platform === 'feishu') return <span className="text-base">🐦</span>;
+        if (platform === 'feishu') return <img src={feishuIcon} alt="飞书" className="h-5 w-5 rounded" />;
         return <span className="text-base">💬</span>;
     };
 
@@ -222,7 +231,9 @@ export default function ImBotList({
                             : cfg.enabled;
                         const isToggling = togglingIds.has(cfg.id);
 
-                        const displayName = status?.botUsername ? `@${status.botUsername}` : cfg.name;
+                        const displayName = status?.botUsername
+                            ? (cfg.platform === 'telegram' ? `@${status.botUsername}` : status.botUsername)
+                            : cfg.name;
 
                         return (
                             <div
@@ -259,7 +270,7 @@ export default function ImBotList({
                                             </span>
                                         )}
                                         {cfg.defaultWorkspacePath && <span>·</span>}
-                                        <span className="flex-shrink-0 capitalize">{cfg.platform}</span>
+                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : 'Telegram'}</span>
                                     </div>
                                     {/* Capsule toggle button */}
                                     <button
@@ -267,7 +278,7 @@ export default function ImBotList({
                                             e.stopPropagation();
                                             toggleBot(cfg);
                                         }}
-                                        disabled={isToggling || (!cfg.botToken && !isRunning)}
+                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.botToken) && !isRunning)}
                                         className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
                                             isRunning
                                                 ? 'bg-[var(--error)] text-white hover:bg-[#b91c1c]'

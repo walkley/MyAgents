@@ -38,21 +38,21 @@ pub trait ImAdapter: Send + Sync + 'static {
     fn ack_received(
         &self,
         chat_id: &str,
-        message_id: i64,
+        message_id: &str,
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// React to indicate processing has started (e.g. ⏳).
     fn ack_processing(
         &self,
         chat_id: &str,
-        message_id: i64,
+        message_id: &str,
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Clear acknowledgement reactions.
     fn ack_clear(
         &self,
         chat_id: &str,
-        message_id: i64,
+        message_id: &str,
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Send a "typing" / "processing" indicator to the chat.
@@ -60,4 +60,52 @@ pub trait ImAdapter: Send + Sync + 'static {
         &self,
         chat_id: &str,
     ) -> impl std::future::Future<Output = ()> + Send;
+}
+
+/// Extended adapter trait for platforms that support streaming draft messages.
+/// Provides send_message_returning_id, edit_message, and delete_message
+/// so the SSE stream loop can manage draft messages generically.
+pub trait ImStreamAdapter: ImAdapter {
+    /// Send a message and return its ID (for later edit/delete).
+    fn send_message_returning_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<Option<String>>> + Send;
+
+    /// Edit an existing message by ID.
+    fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
+
+    /// Delete a message by ID.
+    fn delete_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
+
+    /// Max message length for this platform (Telegram: 4096, Feishu: 30000).
+    fn max_message_length(&self) -> usize;
+
+    /// Send an interactive approval card/keyboard and return its message ID.
+    /// Used for permission requests when the bot runs in non-fullAgency mode.
+    fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<Option<String>>> + Send;
+
+    /// Update an approval card/message to show resolved status (approved/denied).
+    fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 }
