@@ -5,6 +5,7 @@ mod commands;
 pub mod cron_task;
 pub mod im;
 pub mod logger;
+pub mod management_api;
 mod proxy_config;
 mod sidecar;
 mod sse_proxy;
@@ -97,6 +98,8 @@ pub fn run() {
             updater::check_and_download_update,
             updater::restart_app,
             updater::test_update_connectivity,
+            updater::check_pending_update,
+            updater::install_pending_update,
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
@@ -142,6 +145,7 @@ pub fn run() {
             im::cmd_im_bot_status,
             im::cmd_im_all_bots_status,
             im::cmd_im_conversations,
+            im::cmd_update_heartbeat_config,
         ])
         .setup(|app| {
             // Initialize logging for all builds
@@ -201,6 +205,14 @@ pub fn run() {
                     log::info!("[App] Windows: Disabled system decorations for custom title bar");
                 }
             }
+
+            // Start management API (internal HTTP server for Bun→Rust IPC)
+            tauri::async_runtime::spawn(async move {
+                match management_api::start_management_api().await {
+                    Ok(port) => log::info!("[App] Management API started on port {}", port),
+                    Err(e) => log::error!("[App] Failed to start management API: {}", e),
+                }
+            });
 
             // Initialize cron task manager with app handle
             let cron_app_handle = app.handle().clone();

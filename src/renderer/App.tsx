@@ -124,7 +124,7 @@ const MemoizedTabContent = memo(function TabContent({
 
 export default function App() {
   // Auto-update state (silent background updates)
-  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate } = useUpdater();
+  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
   // Stable callback for Settings prop — ref pattern ensures memo comparator correctness
   const restartAndUpdateRef = useRef(restartAndUpdate);
@@ -1315,6 +1315,22 @@ export default function App() {
             exitConfirmState.resolve(false);
             setExitConfirmState(null);
           }}
+        />
+      )}
+
+      {/* Windows: startup dialog for pending update from previous session */}
+      {pendingUpdateOnStartup && (
+        <ConfirmDialog
+          title="发现新版本"
+          message={`最新版本 v${pendingUpdateOnStartup} 已下载完成，是否立即安装？`}
+          confirmText="安装"
+          cancelText="稍后"
+          confirmVariant="primary"
+          onConfirm={() => {
+            dismissPendingUpdate();
+            void restartAndUpdate();
+          }}
+          onCancel={dismissPendingUpdate}
         />
       )}
     </div>

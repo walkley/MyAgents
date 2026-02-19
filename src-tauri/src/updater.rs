@@ -7,6 +7,12 @@
 // 3. Download complete → emit event to show "Restart to Update" button in titlebar
 // 4. User clicks button → restart and apply update
 // 5. Or next app launch → update is automatically applied
+//
+// Windows-specific:
+// - download_and_install() launches NSIS installer which exit(0)s the process
+// - To avoid closing the app without consent, we split download/install:
+//   download() saves bytes to disk, install() only runs on user action
+// - On next startup, check_pending_update detects saved bytes and prompts user
 
 use crate::logger;
 use crate::proxy_config;
@@ -17,6 +23,71 @@ use tauri_plugin_updater::UpdaterExt;
 
 /// Global flag to prevent concurrent update checks/downloads
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Metadata persisted to disk alongside the update binary
+#[cfg(target_os = "windows")]
+#[derive(Serialize, serde::Deserialize)]
+struct PendingUpdateMeta {
+    version: String,
+}
+
+/// Get the ~/.myagents/ directory path
+#[cfg(target_os = "windows")]
+fn get_myagents_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    Ok(home.join(".myagents"))
+}
+
+/// Atomically save pending update bytes + metadata to disk
+/// Writes to .tmp first, then renames to avoid partial files
+#[cfg(target_os = "windows")]
+fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String> {
+    let dir = get_myagents_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir: {}", e))?;
+
+    let bin_path = dir.join("pending_update.bin");
+    let bin_tmp = dir.join("pending_update.bin.tmp");
+    let meta_path = dir.join("pending_update.json");
+
+    // Write binary atomically: tmp → rename
+    std::fs::write(&bin_tmp, bytes)
+        .map_err(|e| format!("Failed to write update binary: {}", e))?;
+    std::fs::rename(&bin_tmp, &bin_path)
+        .map_err(|e| format!("Failed to rename update binary: {}", e))?;
+
+    // Write metadata
+    let meta = PendingUpdateMeta { version: version.to_string() };
+    let json = serde_json::to_string(&meta)
+        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+    std::fs::write(&meta_path, json)
+        .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+    Ok(())
+}
+
+/// Remove pending update files from disk
+#[cfg(target_os = "windows")]
+fn clear_pending_update_from_disk() {
+    if let Ok(dir) = get_myagents_dir() {
+        let _ = std::fs::remove_file(dir.join("pending_update.bin"));
+        let _ = std::fs::remove_file(dir.join("pending_update.bin.tmp"));
+        let _ = std::fs::remove_file(dir.join("pending_update.json"));
+    }
+}
+
+/// Read the version of the pending update from disk metadata (None if not present or corrupt)
+#[cfg(target_os = "windows")]
+fn read_pending_update_version() -> Option<String> {
+    let dir = get_myagents_dir().ok()?;
+    let meta_path = dir.join("pending_update.json");
+    let bin_path = dir.join("pending_update.bin");
+    if !meta_path.exists() || !bin_path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(&meta_path).ok()?;
+    let meta: PendingUpdateMeta = serde_json::from_str(&json).ok()?;
+    Some(meta.version)
+}
 
 /// RAII guard to reset UPDATE_IN_PROGRESS on drop
 struct UpdateGuard;
@@ -137,35 +208,67 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     let downloaded_clone = downloaded.clone();
     let last_logged_clone = last_logged_percent.clone();
 
-    update
-        .download_and_install(
-            move |chunk_length, content_length| {
-                let new_downloaded = downloaded_clone.fetch_add(
-                    chunk_length as u64,
-                    std::sync::atomic::Ordering::SeqCst,
-                ) + chunk_length as u64;
+    let on_chunk = move |chunk_length: usize, content_length: Option<u64>| {
+        let new_downloaded = downloaded_clone.fetch_add(
+            chunk_length as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        ) + chunk_length as u64;
 
-                // Log progress at 25% intervals (less verbose for silent download)
-                if let Some(total) = content_length {
-                    let percent = (new_downloaded as f64 / total as f64 * 100.0) as u32;
-                    let last_percent = last_logged_clone.load(std::sync::atomic::Ordering::SeqCst);
-                    let current_bucket = percent / 25;
-                    let last_bucket = last_percent / 25;
-                    if current_bucket > last_bucket {
-                        last_logged_clone.store(percent, std::sync::atomic::Ordering::SeqCst);
-                        logger::info(
-                            &app_clone,
-                            format!("[Updater] Silent download progress: {}%", current_bucket * 25),
-                        );
-                    }
-                }
-            },
-            || {
-                // No-op: we handle completion after download_and_install returns
-            },
-        )
-        .await
-        .map_err(|e| format!("Silent download failed: {}", e))?;
+        // Log progress at 25% intervals (less verbose for silent download)
+        if let Some(total) = content_length {
+            let percent = (new_downloaded as f64 / total as f64 * 100.0) as u32;
+            let last_percent = last_logged_clone.load(std::sync::atomic::Ordering::SeqCst);
+            let current_bucket = percent / 25;
+            let last_bucket = last_percent / 25;
+            if current_bucket > last_bucket {
+                last_logged_clone.store(percent, std::sync::atomic::Ordering::SeqCst);
+                logger::info(
+                    &app_clone,
+                    format!("[Updater] Silent download progress: {}%", current_bucket * 25),
+                );
+            }
+        }
+    };
+
+    // Windows: download only (don't install) to avoid NSIS killing the process
+    // macOS: download_and_install is safe because .app replacement doesn't affect running process
+    #[cfg(target_os = "windows")]
+    {
+        // Skip download if we already have this version cached on disk
+        if let Some(cached_version) = read_pending_update_version() {
+            if cached_version == version {
+                logger::info(
+                    app,
+                    format!("[Updater] Windows: v{} already cached on disk, skipping re-download", version),
+                );
+                return Ok(Some(version));
+            }
+        }
+
+        let bytes = update
+            .download(on_chunk, || {})
+            .await
+            .map_err(|e| format!("Silent download failed: {}", e))?;
+
+        logger::info(
+            app,
+            format!("[Updater] Windows: Downloaded {} bytes for v{}, saving to disk...", bytes.len(), version),
+        );
+
+        // Save to disk — install_pending_update will read from here
+        if let Err(e) = save_pending_update_to_disk(&version, &bytes) {
+            logger::error(app, format!("[Updater] Failed to save update to disk: {}", e));
+            return Err(format!("Failed to persist update: {}", e));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        update
+            .download_and_install(on_chunk, || {})
+            .await
+            .map_err(|e| format!("Silent download failed: {}", e))?;
+    }
 
     Ok(Some(version))
 }
@@ -202,6 +305,114 @@ pub async fn check_and_download_update(app: AppHandle) -> Result<bool, String> {
 pub fn restart_app(app: AppHandle) {
     logger::info(&app, "[Updater] Restarting application to apply update...");
     app.restart();
+}
+
+/// Command: Check if a pending update exists on disk (for Windows startup prompt)
+/// Returns the version string if a pending update is ready, None otherwise
+#[tauri::command]
+pub fn check_pending_update() -> Option<String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match read_pending_update_version() {
+            Some(version) => Some(version),
+            None => {
+                // If metadata is corrupt/missing but bin exists, clean up
+                clear_pending_update_from_disk();
+                None
+            }
+        }
+    }
+}
+
+/// Command: Install a previously downloaded update (Windows only)
+/// Reads bytes from disk, verifies version matches server, then calls update.install()
+/// which launches NSIS + exit(0). Requires network to obtain Update object for install().
+#[tauri::command]
+pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        return Err("install_pending_update is only supported on Windows".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        logger::info(&app, "[Updater] install_pending_update called");
+
+        // Step 1: Read update bytes and version from disk
+        let dir = get_myagents_dir()?;
+        let bin_path = dir.join("pending_update.bin");
+        let meta_path = dir.join("pending_update.json");
+
+        let bytes = std::fs::read(&bin_path)
+            .map_err(|e| format!("Failed to read pending update from disk: {}", e))?;
+
+        let json = std::fs::read_to_string(&meta_path)
+            .map_err(|e| format!("Failed to read pending update metadata: {}", e))?;
+        let meta: PendingUpdateMeta = serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse pending update metadata: {}", e))?;
+        let pending_version = meta.version;
+
+        logger::info(
+            &app,
+            format!("[Updater] Read {} bytes for v{} from disk", bytes.len(), pending_version),
+        );
+
+        // Step 2: Build updater and check for latest version to get Update object
+        // Note: This requires network. If offline, the user will need to connect first.
+        let target = get_update_target();
+        let updater = app
+            .updater_builder()
+            .target(target.to_string())
+            .build()
+            .map_err(|e| format!("Failed to build updater: {}", e))?;
+
+        let update = match updater.check().await {
+            Ok(Some(update)) => update,
+            Ok(None) => {
+                // Server says no update available — our cached bytes are stale
+                logger::info(&app, "[Updater] No update available from server, clearing stale pending update");
+                clear_pending_update_from_disk();
+                return Err("VERSION_MISMATCH".to_string());
+            }
+            Err(e) => {
+                logger::error(
+                    &app,
+                    format!("[Updater] Cannot verify update (network required): {}", e),
+                );
+                return Err("NETWORK_ERROR".to_string());
+            }
+        };
+
+        // Step 3: Version match check — if server has newer version than our cached bytes, discard
+        if update.version != pending_version {
+            logger::info(
+                &app,
+                format!(
+                    "[Updater] Version mismatch: pending={}, server={}. Clearing stale update.",
+                    pending_version, update.version
+                ),
+            );
+            clear_pending_update_from_disk();
+            return Err("VERSION_MISMATCH".to_string());
+        }
+
+        // Step 4: Install — on Windows this launches NSIS installer and calls exit(0)
+        // This function will NOT return on success
+        logger::info(&app, format!("[Updater] Installing v{}...", pending_version));
+        clear_pending_update_from_disk();
+        update
+            .install(bytes)
+            .map_err(|e| format!("Installation failed: {}", e))?;
+
+        // If we get here (unlikely on Windows), the install completed without exit
+        Ok(())
+    }
 }
 
 /// Expected JSON structure for Tauri v2 updater (per-platform file)
