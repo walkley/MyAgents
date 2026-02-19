@@ -4550,7 +4550,10 @@ async function main() {
               }, 600000);
 
               setImStreamCallback((event, data) => {
-                if (event === 'delta') {
+                if (event === 'permission-request') {
+                  // Forward permission request to Rust for interactive approval
+                  sendEvent({ type: 'permission-request', ...JSON.parse(data) });
+                } else if (event === 'delta') {
                   imAccText += data;
                   sendEvent({ type: 'partial', text: imAccText });
                 } else if (event === 'block-end') {
@@ -4596,6 +4599,24 @@ async function main() {
             { success: false, error: error instanceof Error ? error.message : 'IM chat error' },
             500,
           );
+        }
+      }
+
+      // POST /api/im/permission-response — Handle IM user's permission decision (from approval card/button)
+      if (pathname === '/api/im/permission-response' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            requestId: string;
+            decision: 'deny' | 'allow_once' | 'always_allow';
+          };
+
+          const { handlePermissionResponse } = await import('./agent-session');
+          const success = handlePermissionResponse(payload.requestId, payload.decision);
+
+          return jsonResponse({ success });
+        } catch (error) {
+          console.error('[im/permission-response] Error:', error);
+          return jsonResponse({ success: false, error: String(error) }, 500);
         }
       }
 

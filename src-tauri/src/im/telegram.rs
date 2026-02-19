@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
 use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError};
+use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
 
 /// Telegram long-poll timeout (seconds)
@@ -180,6 +181,10 @@ pub struct TelegramAdapter {
     message_tx: mpsc::Sender<ImMessage>,
     coalescer: Arc<Mutex<MessageCoalescer>>,
     bot_username: Arc<Mutex<Option<String>>>,
+    /// Channel for forwarding approval callbacks from inline keyboard button clicks
+    approval_tx: mpsc::Sender<ApprovalCallback>,
+    /// Short ID → (full request_id, created_at) mapping (callback_data has 64 byte limit)
+    short_id_map: Arc<Mutex<HashMap<String, (String, Instant)>>>,
 }
 
 impl TelegramAdapter {
@@ -187,6 +192,7 @@ impl TelegramAdapter {
         config: &ImConfig,
         message_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
+        approval_tx: mpsc::Sender<ApprovalCallback>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
@@ -206,6 +212,8 @@ impl TelegramAdapter {
             message_tx,
             coalescer: Arc::new(Mutex::new(MessageCoalescer::new())),
             bot_username: Arc::new(Mutex::new(None)),
+            approval_tx,
+            short_id_map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -337,7 +345,7 @@ impl TelegramAdapter {
             "offset": offset,
             "limit": 100,
             "timeout": LONG_POLL_TIMEOUT,
-            "allowed_updates": ["message"]
+            "allowed_updates": ["message", "callback_query"]
         });
         let result = self.api_call("getUpdates", &body).await?;
         Ok(result.as_array().cloned().unwrap_or_default())
@@ -506,6 +514,145 @@ impl TelegramAdapter {
             .await;
     }
 
+    // ===== Approval card operations =====
+
+    /// Generate a short ID for callback_data (Telegram 64-byte limit).
+    /// Stores the mapping for later resolution. Cleans up entries older than 15 minutes.
+    async fn make_short_id(&self, full_id: &str) -> String {
+        let short = &full_id[full_id.len().saturating_sub(8)..];
+        let mut map = self.short_id_map.lock().await;
+        // Periodic cleanup: remove entries older than 15 minutes (Sidecar times out at 10 min)
+        let now = Instant::now();
+        map.retain(|_, (_, created)| now.duration_since(*created) < Duration::from_secs(15 * 60));
+        map.insert(short.to_string(), (full_id.to_string(), now));
+        short.to_string()
+    }
+
+    /// Resolve a short ID back to the full request_id.
+    async fn resolve_short_id(&self, short: &str) -> Option<String> {
+        self.short_id_map.lock().await.remove(short).map(|(id, _)| id)
+    }
+
+    /// Send an approval message with inline keyboard buttons.
+    pub async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> Result<Option<String>, TelegramError> {
+        // Truncate input for display (char-boundary safe)
+        let display_input = if tool_input.chars().count() > 200 {
+            let end: usize = tool_input.char_indices().nth(200).map(|(i, _)| i).unwrap_or(tool_input.len());
+            format!("{}...", &tool_input[..end])
+        } else {
+            tool_input.to_string()
+        };
+
+        let short_id = self.make_short_id(request_id).await;
+        let text = format!(
+            "🔒 *工具使用请求*\n\n*工具*: `{}`\n*内容*: `{}`\n\n也可直接回复「同意」「始终同意」或「拒绝」",
+            tool_name, display_input
+        );
+
+        let body = json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": {
+                "inline_keyboard": [[
+                    { "text": "✅ 允许", "callback_data": format!("pa:{}:ao", short_id) },
+                    { "text": "✅ 始终允许", "callback_data": format!("pa:{}:aa", short_id) },
+                    { "text": "❌ 拒绝", "callback_data": format!("pa:{}:d", short_id) }
+                ]]
+            }
+        });
+
+        match self.api_call("sendMessage", &body).await {
+            Ok(result) => {
+                let msg_id = result["message_id"].as_i64().unwrap_or(0);
+                Ok(Some(msg_id.to_string()))
+            }
+            Err(TelegramError::MarkdownParseError) => {
+                // Fallback without markdown
+                let plain_text = format!(
+                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n也可直接回复「同意」「始终同意」或「拒绝」",
+                    tool_name, display_input
+                );
+                let body = json!({
+                    "chat_id": chat_id,
+                    "text": plain_text,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            { "text": "✅ 允许", "callback_data": format!("pa:{}:ao", short_id) },
+                            { "text": "✅ 始终允许", "callback_data": format!("pa:{}:aa", short_id) },
+                            { "text": "❌ 拒绝", "callback_data": format!("pa:{}:d", short_id) }
+                        ]]
+                    }
+                });
+                let result = self.api_call("sendMessage", &body).await?;
+                let msg_id = result["message_id"].as_i64().unwrap_or(0);
+                Ok(Some(msg_id.to_string()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Update an approval message to show resolved status (remove inline keyboard).
+    pub async fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> Result<(), TelegramError> {
+        let (emoji, label) = if status == "denied" {
+            ("❌", "已拒绝")
+        } else {
+            ("✅", "已允许")
+        };
+
+        let mid = message_id.parse::<i64>().unwrap_or(0);
+        let _ = self.api_call("editMessageText", &json!({
+            "chat_id": chat_id,
+            "message_id": mid,
+            "text": format!("🔒 工具使用请求 — {} {}", emoji, label),
+        })).await;
+        Ok(())
+    }
+
+    /// Process a callback_query update (inline keyboard button click).
+    async fn process_callback_query(&self, update: &Value) -> Option<ApprovalCallback> {
+        let cq = update.get("callback_query")?;
+        let cq_id = cq["id"].as_str()?;
+        let data = cq["data"].as_str()?;
+
+        // Parse "pa:<short_id>:<action>"
+        let parts: Vec<&str> = data.splitn(3, ':').collect();
+        if parts.len() != 3 || parts[0] != "pa" {
+            return None;
+        }
+
+        let request_id = self.resolve_short_id(parts[1]).await?;
+        let decision = match parts[2] {
+            "ao" => "allow_once",
+            "aa" => "always_allow",
+            "d" => "deny",
+            _ => return None,
+        }.to_string();
+
+        // MUST answer callback query (otherwise button shows spinner)
+        let answer_text = if decision == "deny" { "已拒绝" } else { "已允许" };
+        let _ = self.api_call("answerCallbackQuery", &json!({
+            "callback_query_id": cq_id,
+            "text": answer_text,
+        })).await;
+
+        let user_id = cq["from"]["id"].as_i64().unwrap_or(0).to_string();
+
+        ulog_info!("[telegram] Callback query: decision={}, rid={}", decision, &request_id[..request_id.len().min(16)]);
+        Some(ApprovalCallback { request_id, decision, user_id })
+    }
+
     // ===== Long-polling loop =====
 
     /// Main listen loop — runs indefinitely, emitting ImMessages to message_tx.
@@ -531,6 +678,14 @@ impl TelegramAdapter {
                         // Update offset to acknowledge this update
                         if let Some(update_id) = update["update_id"].as_i64() {
                             offset = update_id + 1;
+                        }
+
+                        // Handle callback_query (inline keyboard button clicks)
+                        if let Some(cb) = self.process_callback_query(&update).await {
+                            if self.approval_tx.send(cb).await.is_err() {
+                                ulog_error!("[telegram] Approval channel closed");
+                            }
+                            continue;
                         }
 
                         if let Some(msg) = self.process_update(&update).await {
@@ -1137,6 +1292,29 @@ impl super::adapter::ImStreamAdapter for TelegramAdapter {
 
     fn max_message_length(&self) -> usize {
         4096
+    }
+
+    async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> super::adapter::AdapterResult<Option<String>> {
+        self.send_approval_card(chat_id, request_id, tool_name, tool_input)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        self.update_approval_status(chat_id, message_id, status)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

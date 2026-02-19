@@ -22,7 +22,27 @@ use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use tokio::sync::{watch, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
+use tokio::sync::mpsc;
+
 use crate::sidecar::ManagedSidecarManager;
+
+/// Approval callback from IM platform (button click or text command)
+pub struct ApprovalCallback {
+    pub request_id: String,
+    pub decision: String,  // "allow_once" | "always_allow" | "deny"
+    #[allow(dead_code)]
+    pub user_id: String,
+}
+
+/// Pending approval waiting for user response
+struct PendingApproval {
+    sidecar_port: u16,
+    chat_id: String,
+    card_message_id: String,
+    created_at: Instant,
+}
+
+type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 
 use buffer::MessageBuffer;
 use feishu::FeishuAdapter;
@@ -113,6 +133,29 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.max_message_length(),
             Self::Feishu(a) => a.max_message_length(),
+        }
+    }
+    async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> adapter::AdapterResult<Option<String>> {
+        match self {
+            Self::Telegram(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await.map_err(|e| e.to_string()),
+            Self::Feishu(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
+        }
+    }
+    async fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.update_approval_status(chat_id, message_id, status).await.map_err(|e| e.to_string()),
+            Self::Feishu(a) => a.update_approval_status(message_id, status).await,
         }
     }
 }
@@ -227,6 +270,10 @@ pub async fn start_im_bot<R: Runtime>(
     // Generate bind code for QR code binding flow
     let bind_code = format!("BIND_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
+    // Create approval channel for permission request callbacks
+    let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalCallback>(32);
+    let pending_approvals: PendingApprovals = Arc::new(Mutex::new(HashMap::new()));
+
     // Create platform adapter (implements ImAdapter + ImStreamAdapter traits)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
     let msg_tx_for_reinjection = msg_tx.clone(); // For media group merge re-injection
@@ -235,16 +282,19 @@ pub async fn start_im_bot<R: Runtime>(
             &config,
             msg_tx,
             Arc::clone(&allowed_users),
+            approval_tx.clone(),
         )))),
         ImPlatform::Feishu => Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
             &config,
             msg_tx,
             Arc::clone(&allowed_users),
+            approval_tx.clone(),
         )))),
     };
 
-    // Verify bot connection via ImAdapter trait
+    // Verify bot connection via ImAdapter + ImStreamAdapter traits
     use adapter::ImAdapter;
+    use adapter::ImStreamAdapter;
     match adapter.verify_connection().await {
         Ok(display_name) => {
             ulog_info!("[im] Bot verified: {}", display_name);
@@ -279,6 +329,51 @@ pub async fn start_im_bot<R: Runtime>(
     let poll_shutdown_rx = shutdown_rx.clone();
     let _poll_handle = tokio::spawn(async move {
         adapter_clone.listen_loop(poll_shutdown_rx).await;
+    });
+
+    // Start approval callback handler
+    let pending_approvals_for_handler = Arc::clone(&pending_approvals);
+    let adapter_for_approval = Arc::clone(&adapter);
+    let approval_client = Client::new();
+    let _approval_handle = tokio::spawn(async move {
+        while let Some(cb) = approval_rx.recv().await {
+            let pending = pending_approvals_for_handler.lock().await.remove(&cb.request_id);
+            if let Some(p) = pending {
+                // POST decision to Sidecar
+                let url = format!("http://127.0.0.1:{}/api/im/permission-response", p.sidecar_port);
+                let result = approval_client
+                    .post(&url)
+                    .json(&json!({
+                        "requestId": cb.request_id,
+                        "decision": cb.decision,
+                    }))
+                    .send()
+                    .await;
+                match result {
+                    Ok(resp) if resp.status().is_success() => {
+                        ulog_info!("[im] Approval forwarded: rid={}, decision={}", &cb.request_id[..cb.request_id.len().min(16)], cb.decision);
+                    }
+                    Ok(resp) => {
+                        ulog_error!("[im] Approval forward failed: HTTP {}", resp.status());
+                    }
+                    Err(e) => {
+                        ulog_error!("[im] Approval forward error: {}", e);
+                    }
+                }
+                // Update card to show result (skip if card send had failed)
+                if !p.card_message_id.is_empty() {
+                    let status_text = if cb.decision == "deny" { "denied" } else { "approved" };
+                    let _ = adapter_for_approval.update_approval_status(
+                        &p.chat_id,
+                        &p.card_message_id,
+                        status_text,
+                    ).await;
+                }
+            } else {
+                ulog_warn!("[im] Approval callback for unknown request_id: {}", &cb.request_id[..cb.request_id.len().min(16)]);
+            }
+        }
+        ulog_info!("[im] Approval handler exited");
     });
 
     // Start message processing loop
@@ -318,6 +413,8 @@ pub async fn start_im_bot<R: Runtime>(
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
     let available_providers_for_loop = available_providers_json.clone();
     let mcp_servers_json_for_loop = config.mcp_servers_json.clone();
+    let pending_approvals_for_loop = Arc::clone(&pending_approvals);
+    let approval_tx_for_loop = approval_tx.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
 
     // Concurrency primitives (live outside the router for lock-free access)
@@ -732,6 +829,33 @@ pub async fn start_im_bot<R: Runtime>(
                         continue;
                     }
 
+                    // ── Text-based approval commands (fallback for platforms without card callbacks) ──
+                    let approval_decision = match text.as_str() {
+                        "同意" | "approve" => Some("allow_once"),
+                        "始终同意" | "always approve" => Some("always_allow"),
+                        "拒绝" | "deny" => Some("deny"),
+                        _ => None,
+                    };
+                    if let Some(decision) = approval_decision {
+                        // Find the most recent pending approval for this chat
+                        let pending_rid = {
+                            let guard = pending_approvals_for_loop.lock().await;
+                            guard.iter()
+                                .find(|(_, p)| p.chat_id == chat_id)
+                                .map(|(rid, _)| rid.clone())
+                        };
+                        if let Some(request_id) = pending_rid {
+                            ulog_info!("[im] Text approval command: decision={}, rid={}", decision, &request_id[..request_id.len().min(16)]);
+                            let _ = approval_tx_for_loop.send(ApprovalCallback {
+                                request_id,
+                                decision: decision.to_string(),
+                                user_id: msg.sender_id.clone(),
+                            }).await;
+                            continue;
+                        }
+                        // No pending approval — fall through to regular message handling
+                    }
+
                     // ── Regular message → spawn concurrent task ──────────
                     ulog_info!(
                         "[im] Routing message from {} to Sidecar (session_key={}, {} chars)",
@@ -754,6 +878,7 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
                     let task_locks = Arc::clone(&peer_locks);
+                    let task_pending_approvals = Arc::clone(&pending_approvals_for_loop);
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -840,6 +965,7 @@ pub async fn start_im_bot<R: Runtime>(
                             &task_perm,
                             penv.as_ref(),
                             images,
+                            &task_pending_approvals,
                         )
                         .await
                         {
@@ -903,6 +1029,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         &task_perm,
                                         penv.as_ref(),
                                         None, // buffered messages don't preserve attachments
+                                        &task_pending_approvals,
                                     )
                                     .await
                                     {
@@ -1206,6 +1333,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
+    pending_approvals: &PendingApprovals,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match (&msg.platform, &msg.source_type) {
@@ -1343,6 +1471,44 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         let _ = adapter.send_message(chat_id, "(No response)").await;
                     }
                     return Ok(session_id);
+                }
+                "permission-request" => {
+                    let request_id = json_val["requestId"].as_str().unwrap_or("").to_string();
+                    let tool_name = json_val["toolName"].as_str().unwrap_or("unknown").to_string();
+                    let tool_input = json_val["input"].as_str().unwrap_or("").to_string();
+
+                    ulog_info!(
+                        "[im-stream] Permission request: tool={}, rid={}",
+                        tool_name,
+                        &request_id[..request_id.len().min(16)]
+                    );
+
+                    // Send interactive approval card/keyboard
+                    let card_msg_id = match adapter.send_approval_card(chat_id, &request_id, &tool_name, &tool_input).await {
+                        Ok(Some(mid)) => mid,
+                        Ok(None) => {
+                            ulog_warn!("[im-stream] Approval card sent but no message ID returned");
+                            String::new()
+                        }
+                        Err(e) => {
+                            ulog_error!("[im-stream] Failed to send approval card: {}", e);
+                            String::new()
+                        }
+                    };
+                    // Always insert pending approval so text fallback ("同意"/"拒绝") works
+                    {
+                        let mut guard = pending_approvals.lock().await;
+                        // Cleanup expired entries (Sidecar auto-denies after 10 min)
+                        let now = Instant::now();
+                        guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
+                        guard.insert(request_id, PendingApproval {
+                            sidecar_port: port,
+                            chat_id: chat_id.to_string(),
+                            card_message_id: card_msg_id,
+                            created_at: now,
+                        });
+                    }
+                    // SSE stream naturally pauses here — canUseTool Promise is blocking
                 }
                 "error" => {
                     let error = json_val["error"]

@@ -90,4 +90,22 @@ pub trait ImStreamAdapter: ImAdapter {
 
     /// Max message length for this platform (Telegram: 4096, Feishu: 30000).
     fn max_message_length(&self) -> usize;
+
+    /// Send an interactive approval card/keyboard and return its message ID.
+    /// Used for permission requests when the bot runs in non-fullAgency mode.
+    fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<Option<String>>> + Send;
+
+    /// Update an approval card/message to show resolved status (approved/denied).
+    fn update_approval_status(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 }

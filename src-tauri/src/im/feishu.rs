@@ -16,6 +16,7 @@ use prost::Message as ProstMessage;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use super::types::{ImConfig, ImMessage, ImPlatform, ImSourceType};
+use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
 
 // ── Feishu WebSocket Protobuf Frame ──────────────────────────
@@ -56,8 +57,9 @@ struct WsHeader {
 const FRAME_METHOD_CONTROL: i32 = 0;
 const FRAME_METHOD_DATA: i32 = 1;
 
-/// Dedup cache TTL (30 minutes)
-const DEDUP_TTL: Duration = Duration::from_secs(30 * 60);
+/// Dedup cache TTL (24 hours — must survive WebSocket reconnection replays)
+/// Feishu replays unACKed events on reconnect; half-day idle gaps are common.
+const DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Max dedup cache size before forced cleanup
 const DEDUP_MAX_SIZE: usize = 5000;
 
@@ -305,6 +307,8 @@ pub struct FeishuAdapter {
     bot_name: Arc<RwLock<Option<String>>>,
     /// Message dedup cache: message_id → timestamp (30min TTL)
     dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Channel for forwarding approval callbacks from card button clicks
+    approval_tx: mpsc::Sender<ApprovalCallback>,
 }
 
 impl FeishuAdapter {
@@ -312,6 +316,7 @@ impl FeishuAdapter {
         config: &ImConfig,
         msg_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
+        approval_tx: mpsc::Sender<ApprovalCallback>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(30));
@@ -334,6 +339,7 @@ impl FeishuAdapter {
             allowed_users,
             bot_name: Arc::new(RwLock::new(None)),
             dedup_cache: Arc::new(Mutex::new(HashMap::new())),
+            approval_tx,
         }
     }
 
@@ -702,6 +708,25 @@ impl FeishuAdapter {
         pong.encode_to_vec()
     }
 
+    /// Build a protobuf ACK frame for a received data frame.
+    /// Feishu requires ACK for data frames; without it, events are replayed on reconnect.
+    fn build_ack_frame(data_frame: &WsFrame) -> Vec<u8> {
+        let ack = WsFrame {
+            seq_id: data_frame.seq_id,
+            log_id: data_frame.log_id,
+            service: data_frame.service,
+            method: FRAME_METHOD_DATA,
+            headers: vec![
+                WsHeader { key: "type".to_string(), value: "ack".to_string() },
+            ],
+            payload_encoding: None,
+            payload_type: None,
+            payload: None,
+            log_id_new: data_frame.log_id_new.clone(),
+        };
+        ack.encode_to_vec()
+    }
+
     /// WebSocket listen loop with reconnection.
     /// Feishu WS sends ONLY binary protobuf frames — text frames are ignored.
     pub async fn ws_listen_loop(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
@@ -794,6 +819,12 @@ impl FeishuAdapter {
                                             continue;
                                         }
 
+                                        // ACK the data frame immediately to prevent replay on reconnect
+                                        let ack_data = Self::build_ack_frame(&frame);
+                                        if let Err(e) = ws_write.send(WsMessage::Binary(ack_data.into())).await {
+                                            ulog_warn!("[feishu] Failed to send ACK for seq_id={}: {}", frame.seq_id, e);
+                                        }
+
                                         // Check for fragmentation (sum = total parts, seq = part index)
                                         let sum: usize = Self::get_frame_header(&frame, "sum")
                                             .and_then(|v| v.parse().ok())
@@ -867,6 +898,157 @@ impl FeishuAdapter {
         ulog_info!("[feishu] WS listen loop exited");
     }
 
+    // ===== Approval card operations =====
+
+    /// Send an interactive approval card for a permission request.
+    /// Returns the message_id of the card message on success.
+    pub async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> Result<Option<String>, String> {
+        let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
+
+        // Truncate input for display (char-boundary safe)
+        let display_input = if tool_input.chars().count() > 200 {
+            let end: usize = tool_input.char_indices().nth(200).map(|(i, _)| i).unwrap_or(tool_input.len());
+            format!("{}...", &tool_input[..end])
+        } else {
+            tool_input.to_string()
+        };
+
+        let card = json!({
+            "config": { "wide_screen_mode": true },
+            "header": {
+                "title": { "tag": "plain_text", "content": "🔒 工具使用请求" },
+                "template": "orange"
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": format!("**工具**: {}\n**内容**: {}", tool_name, display_input)
+                    }
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": { "tag": "plain_text", "content": "✅ 允许" },
+                            "type": "primary",
+                            "value": { "action": "allow_once", "rid": request_id }
+                        },
+                        {
+                            "tag": "button",
+                            "text": { "tag": "plain_text", "content": "✅ 始终允许" },
+                            "type": "default",
+                            "value": { "action": "always_allow", "rid": request_id }
+                        },
+                        {
+                            "tag": "button",
+                            "text": { "tag": "plain_text", "content": "❌ 拒绝" },
+                            "type": "danger",
+                            "value": { "action": "deny", "rid": request_id }
+                        }
+                    ]
+                },
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": "也可直接回复「同意」「始终同意」或「拒绝」"
+                        }
+                    ]
+                }
+            ]
+        });
+        let card_str = serde_json::to_string(&card).unwrap_or_default();
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": card_str,
+        });
+
+        match self.api_call("POST", &url, Some(&body)).await {
+            Ok(resp) => {
+                let msg_id = resp["data"]["message_id"].as_str().map(String::from);
+                ulog_info!("[feishu] Approval card sent: msg_id={:?}", msg_id);
+                Ok(msg_id)
+            }
+            Err(e) => {
+                ulog_warn!("[feishu] Approval card failed: {}, falling back to text", e);
+                // Fallback: send as plain text message with instructions
+                let fallback_text = format!(
+                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n回复「同意」允许执行\n回复「始终同意」本次会话全部允许\n回复「拒绝」拒绝执行",
+                    tool_name, display_input
+                );
+                self.send_text_message(chat_id, &fallback_text).await
+            }
+        }
+    }
+
+    /// Update an approval card to show resolved status.
+    /// Uses PATCH API (card updates use PATCH, text uses PUT).
+    pub async fn update_approval_status(
+        &self,
+        message_id: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let url = format!("{}/im/v1/messages/{}", FEISHU_API_BASE, message_id);
+
+        let (emoji, label, template) = if status == "denied" {
+            ("❌", "已拒绝", "red")
+        } else {
+            ("✅", "已允许", "green")
+        };
+
+        let card = json!({
+            "config": { "wide_screen_mode": true },
+            "header": {
+                "title": { "tag": "plain_text", "content": format!("🔒 工具使用请求 — {} {}", emoji, label) },
+                "template": template
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": format!("{} 此请求已{}", emoji, label)
+                    }
+                }
+            ]
+        });
+        let card_str = serde_json::to_string(&card).unwrap_or_default();
+        let body = json!({ "content": card_str });
+
+        self.api_call("PATCH", &url, Some(&body)).await?;
+        Ok(())
+    }
+
+    /// Parse a card.action.trigger event into an ApprovalCallback.
+    fn parse_card_action(&self, event: &Value) -> Option<ApprovalCallback> {
+        let event_type = event["header"]["event_type"].as_str()?;
+        if event_type != "card.action.trigger" {
+            return None;
+        }
+
+        let action = &event["event"]["action"];
+        let value = &action["value"];
+        let request_id = value["rid"].as_str()?.to_string();
+        let decision = value["action"].as_str()?.to_string();
+        let user_id = event["event"]["operator"]["open_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        Some(ApprovalCallback { request_id, decision, user_id })
+    }
+
     /// Handle event payload extracted from a protobuf data frame.
     /// The payload is a JSON string containing the Feishu event data.
     async fn handle_event_payload(&self, payload_str: &str) {
@@ -905,6 +1087,15 @@ impl FeishuAdapter {
             ulog_debug!("[feishu] No header or data in event payload");
             return;
         };
+
+        // Handle card.action.trigger (approval button clicks)
+        if let Some(cb) = self.parse_card_action(&event) {
+            ulog_info!("[feishu] Card action: decision={}, rid={}", cb.decision, &cb.request_id[..cb.request_id.len().min(16)]);
+            if self.approval_tx.send(cb).await.is_err() {
+                ulog_error!("[feishu] Approval channel closed");
+            }
+            return;
+        }
 
         if let Some(msg) = self.parse_im_event(&event) {
             // Dedup check: skip if message_id was seen within TTL
@@ -1015,5 +1206,24 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
 
     fn max_message_length(&self) -> usize {
         30000
+    }
+
+    async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> super::adapter::AdapterResult<Option<String>> {
+        self.send_approval_card(chat_id, request_id, tool_name, tool_input).await
+    }
+
+    async fn update_approval_status(
+        &self,
+        _chat_id: &str,
+        message_id: &str,
+        status: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        self.update_approval_status(message_id, status).await
     }
 }
