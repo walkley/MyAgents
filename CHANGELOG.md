@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.20] - 2026-02-19
+
+### Added
+- **飞书 Bot 平台支持**：新增飞书适配器（WebSocket 长连接 + protobuf），与 Telegram 共享多 Bot 架构、Session 路由、消息缓冲
+- **IM Bot 交互式权限审批**：非 fullAgency 模式下，工具权限请求通过飞书交互卡片 / Telegram Inline Keyboard 展示，用户点击按钮或回复文本完成审批
+- **ZenMux 预设供应商**：新增 ZenMux 云服务商聚合平台，支持 9 个预设模型（zenmux/auto、Gemini 3.1 Pro、Claude Sonnet/Opus 4.6 等）
+
+### Fixed
+- **飞书 WebSocket 事件重放**：新增数据帧 ACK 机制，dedup 缓存 TTL 从 30 分钟延长至 24 小时，防止断连重连后消息重复处理
+- **IM Bot 停止按钮状态回弹**：`toggleBot` 写盘后未调用 `refreshConfig()` 同步 React 状态，导致轮询 fallback 到过期的 `cfg.enabled`
+- **工具输入截断 UTF-8 panic**：权限审批卡片中 `tool_input[..200]` 字节截断改为 `char_indices().nth(200)` 字符安全截断
+
+---
+
 ## [0.1.19] - 2026-02-18
 
 ### Added

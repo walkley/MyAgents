@@ -21,7 +21,7 @@ export default function ImBotList({
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { providers, apiKeys } = useConfig();
+    const { providers, apiKeys, refreshConfig } = useConfig();
     const isMountedRef = useRef(true);
 
     // Bot statuses: botId → status
@@ -141,6 +141,7 @@ export default function ImBotList({
                     });
                     toastRef.current.success(`${cfg.name} 已停止`);
                     await updateImBotConfig(botId, { enabled: false });
+                    await refreshConfig();
                 }
             } else {
                 const hasCredentials = cfg.platform === 'feishu'
@@ -156,6 +157,7 @@ export default function ImBotList({
                     setStatuses(prev => ({ ...prev, [botId]: newStatus }));
                     toastRef.current.success(`${cfg.name} 已启动`);
                     await updateImBotConfig(botId, { enabled: true });
+                    await refreshConfig();
                 }
             }
         } catch (err) {
@@ -171,7 +173,7 @@ export default function ImBotList({
                 });
             }
         }
-    }, [buildStartParams]);
+    }, [buildStartParams, refreshConfig]);
 
     // Platform icon
     const platformIcon = (platform: string) => {

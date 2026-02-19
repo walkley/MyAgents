@@ -177,6 +177,24 @@ function isValidAskUserQuestionInput(input: unknown): boolean {
 | 超时时间 | 5 分钟 | 10 分钟（用户需要思考） |
 | 用途 | 权限控制 | 收集用户输入 |
 
+## IM Bot 权限审批转发
+
+Desktop 端的权限请求通过 SSE `broadcast()` 发送到前端。IM Bot 端无法接收 SSE 广播，因此 `checkToolPermission()` 额外通过 `imStreamCallback('permission-request')` 将请求注入 IM SSE 流。
+
+```typescript
+// agent-session.ts: checkToolPermission()
+broadcast('permission:request', { requestId, toolName, input: inputPreview });
+
+// 同时转发给 IM 流（如果活跃）
+if (imStreamCallback) {
+  imStreamCallback('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
+}
+```
+
+Rust 侧 `stream_to_im()` 解析 `permission-request` 事件后，通过 `adapter.send_approval_card()` 发送飞书交互卡片或 Telegram Inline Keyboard。用户审批结果通过 `POST /api/im/permission-response` 回传到 `handlePermissionResponse()`，复用与 Desktop 端相同的 Promise 解除机制。
+
+详见 [IM 集成架构 §2.11](./im_integration_architecture.md)。
+
 ## 最佳实践
 
 1. **始终处理 AbortSignal** - SDK 可能在任何时候中止请求
