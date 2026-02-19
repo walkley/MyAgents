@@ -551,7 +551,7 @@ impl TelegramAdapter {
 
         let short_id = self.make_short_id(request_id).await;
         let text = format!(
-            "🔒 *工具使用请求*\n\n*工具*: `{}`\n*内容*: `{}`\n\n也可直接回复「同意」「始终同意」或「拒绝」",
+            "🔒 *工具使用请求*\n\n*工具*: `{}`\n*内容*: `{}`\n\n也可直接回复「允许」「始终允许」或「拒绝」",
             tool_name, display_input
         );
 
@@ -576,7 +576,7 @@ impl TelegramAdapter {
             Err(TelegramError::MarkdownParseError) => {
                 // Fallback without markdown
                 let plain_text = format!(
-                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n也可直接回复「同意」「始终同意」或「拒绝」",
+                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n也可直接回复「允许」「始终允许」或「拒绝」",
                     tool_name, display_input
                 );
                 let body = json!({

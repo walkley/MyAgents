@@ -905,7 +905,7 @@ impl FeishuAdapter {
     pub async fn send_approval_card(
         &self,
         chat_id: &str,
-        request_id: &str,
+        _request_id: &str,
         tool_name: &str,
         tool_input: &str,
     ) -> Result<Option<String>, String> {
@@ -934,36 +934,14 @@ impl FeishuAdapter {
                     }
                 },
                 {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": { "tag": "plain_text", "content": "✅ 允许" },
-                            "type": "primary",
-                            "value": { "action": "allow_once", "rid": request_id }
-                        },
-                        {
-                            "tag": "button",
-                            "text": { "tag": "plain_text", "content": "✅ 始终允许" },
-                            "type": "default",
-                            "value": { "action": "always_allow", "rid": request_id }
-                        },
-                        {
-                            "tag": "button",
-                            "text": { "tag": "plain_text", "content": "❌ 拒绝" },
-                            "type": "danger",
-                            "value": { "action": "deny", "rid": request_id }
-                        }
-                    ]
+                    "tag": "hr"
                 },
                 {
-                    "tag": "note",
-                    "elements": [
-                        {
-                            "tag": "plain_text",
-                            "content": "也可直接回复「同意」「始终同意」或「拒绝」"
-                        }
-                    ]
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "回复「**允许**」允许执行\n回复「**始终允许**」本次会话全部允许\n回复「**拒绝**」拒绝执行"
+                    }
                 }
             ]
         });
@@ -984,7 +962,7 @@ impl FeishuAdapter {
                 ulog_warn!("[feishu] Approval card failed: {}, falling back to text", e);
                 // Fallback: send as plain text message with instructions
                 let fallback_text = format!(
-                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n回复「同意」允许执行\n回复「始终同意」本次会话全部允许\n回复「拒绝」拒绝执行",
+                    "🔒 工具使用请求\n\n工具: {}\n内容: {}\n\n回复「允许」允许执行\n回复「始终允许」本次会话全部允许\n回复「拒绝」拒绝执行",
                     tool_name, display_input
                 );
                 self.send_text_message(chat_id, &fallback_text).await

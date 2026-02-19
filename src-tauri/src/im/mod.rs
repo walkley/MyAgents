@@ -831,8 +831,8 @@ pub async fn start_im_bot<R: Runtime>(
 
                     // ── Text-based approval commands (fallback for platforms without card callbacks) ──
                     let approval_decision = match text.as_str() {
-                        "同意" | "approve" => Some("allow_once"),
-                        "始终同意" | "always approve" => Some("always_allow"),
+                        "允许" | "同意" | "approve" => Some("allow_once"),
+                        "始终允许" | "始终同意" | "always approve" => Some("always_allow"),
                         "拒绝" | "deny" => Some("deny"),
                         _ => None,
                     };
@@ -1495,7 +1495,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                             String::new()
                         }
                     };
-                    // Always insert pending approval so text fallback ("同意"/"拒绝") works
+                    // Always insert pending approval so text fallback ("允许"/"拒绝") works
                     {
                         let mut guard = pending_approvals.lock().await;
                         // Cleanup expired entries (Sidecar auto-denies after 10 min)
