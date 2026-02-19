@@ -1,12 +1,15 @@
 import React, { useCallback, useState } from 'react';
 import { Plus, X } from 'lucide-react';
+import type { ImPlatform } from '../../../../shared/types/im';
 
 export default function WhitelistManager({
     users,
     onChange,
+    platform = 'telegram',
 }: {
     users: string[];
     onChange: (users: string[]) => void;
+    platform?: ImPlatform;
 }) {
     const [newUser, setNewUser] = useState('');
 
@@ -25,6 +28,38 @@ export default function WhitelistManager({
         onChange(users.filter(u => u !== user));
     }, [users, onChange]);
 
+    // Feishu: read-only display (users can't know their Open ID)
+    if (platform === 'feishu') {
+        return (
+            <div className="space-y-3">
+                <label className="text-sm font-medium text-[var(--ink)]">已绑定用户</label>
+                {users.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                        {users.map((user) => (
+                            <span
+                                key={user}
+                                className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-contrast)] px-2.5 py-1 text-xs text-[var(--ink)]"
+                            >
+                                {user}
+                                <button
+                                    onClick={() => handleRemove(user)}
+                                    className="rounded-full p-0.5 text-[var(--ink-muted)] hover:text-[var(--error)]"
+                                >
+                                    <X className="h-3 w-3" />
+                                </button>
+                            </span>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="text-xs text-[var(--ink-muted)]">
+                        暂无绑定用户。启动 Bot 后，通过口令绑定添加用户。
+                    </p>
+                )}
+            </div>
+        );
+    }
+
+    // Telegram: manual add input + tag list
     return (
         <div className="space-y-3">
             <label className="text-sm font-medium text-[var(--ink)]">手动添加用户白名单</label>

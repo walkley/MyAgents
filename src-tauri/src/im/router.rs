@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Runtime};
+use crate::{ulog_info, ulog_warn};
 
 use crate::sidecar::{
     ensure_session_sidecar, release_session_sidecar, ManagedSidecarManager, SidecarOwner,
@@ -124,7 +125,7 @@ impl SessionRouter {
                 if self.check_sidecar_health(ps.sidecar_port).await {
                     return Ok((ps.sidecar_port, false));
                 }
-                log::warn!(
+                ulog_warn!(
                     "[im-router] Sidecar on port {} unhealthy for {}",
                     ps.sidecar_port,
                     session_key
@@ -171,7 +172,7 @@ impl SessionRouter {
         .map_err(|e| format!("Failed to ensure Sidecar: {}", e))?;
 
         let port = result.port;
-        log::info!(
+        ulog_info!(
             "[im-router] Sidecar ready for {} on port {} (workspace={})",
             session_key,
             port,
@@ -330,7 +331,7 @@ impl SessionRouter {
 
         for key in idle_keys {
             if let Some(ps) = self.peer_sessions.get_mut(&key) {
-                log::info!(
+                ulog_info!(
                     "[im-router] Collecting idle session {} (inactive for {}s, preserving session_id={})",
                     key,
                     now.duration_since(ps.last_active).as_secs(),
@@ -396,7 +397,7 @@ impl SessionRouter {
             );
         }
         if !sessions.is_empty() {
-            log::info!(
+            ulog_info!(
                 "[im-router] Restored {} peer session(s) from previous run (workspace={})",
                 sessions.len(),
                 self.default_workspace.display(),
@@ -416,8 +417,8 @@ impl SessionRouter {
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
             match self.http_client.post(&url).json(&json!({ "model": model_id })).send().await {
-                Ok(_) => log::info!("[im-router] Synced model {} to port {}", model_id, port),
-                Err(e) => log::warn!("[im-router] Failed to sync model to port {}: {}", port, e),
+                Ok(_) => ulog_info!("[im-router] Synced model {} to port {}", model_id, port),
+                Err(e) => ulog_warn!("[im-router] Failed to sync model to port {}: {}", port, e),
             }
         }
 
@@ -426,8 +427,8 @@ impl SessionRouter {
             if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
                 let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
                 match self.http_client.post(&url).json(&json!({ "servers": servers })).send().await {
-                    Ok(_) => log::info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
-                    Err(e) => log::warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
+                    Ok(_) => ulog_info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
+                    Err(e) => ulog_warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
                 }
             }
         }
@@ -447,7 +448,7 @@ impl SessionRouter {
 
 /// Parse session key into (source_type, source_id)
 pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
-    // Format: im:telegram:{private|group}:{id}
+    // Format: im:{platform}:{private|group}:{id}
     let parts: Vec<&str> = session_key.split(':').collect();
     if parts.len() >= 4 {
         let source_type = match parts[2] {

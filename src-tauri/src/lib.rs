@@ -163,6 +163,9 @@ pub fn run() {
                     .build(),
             )?;
 
+            // Initialize global AppHandle for unified logging (IM module etc.)
+            logger::init_app_handle(app.handle().clone());
+
             // Setup system tray
             if let Err(e) = tray::setup_tray(app) {
                 log::error!("[App] Failed to setup system tray: {}", e);

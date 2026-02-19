@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod buffer;
+pub mod feishu;
 pub mod health;
 pub mod router;
 pub mod telegram;
@@ -17,18 +18,104 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
+use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use tokio::sync::{watch, Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::sidecar::ManagedSidecarManager;
 
 use buffer::MessageBuffer;
+use feishu::FeishuAdapter;
 use health::HealthManager;
 use router::{
     create_sidecar_stream_client, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
-use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImSourceType, ImStatus};
+use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
+
+/// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
+enum AnyAdapter {
+    Telegram(Arc<TelegramAdapter>),
+    Feishu(Arc<FeishuAdapter>),
+}
+
+impl adapter::ImAdapter for AnyAdapter {
+    async fn verify_connection(&self) -> adapter::AdapterResult<String> {
+        match self {
+            Self::Telegram(a) => a.verify_connection().await,
+            Self::Feishu(a) => a.verify_connection().await,
+        }
+    }
+    async fn register_commands(&self) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.register_commands().await,
+            Self::Feishu(a) => a.register_commands().await,
+        }
+    }
+    async fn listen_loop(&self, shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+        match self {
+            Self::Telegram(a) => a.listen_loop(shutdown_rx).await,
+            Self::Feishu(a) => a.listen_loop(shutdown_rx).await,
+        }
+    }
+    async fn send_message(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
+            Self::Feishu(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
+        }
+    }
+    async fn ack_received(&self, chat_id: &str, message_id: &str) {
+        match self {
+            Self::Telegram(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
+            Self::Feishu(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
+        }
+    }
+    async fn ack_processing(&self, chat_id: &str, message_id: &str) {
+        match self {
+            Self::Telegram(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
+            Self::Feishu(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
+        }
+    }
+    async fn ack_clear(&self, chat_id: &str, message_id: &str) {
+        match self {
+            Self::Telegram(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+            Self::Feishu(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+        }
+    }
+    async fn send_typing(&self, chat_id: &str) {
+        match self {
+            Self::Telegram(a) => a.send_typing(chat_id).await,
+            Self::Feishu(a) => a.send_typing(chat_id).await,
+        }
+    }
+}
+
+impl adapter::ImStreamAdapter for AnyAdapter {
+    async fn send_message_returning_id(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<Option<String>> {
+        match self {
+            Self::Telegram(a) => a.send_message_returning_id(chat_id, text).await,
+            Self::Feishu(a) => a.send_message_returning_id(chat_id, text).await,
+        }
+    }
+    async fn edit_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
+            Self::Feishu(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
+        }
+    }
+    async fn delete_message(&self, chat_id: &str, message_id: &str) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
+            Self::Feishu(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
+        }
+    }
+    fn max_message_length(&self) -> usize {
+        match self {
+            Self::Telegram(a) => a.max_message_length(),
+            Self::Feishu(a) => a.max_message_length(),
+        }
+    }
+}
 
 /// Managed state for the IM Bot subsystem (multi-bot: bot_id → instance)
 pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
@@ -37,6 +124,8 @@ pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
 pub struct ImBotInstance {
     #[allow(dead_code)]
     bot_id: String,
+    #[allow(dead_code)]
+    platform: ImPlatform,
     shutdown_tx: watch::Sender<bool>,
     health: Arc<HealthManager>,
     router: Arc<Mutex<SessionRouter>>,
@@ -67,7 +156,7 @@ pub async fn start_im_bot<R: Runtime>(
 
     // Gracefully stop existing instance for this bot_id if running
     if let Some(instance) = im_guard.remove(&bot_id) {
-        log::info!("[im] Stopping existing IM Bot {} before restart", bot_id);
+        ulog_info!("[im] Stopping existing IM Bot {} before restart", bot_id);
         let _ = instance.shutdown_tx.send(true);
         // Wait briefly for in-flight messages (shorter timeout for restart)
         let _ = tokio::time::timeout(
@@ -83,7 +172,7 @@ pub async fn start_im_bot<R: Runtime>(
         instance.health.reset().await;
     }
 
-    log::info!(
+    ulog_info!(
         "[im] Starting IM Bot {} (configured workspace: {:?})",
         bot_id,
         config.default_workspace_path,
@@ -109,7 +198,7 @@ pub async fn start_im_bot<R: Runtime>(
                 })
         });
 
-    log::info!("[im] Resolved workspace: {}", default_workspace.display());
+    ulog_info!("[im] Resolved workspace: {}", default_workspace.display());
 
     // Initialize components (per-bot paths)
     let health_path = health::bot_health_path(&bot_id);
@@ -138,29 +227,38 @@ pub async fn start_im_bot<R: Runtime>(
     // Generate bind code for QR code binding flow
     let bind_code = format!("BIND_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    // Create Telegram adapter (implements ImAdapter trait)
+    // Create platform adapter (implements ImAdapter + ImStreamAdapter traits)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
     let msg_tx_for_reinjection = msg_tx.clone(); // For media group merge re-injection
-    let adapter: Arc<TelegramAdapter> = Arc::new(TelegramAdapter::new(
-        &config,
-        msg_tx,
-        Arc::clone(&allowed_users),
-    ));
+    let adapter: Arc<AnyAdapter> = match config.platform {
+        ImPlatform::Telegram => Arc::new(AnyAdapter::Telegram(Arc::new(TelegramAdapter::new(
+            &config,
+            msg_tx,
+            Arc::clone(&allowed_users),
+        )))),
+        ImPlatform::Feishu => Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
+            &config,
+            msg_tx,
+            Arc::clone(&allowed_users),
+        )))),
+    };
 
     // Verify bot connection via ImAdapter trait
     use adapter::ImAdapter;
     match adapter.verify_connection().await {
         Ok(display_name) => {
-            log::info!("[im] Bot verified: {}", display_name);
-            // Extract username from display_name (format: "@username")
-            let username = display_name.strip_prefix('@').map(|s| s.to_string());
-            health.set_bot_username(username).await;
+            ulog_info!("[im] Bot verified: {}", display_name);
+            // Store bot display name. Telegram returns "@username", Feishu returns plain name.
+            let username = display_name.strip_prefix('@')
+                .map(|s| s.to_string())
+                .unwrap_or(display_name);
+            health.set_bot_username(Some(username)).await;
             health.set_status(ImStatus::Online).await;
             health.set_error(None).await;
         }
         Err(e) => {
             let err_msg = format!("Bot connection verification failed: {}", e);
-            log::error!("[im] {}", err_msg);
+            ulog_error!("[im] {}", err_msg);
             health.set_status(ImStatus::Error).await;
             health.set_error(Some(err_msg.clone())).await;
             let _ = health.persist().await;
@@ -170,7 +268,7 @@ pub async fn start_im_bot<R: Runtime>(
 
     // Register platform commands via ImAdapter trait
     if let Err(e) = adapter.register_commands().await {
-        log::warn!("[im] Failed to register bot commands: {}", e);
+        ulog_warn!("[im] Failed to register bot commands: {}", e);
     }
 
     // Start health persist loop
@@ -242,7 +340,7 @@ pub async fn start_im_bot<R: Runtime>(
 
         /// Merge buffered media group messages into one combined message
         fn merge_media_group(mut messages: Vec<ImMessage>) -> ImMessage {
-            messages.sort_by_key(|m| m.message_id);
+            messages.sort_by_key(|m| m.message_id.parse::<i64>().unwrap_or(0));
             let mut base = messages.remove(0);
             // Use first non-empty text as caption
             if base.text.is_empty() {
@@ -275,13 +373,13 @@ pub async fn start_im_bot<R: Runtime>(
                     ImAttachmentType::File => {
                         let target_dir = workspace_path.join("myagents_files");
                         if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
-                            log::error!("[im] Failed to create myagents_files dir: {}", e);
+                            ulog_error!("[im] Failed to create myagents_files dir: {}", e);
                             continue;
                         }
                         let target_path = target_dir.join(&attachment.file_name);
                         let final_path = auto_rename_path(&target_path);
                         if let Err(e) = tokio::fs::write(&final_path, &attachment.data).await {
-                            log::error!("[im] Failed to save file: {}", e);
+                            ulog_error!("[im] Failed to save file: {}", e);
                             continue;
                         }
                         let relative = format!(
@@ -289,7 +387,7 @@ pub async fn start_im_bot<R: Runtime>(
                             final_path.file_name().unwrap().to_string_lossy()
                         );
                         file_refs.push(format!("@{}", relative));
-                        log::info!(
+                        ulog_info!(
                             "[im] Saved file attachment: {} ({} bytes)",
                             relative,
                             attachment.data.len()
@@ -297,7 +395,7 @@ pub async fn start_im_bot<R: Runtime>(
                     }
                     ImAttachmentType::Image => {
                         if attachment.data.len() > MAX_IMAGE_ENCODE_SIZE {
-                            log::warn!(
+                            ulog_warn!(
                                 "[im] Image too large for base64 encoding: {} ({} bytes, max {})",
                                 attachment.file_name,
                                 attachment.data.len(),
@@ -313,7 +411,7 @@ pub async fn start_im_bot<R: Runtime>(
                             "mimeType": attachment.mime_type,
                             "data": b64,
                         }));
-                        log::info!(
+                        ulog_info!(
                             "[im] Encoded image attachment: {} ({} bytes)",
                             attachment.file_name,
                             attachment.data.len()
@@ -359,31 +457,47 @@ pub async fn start_im_bot<R: Runtime>(
                     }
                     let session_key = SessionRouter::session_key(&msg);
                     let chat_id = msg.chat_id.clone();
-                    let message_id = msg.message_id;
+                    let message_id = msg.message_id.clone();
                     let text = msg.text.trim().to_string();
 
                     // ── Bot command dispatch (inline — fast, no Sidecar I/O) ──
 
                     // QR code binding: /start BIND_xxxx
-                    if text.starts_with("/start BIND_") {
-                        let code = text.strip_prefix("/start ").unwrap_or("");
+                    // Bind code handling: Telegram uses "/start BIND_xxx", Feishu uses plain "BIND_xxx"
+                    let is_telegram_bind = text.starts_with("/start BIND_");
+                    let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
+                    if is_telegram_bind || is_feishu_bind {
+                        let code = if is_telegram_bind {
+                            text.strip_prefix("/start ").unwrap_or("")
+                        } else {
+                            text.as_str()
+                        };
                         if code == bind_code_for_loop {
                             // Valid bind — add user to whitelist
-                            let user_id_str = msg.sender_id.to_string();
+                            let user_id_str = msg.sender_id.clone();
                             let display = msg.sender_name.clone().unwrap_or_else(|| user_id_str.clone());
 
                             {
                                 let mut users = allowed_users_for_loop.write().await;
                                 if !users.contains(&user_id_str) {
                                     users.push(user_id_str.clone());
-                                    log::info!("[im] User bound via QR: {} ({})", display, user_id_str);
+                                    ulog_info!("[im] User bound via QR: {} ({})", display, user_id_str);
                                 }
+                            }
+
+                            // Persist to config.json directly (doesn't rely on frontend being mounted)
+                            {
+                                let bid = bot_id_for_loop.clone();
+                                let uid = user_id_str.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    persist_bound_user_to_config(&bid, &uid);
+                                });
                             }
 
                             let reply = format!("✅ 绑定成功！你好 {}，现在可以直接和我聊天了。", display);
                             let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
 
-                            // Emit Tauri event so frontend can persist the new user to config
+                            // Emit Tauri event so frontend can update UI (toast, refresh list)
                             let _ = app_clone.emit(
                                 "im:user-bound",
                                 serde_json::json!({
@@ -418,13 +532,13 @@ pub async fn start_im_bot<R: Runtime>(
                     }
 
                     if text == "/new" {
-                        adapter_for_reply.ack_processing(&chat_id, message_id).await;
+                        adapter_for_reply.ack_processing(&chat_id, &message_id).await;
                         let result = router_clone
                             .lock()
                             .await
                             .reset_session(&session_key, &app_clone, &manager_clone)
                             .await;
-                        adapter_for_reply.ack_clear(&chat_id, message_id).await;
+                        adapter_for_reply.ack_clear(&chat_id, &message_id).await;
                         match result {
                             Ok(new_id) => {
                                 let reply = format!("✅ 已创建新对话 ({})", &new_id[..8.min(new_id.len())]);
@@ -438,7 +552,7 @@ pub async fn start_im_bot<R: Runtime>(
                     }
 
                     if text.starts_with("/workspace") {
-                        adapter_for_reply.ack_processing(&chat_id, message_id).await;
+                        adapter_for_reply.ack_processing(&chat_id, &message_id).await;
                         let path_arg = text.strip_prefix("/workspace").unwrap_or("").trim();
                         let reply = if path_arg.is_empty() {
                             // Show current workspace
@@ -461,13 +575,13 @@ pub async fn start_im_bot<R: Runtime>(
                                 Err(e) => format!("❌ 切换失败: {}", e),
                             }
                         };
-                        adapter_for_reply.ack_clear(&chat_id, message_id).await;
+                        adapter_for_reply.ack_clear(&chat_id, &message_id).await;
                         let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
                         continue;
                     }
 
                     if text == "/status" {
-                        adapter_for_reply.ack_processing(&chat_id, message_id).await;
+                        adapter_for_reply.ack_processing(&chat_id, &message_id).await;
                         let router = router_clone.lock().await;
                         let sessions = router.active_sessions();
                         let current = sessions.iter().find(|s| s.session_key == session_key);
@@ -481,7 +595,7 @@ pub async fn start_im_bot<R: Runtime>(
                                 session_key
                             ),
                         };
-                        adapter_for_reply.ack_clear(&chat_id, message_id).await;
+                        adapter_for_reply.ack_clear(&chat_id, &message_id).await;
                         let _ = adapter_for_reply.send_message(&chat_id, &reply).await;
                         continue;
                     }
@@ -523,7 +637,7 @@ pub async fn start_im_bot<R: Runtime>(
                                 drop(router);
                                 // Attempt to sync if we can find the port
                                 // For now, the model will be picked up when session restarts
-                                log::info!("[im] /model: set to {} (session={})", model_id, s.session_key);
+                                ulog_info!("[im] /model: set to {} (session={})", model_id, s.session_key);
                             }
                             let _ = adapter_for_reply.send_message(
                                 &chat_id,
@@ -619,7 +733,7 @@ pub async fn start_im_bot<R: Runtime>(
                     }
 
                     // ── Regular message → spawn concurrent task ──────────
-                    log::info!(
+                    ulog_info!(
                         "[im] Routing message from {} to Sidecar (session_key={}, {} chars)",
                         msg.sender_name.as_deref().unwrap_or("?"),
                         session_key,
@@ -656,13 +770,13 @@ pub async fn start_im_bot<R: Runtime>(
                         let _permit = match task_sem.clone().acquire_owned().await {
                             Ok(p) => p,
                             Err(_) => {
-                                log::error!("[im] Semaphore closed");
+                                ulog_error!("[im] Semaphore closed");
                                 return;
                             }
                         };
 
                         // 3. ACK + typing indicator
-                        task_adapter.ack_processing(&chat_id, message_id).await;
+                        task_adapter.ack_processing(&chat_id, &message_id).await;
                         task_adapter.send_typing(&chat_id).await;
 
                         // 4. Ensure Sidecar is running (brief router lock)
@@ -674,7 +788,7 @@ pub async fn start_im_bot<R: Runtime>(
                         {
                             Ok(result) => result,
                             Err(e) => {
-                                task_adapter.ack_clear(&chat_id, message_id).await;
+                                task_adapter.ack_clear(&chat_id, &message_id).await;
                                 let _ = task_adapter
                                     .send_message(&chat_id, &format!("⚠️ {}", e))
                                     .await;
@@ -717,11 +831,11 @@ pub async fn start_im_bot<R: Runtime>(
                         } else {
                             Some(&image_payloads)
                         };
-                        let session_id = match stream_to_telegram(
+                        let session_id = match stream_to_im(
                             &task_stream_client,
                             port,
                             &msg,
-                            &task_adapter,
+                            task_adapter.as_ref(),
                             &chat_id,
                             &task_perm,
                             penv.as_ref(),
@@ -730,7 +844,7 @@ pub async fn start_im_bot<R: Runtime>(
                         .await
                         {
                             Ok(sid) => {
-                                log::info!(
+                                ulog_info!(
                                     "[im] Stream complete for {} (session={})",
                                     session_key,
                                     sid.as_deref().unwrap_or("?"),
@@ -738,7 +852,7 @@ pub async fn start_im_bot<R: Runtime>(
                                 sid
                             }
                             Err(e) => {
-                                log::error!("[im] Stream error for {}: {}", session_key, e);
+                                ulog_error!("[im] Stream error for {}: {}", session_key, e);
                                 if e.should_buffer() {
                                     task_buffer.lock().await.push(&msg);
                                 }
@@ -748,13 +862,13 @@ pub async fn start_im_bot<R: Runtime>(
                                 let _ = task_adapter
                                     .send_message(&chat_id, &format!("⚠️ 处理消息时出错: {}", e))
                                     .await;
-                                task_adapter.ack_clear(&chat_id, message_id).await;
+                                task_adapter.ack_clear(&chat_id, &message_id).await;
                                 return;
                             }
                         };
 
                         // 6. Clear ACK reaction
-                        task_adapter.ack_clear(&chat_id, message_id).await;
+                        task_adapter.ack_clear(&chat_id, &message_id).await;
 
                         // 7. Update session state
                         task_router
@@ -780,11 +894,11 @@ pub async fn start_im_bot<R: Runtime>(
                                 Some(buffered) => {
                                     let buf_chat_id = buffered.chat_id.clone();
                                     let buf_msg = buffered.to_im_message();
-                                    match stream_to_telegram(
+                                    match stream_to_im(
                                         &task_stream_client,
                                         port,
                                         &buf_msg,
-                                        &task_adapter,
+                                        task_adapter.as_ref(),
                                         &buf_chat_id,
                                         &task_perm,
                                         penv.as_ref(),
@@ -814,7 +928,7 @@ pub async fn start_im_bot<R: Runtime>(
                             }
                         }
                         if replayed > 0 {
-                            log::info!("[im] Replayed {} buffered messages", replayed);
+                            ulog_info!("[im] Replayed {} buffered messages", replayed);
                         }
 
                         // Update buffer count in health
@@ -839,7 +953,7 @@ pub async fn start_im_bot<R: Runtime>(
                 // Drain completed tasks (handle panics)
                 Some(result) = in_flight.join_next(), if !in_flight.is_empty() => {
                     if let Err(e) = result {
-                        log::error!("[im] Message task panicked: {}", e);
+                        ulog_error!("[im] Message task panicked: {}", e);
                     }
                 }
                 // Flush expired media groups
@@ -853,28 +967,28 @@ pub async fn start_im_bot<R: Runtime>(
                     for group_id in expired_keys {
                         if let Some(entry) = media_groups.remove(&group_id) {
                             let merged = merge_media_group(entry.messages);
-                            log::info!(
+                            ulog_info!(
                                 "[im] Flushed media group {} ({} attachments)",
                                 group_id,
                                 merged.attachments.len(),
                             );
                             // Re-inject merged message into the channel
                             if msg_tx_for_reinjection.send(merged).await.is_err() {
-                                log::error!("[im] Failed to re-inject merged media group");
+                                ulog_error!("[im] Failed to re-inject merged media group");
                             }
                         }
                     }
                 }
                 _ = process_shutdown_rx.changed() => {
                     if *process_shutdown_rx.borrow() {
-                        log::info!(
+                        ulog_info!(
                             "[im] Processing loop shutting down, waiting for {} in-flight task(s)",
                             in_flight.len(),
                         );
                         // Drain remaining in-flight tasks before exiting
                         while let Some(result) = in_flight.join_next().await {
                             if let Err(e) = result {
-                                log::error!("[im] Task panicked during shutdown: {}", e);
+                                ulog_error!("[im] Task panicked during shutdown: {}", e);
                             }
                         }
                         break;
@@ -907,11 +1021,17 @@ pub async fn start_im_bot<R: Runtime>(
 
     let started_at = Instant::now();
 
-    // Build status (include bind URL for QR code flow)
+    // Build status (include bind URL for QR code flow / bind code for text bind)
     let bot_username_for_url = health.get_state().await.bot_username.clone();
-    let bind_url = bot_username_for_url
-        .as_ref()
-        .map(|u| format!("https://t.me/{}?start={}", u, bind_code));
+    let (bind_url, bind_code_for_status) = match config.platform {
+        ImPlatform::Telegram => {
+            let url = bot_username_for_url
+                .as_ref()
+                .map(|u| format!("https://t.me/{}?start={}", u, bind_code));
+            (url, None)
+        }
+        ImPlatform::Feishu => (None, Some(bind_code.clone())),
+    };
 
     let status = ImBotStatus {
         bot_username: bot_username_for_url,
@@ -923,11 +1043,14 @@ pub async fn start_im_bot<R: Runtime>(
         restart_count: 0,
         buffered_messages: buffer.lock().await.len(),
         bind_url,
+        bind_code: bind_code_for_status,
     };
 
     // Store instance
+    let instance_platform = config.platform.clone();
     im_guard.insert(bot_id.clone(), ImBotInstance {
         bot_id,
+        platform: instance_platform,
         shutdown_tx,
         health: Arc::clone(&health),
         router,
@@ -950,7 +1073,7 @@ pub async fn stop_im_bot(
     let mut im_guard = im_state.lock().await;
 
     if let Some(instance) = im_guard.remove(bot_id) {
-        log::info!("[im] Stopping IM Bot {}...", bot_id);
+        ulog_info!("[im] Stopping IM Bot {}...", bot_id);
 
         // Signal shutdown to all loops
         let _ = instance.shutdown_tx.send(true);
@@ -962,13 +1085,13 @@ pub async fn stop_im_bot(
         )
         .await
         {
-            Ok(_) => log::info!("[im] Processing loop exited gracefully"),
-            Err(_) => log::warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
+            Ok(_) => ulog_info!("[im] Processing loop exited gracefully"),
+            Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
         }
 
         // Persist remaining buffered messages to disk
         if let Err(e) = instance.buffer.lock().await.save_to_disk() {
-            log::warn!("[im] Failed to persist buffer on shutdown: {}", e);
+            ulog_warn!("[im] Failed to persist buffer on shutdown: {}", e);
         }
 
         // Persist active sessions in health state before releasing Sidecars
@@ -988,9 +1111,9 @@ pub async fn stop_im_bot(
         instance.health.set_status(ImStatus::Stopped).await;
         let _ = instance.health.persist().await;
 
-        log::info!("[im] IM Bot stopped");
+        ulog_info!("[im] IM Bot stopped");
     } else {
-        log::debug!("[im] IM Bot was not running");
+        ulog_debug!("[im] IM Bot was not running");
     }
 
     Ok(())
@@ -1006,10 +1129,14 @@ pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotS
         status.buffered_messages = instance.buffer.lock().await.len();
         status.active_sessions = instance.router.lock().await.active_sessions();
 
-        let bind_url = status
-            .bot_username
-            .as_ref()
-            .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
+        let (bind_url, bind_code_opt) = match instance.platform {
+            ImPlatform::Telegram => {
+                let url = status.bot_username.as_ref()
+                    .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
+                (url, None)
+            }
+            ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
+        };
 
         ImBotStatus {
             bot_username: status.bot_username,
@@ -1021,6 +1148,7 @@ pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotS
             restart_count: status.restart_count,
             buffered_messages: status.buffered_messages,
             bind_url,
+            bind_code: bind_code_opt,
         }
     } else {
         ImBotStatus::default()
@@ -1038,10 +1166,14 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
         status.buffered_messages = instance.buffer.lock().await.len();
         status.active_sessions = instance.router.lock().await.active_sessions();
 
-        let bind_url = status
-            .bot_username
-            .as_ref()
-            .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
+        let (bind_url, bind_code_opt) = match instance.platform {
+            ImPlatform::Telegram => {
+                let url = status.bot_username.as_ref()
+                    .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
+                (url, None)
+            }
+            ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
+        };
 
         result.insert(bot_id.clone(), ImBotStatus {
             bot_username: status.bot_username,
@@ -1053,31 +1185,34 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
             restart_count: status.restart_count,
             buffered_messages: status.buffered_messages,
             bind_url,
+            bind_code: bind_code_opt,
         });
     }
 
     result
 }
 
-// ===== SSE Stream → Telegram Draft ====
+// ===== SSE Stream → IM Draft ====
 
-/// Consume Sidecar SSE stream, managing Telegram draft message lifecycle.
-/// Each text block → independent Telegram message (streamed draft edits).
+/// Consume Sidecar SSE stream, managing draft message lifecycle for any IM platform.
+/// Each text block → independent IM message (streamed draft edits).
 /// Returns sessionId on success.
-async fn stream_to_telegram(
+async fn stream_to_im<A: adapter::ImStreamAdapter>(
     client: &Client,
     port: u16,
     msg: &ImMessage,
-    adapter: &TelegramAdapter,
+    adapter: &A,
     chat_id: &str,
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
-    let source = match msg.source_type {
-        ImSourceType::Private => "telegram_private",
-        ImSourceType::Group => "telegram_group",
+    let source = match (&msg.platform, &msg.source_type) {
+        (ImPlatform::Telegram, ImSourceType::Private) => "telegram_private",
+        (ImPlatform::Telegram, ImSourceType::Group) => "telegram_group",
+        (ImPlatform::Feishu, ImSourceType::Private) => "feishu_private",
+        (ImPlatform::Feishu, ImSourceType::Group) => "feishu_group",
     };
     let mut body = json!({
         "message": msg.text,
@@ -1095,7 +1230,7 @@ async fn stream_to_telegram(
         }
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
-    log::info!("[im-stream] POST {} (SSE)", url);
+    ulog_info!("[im-stream] POST {} (SSE)", url);
 
     let response = client
         .post(&url)
@@ -1116,7 +1251,7 @@ async fn stream_to_telegram(
 
     // Current text block state (reset on each block-end)
     let mut block_text = String::new();
-    let mut draft_id: Option<i64> = None;
+    let mut draft_id: Option<String> = None;
     let mut last_edit = Instant::now();
     let mut any_text_sent = false;
 
@@ -1152,9 +1287,10 @@ async fn stream_to_telegram(
                     if let Some(text) = json_val["text"].as_str() {
                         block_text = text.to_string();
 
-                        // First text received → send draft message
-                        if draft_id.is_none() && !block_text.is_empty() {
-                            match adapter.send_message(chat_id, "🤖 生成中...").await {
+                        // First meaningful text received → send draft message
+                        // Skip whitespace-only blocks (API spacer blocks before thinking)
+                        if draft_id.is_none() && !block_text.trim().is_empty() {
+                            match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
                                 Ok(Some(id)) => {
                                     draft_id = Some(id);
                                     last_edit = Instant::now();
@@ -1164,10 +1300,12 @@ async fn stream_to_telegram(
                         }
 
                         // Throttled edit (≥1s interval)
-                        if let Some(did) = draft_id {
+                        if let Some(ref did) = draft_id {
                             if last_edit.elapsed() >= THROTTLE {
-                                let display = format_draft_text(&block_text);
-                                let _ = adapter.edit_message(chat_id, did, &display).await;
+                                let display = format_draft_text(&block_text, adapter.max_message_length());
+                                if let Err(e) = adapter.edit_message(chat_id, did, &display).await {
+                                    ulog_warn!("[im] Draft edit failed: {}", e);
+                                }
                                 last_edit = Instant::now();
                             }
                         }
@@ -1178,18 +1316,28 @@ async fn stream_to_telegram(
                         .as_str()
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| block_text.clone());
-                    finalize_block(adapter, chat_id, draft_id, &final_text).await;
-                    any_text_sent = true;
+                    // Skip whitespace-only blocks (API spacer blocks emitted before thinking)
+                    if final_text.trim().is_empty() {
+                        // Delete orphaned draft if one was created
+                        if let Some(ref did) = draft_id {
+                            let _ = adapter.delete_message(chat_id, did).await;
+                        }
+                    } else {
+                        finalize_block(adapter, chat_id, draft_id.clone(), &final_text).await;
+                        any_text_sent = true;
+                    }
                     // Reset current block state
                     block_text.clear();
                     draft_id = None;
                 }
                 "complete" => {
                     session_id = json_val["sessionId"].as_str().map(String::from);
-                    // Flush any remaining block text
-                    if !block_text.is_empty() {
-                        finalize_block(adapter, chat_id, draft_id, &block_text).await;
+                    // Flush any remaining block text (skip whitespace-only)
+                    if !block_text.trim().is_empty() {
+                        finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
                         any_text_sent = true;
+                    } else if let Some(ref did) = draft_id {
+                        let _ = adapter.delete_message(chat_id, did).await;
                     }
                     if !any_text_sent {
                         let _ = adapter.send_message(chat_id, "(No response)").await;
@@ -1201,7 +1349,7 @@ async fn stream_to_telegram(
                         .as_str()
                         .unwrap_or("Unknown error");
                     // Delete current draft if exists
-                    if let Some(did) = draft_id {
+                    if let Some(ref did) = draft_id {
                         let _ = adapter.delete_message(chat_id, did).await;
                     }
                     let _ = adapter
@@ -1214,10 +1362,12 @@ async fn stream_to_telegram(
         }
     }
 
-    // Stream disconnected unexpectedly → flush any remaining text
-    if !block_text.is_empty() {
-        finalize_block(adapter, chat_id, draft_id, &block_text).await;
+    // Stream disconnected unexpectedly → flush any remaining text (skip whitespace-only)
+    if !block_text.trim().is_empty() {
+        finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
         any_text_sent = true;
+    } else if let Some(ref did) = draft_id {
+        let _ = adapter.delete_message(chat_id, did).await;
     }
     if !any_text_sent {
         let _ = adapter.send_message(chat_id, "(No response)").await;
@@ -1226,20 +1376,23 @@ async fn stream_to_telegram(
 }
 
 /// Finalize a text block's draft message.
-/// Telegram's message limit is 4096 UTF-16 code units; we use char count as a
-/// close approximation (exact for BMP characters which cover CJK + ASCII).
-async fn finalize_block(
-    adapter: &TelegramAdapter,
+/// Uses adapter.max_message_length() to determine the platform's limit.
+async fn finalize_block<A: adapter::ImStreamAdapter>(
+    adapter: &A,
     chat_id: &str,
-    draft_id: Option<i64>,
+    draft_id: Option<String>,
     text: &str,
 ) {
     if text.is_empty() {
         return;
     }
-    if let Some(did) = draft_id {
-        if text.chars().count() <= 4096 {
-            let _ = adapter.edit_message(chat_id, did, text).await;
+    let max_len = adapter.max_message_length();
+    if let Some(ref did) = draft_id {
+        if text.chars().count() <= max_len {
+            if let Err(e) = adapter.edit_message(chat_id, did, text).await {
+                ulog_warn!("[im] Finalize edit failed: {}, sending as new message", e);
+                let _ = adapter.send_message(chat_id, text).await;
+            }
         } else {
             // Too long for edit: delete draft → send_message (auto-splits)
             let _ = adapter.delete_message(chat_id, did).await;
@@ -1252,12 +1405,14 @@ async fn finalize_block(
 }
 
 /// Format draft display text (truncate + generating indicator).
-fn format_draft_text(text: &str) -> String {
-    if text.chars().count() > 4000 {
-        // Find a safe char boundary at ~4000 chars
+/// `max_len` is the platform's message limit (e.g. 4096 for Telegram, 30000 for Feishu).
+fn format_draft_text(text: &str, max_len: usize) -> String {
+    // Reserve space for the suffix
+    let limit = max_len.saturating_sub(100);
+    if text.chars().count() > limit {
         let truncate_at = text
             .char_indices()
-            .nth(4000)
+            .nth(limit)
             .map(|(i, _)| i)
             .unwrap_or(text.len());
         format!("{}...\n\n_⏳ 生成中_", &text[..truncate_at])
@@ -1342,11 +1497,18 @@ pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
         let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
 
         for (bot_id, config) in configs {
-            if config.enabled && !config.bot_token.is_empty() {
-                log::info!("[im] Auto-starting bot: {}", bot_id);
+            let has_credentials = match config.platform {
+                ImPlatform::Telegram => !config.bot_token.is_empty(),
+                ImPlatform::Feishu => {
+                    config.feishu_app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                        && config.feishu_app_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                }
+            };
+            if config.enabled && has_credentials {
+                ulog_info!("[im] Auto-starting bot: {}", bot_id);
                 match start_im_bot(&app_handle, &im_state, &sidecar_manager, bot_id.clone(), config).await {
-                    Ok(_) => log::info!("[im] Auto-start succeeded for bot {}", bot_id),
-                    Err(e) => log::warn!("[im] Auto-start failed for bot {}: {}", bot_id, e),
+                    Ok(_) => ulog_info!("[im] Auto-start succeeded for bot {}", bot_id),
+                    Err(e) => ulog_warn!("[im] Auto-start failed for bot {}: {}", bot_id, e),
                 }
             }
         }
@@ -1384,13 +1546,13 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
             Ok(c) => c,
             Err(e) => {
                 let label = ["main", "bak", "tmp"][i];
-                log::warn!("[im] Config {} file corrupted, trying next: {}", label, e);
+                ulog_warn!("[im] Config {} file corrupted, trying next: {}", label, e);
                 continue;
             }
         };
 
         if i > 0 {
-            log::warn!("[im] Recovered config from {} file", ["main", "bak", "tmp"][i]);
+            ulog_warn!("[im] Recovered config from {} file", ["main", "bak", "tmp"][i]);
         }
 
         return parse_bot_entries(app_config);
@@ -1417,6 +1579,105 @@ fn parse_bot_entries(app_config: PartialAppConfig) -> Vec<(String, ImConfig)> {
     }
 }
 
+/// Persist a newly bound user to `~/.myagents/config.json`.
+///
+/// This runs directly from the Rust bind handler so the user is saved to disk
+/// regardless of whether the frontend UI is mounted. Uses the same atomic write
+/// pattern as the frontend `safeWriteJson` (write .tmp → backup .bak → rename).
+fn persist_bound_user_to_config(bot_id: &str, user_id: &str) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ulog_warn!("[im] Cannot persist bound user: home dir not found");
+            return;
+        }
+    };
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    // Read current config as generic JSON to preserve all fields
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ulog_warn!("[im] Cannot read config.json to persist bound user: {}", e);
+            return;
+        }
+    };
+    let mut config: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            ulog_warn!("[im] Cannot parse config.json to persist bound user: {}", e);
+            return;
+        }
+    };
+
+    // Find the bot entry and add user to allowedUsers
+    let modified = if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+        if let Some(bot) = bots.iter_mut().find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+            let users = bot.get_mut("allowedUsers")
+                .and_then(|v| v.as_array_mut());
+            match users {
+                Some(arr) => {
+                    let user_val = serde_json::Value::String(user_id.to_string());
+                    if !arr.contains(&user_val) {
+                        arr.push(user_val);
+                        true
+                    } else {
+                        false // already present
+                    }
+                }
+                None => {
+                    // allowedUsers field missing or not an array — create it
+                    bot["allowedUsers"] = serde_json::json!([user_id]);
+                    true
+                }
+            }
+        } else {
+            ulog_warn!("[im] Bot {} not found in config.json, cannot persist bound user", bot_id);
+            false
+        }
+    } else {
+        ulog_warn!("[im] No imBotConfigs in config.json, cannot persist bound user");
+        false
+    };
+
+    if !modified {
+        return;
+    }
+
+    // Atomic write: .tmp → backup .bak → rename .tmp → main
+    let new_content = match serde_json::to_string_pretty(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            ulog_warn!("[im] Cannot serialize config for bound user: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(&tmp_path, &new_content) {
+        ulog_warn!("[im] Cannot write tmp config for bound user: {}", e);
+        return;
+    }
+
+    // Backup current → .bak (best-effort)
+    if config_path.exists() {
+        let _ = std::fs::rename(&config_path, &bak_path);
+    }
+
+    // Rename .tmp → main
+    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+        ulog_warn!("[im] Cannot rename tmp config for bound user: {}", e);
+        // Rollback: .bak → main
+        if bak_path.exists() && !config_path.exists() {
+            let _ = std::fs::rename(&bak_path, &config_path);
+        }
+        return;
+    }
+
+    ulog_info!("[im] Persisted bound user {} for bot {} to config.json", user_id, bot_id);
+}
+
 // ===== Tauri Commands =====
 
 #[tauri::command]
@@ -1434,13 +1695,23 @@ pub async fn cmd_start_im_bot(
     providerEnvJson: Option<String>,
     mcpServersJson: Option<String>,
     availableProvidersJson: Option<String>,
+    platform: Option<String>,
+    feishuAppId: Option<String>,
+    feishuAppSecret: Option<String>,
 ) -> Result<ImBotStatus, String> {
+    let im_platform = match platform.as_deref() {
+        Some("feishu") => ImPlatform::Feishu,
+        _ => ImPlatform::Telegram,
+    };
     let config = ImConfig {
+        platform: im_platform,
         bot_token: botToken,
         allowed_users: allowedUsers,
         permission_mode: permissionMode,
         default_workspace_path: Some(workspacePath),
         enabled: true,
+        feishu_app_id: feishuAppId,
+        feishu_app_secret: feishuAppSecret,
         model,
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,

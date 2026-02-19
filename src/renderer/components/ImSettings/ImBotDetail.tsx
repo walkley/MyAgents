@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, FolderOpen, Loader2, Plus, Power, PowerOff, Trash2 } from 'lucide-react';
+import { ArrowLeft, ChevronDown, FolderOpen, Loader2, Plus, Power, PowerOff, Trash2 } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
@@ -9,10 +9,12 @@ import { getAllMcpServers, getEnabledMcpServerIds, loadAppConfig, removeImBotCon
 import { getProviderModels, type McpServerDefinition } from '@/config/types';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
+import FeishuCredentialInput from './components/FeishuCredentialInput';
 import WhitelistManager from './components/WhitelistManager';
 import PermissionModeSelect from './components/PermissionModeSelect';
 import BotStatusPanel from './components/BotStatusPanel';
 import BindQrPanel from './components/BindQrPanel';
+import BindCodePanel from './components/BindCodePanel';
 import AiConfigCard from './components/AiConfigCard';
 import McpToolsCard from './components/McpToolsCard';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
@@ -48,6 +50,20 @@ export default function ImBotDetail({
     const [toggling, setToggling] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [credentialsExpanded, setCredentialsExpanded] = useState<boolean | null>(null);
+    const [bindingExpanded, setBindingExpanded] = useState<boolean | null>(null);
+
+    // Whether credentials are filled
+    const hasCredentials = botConfig
+        ? botConfig.platform === 'feishu'
+            ? !!(botConfig.feishuAppId && botConfig.feishuAppSecret)
+            : !!botConfig.botToken
+        : false;
+    const hasUsers = (botConfig?.allowedUsers.length ?? 0) > 0;
+
+    // Auto-collapse: default collapsed when filled, expanded when empty
+    const isCredentialsExpanded = credentialsExpanded ?? !hasCredentials;
+    const isBindingExpanded = bindingExpanded ?? !hasUsers;
 
     useEffect(() => {
         return () => { isMountedRef.current = false; };
@@ -80,12 +96,16 @@ export default function ImBotDetail({
                     if (status.botUsername) {
                         setBotUsername(status.botUsername);
                         setVerifyStatus('valid');
-                        // Auto-sync bot name from Telegram username (once)
+                        // Auto-sync bot name from platform username (once)
                         if (!nameSyncedRef.current) {
                             nameSyncedRef.current = true;
-                            const tgName = `@${status.botUsername}`;
-                            if (botConfigRef.current?.name !== tgName) {
-                                updateImBotConfig(botId, { name: tgName }).catch(err => {
+                            // Telegram uses @username, Feishu uses plain app name
+                            const platform = botConfigRef.current?.platform;
+                            const displayName = platform === 'telegram'
+                                ? `@${status.botUsername}`
+                                : status.botUsername;
+                            if (botConfigRef.current?.name !== displayName) {
+                                updateImBotConfig(botId, { name: displayName }).catch(err => {
                                     console.error('[ImBotDetail] Failed to sync bot name:', err);
                                 });
                             }
@@ -120,7 +140,8 @@ export default function ImBotDetail({
         return () => { cancelled = true; };
     }, []);
 
-    // Listen for user-bound events
+    // Listen for user-bound events — Rust already persists to config.json,
+    // so we just refresh React state from disk and show a toast.
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         let cancelled = false;
@@ -132,13 +153,10 @@ export default function ImBotDetail({
                 if (!isMountedRef.current || event.payload.botId !== botId) return;
                 const { userId, username } = event.payload;
                 const displayName = username || userId;
-                const currentUsers = botConfigRef.current?.allowedUsers ?? [];
 
-                if (!currentUsers.includes(userId) && (!username || !currentUsers.includes(username))) {
-                    const newUsers = [...currentUsers, userId];
-                    saveBotField({ allowedUsers: newUsers });
-                    toastRef.current.success(`用户 ${displayName} 已通过二维码绑定`);
-                }
+                toastRef.current.success(`用户 ${displayName} 已通过二维码绑定`);
+                // Refresh config from disk to pick up Rust-persisted bound user
+                refreshConfig();
             }).then(fn => {
                 if (cancelled) fn();
                 else unlisten = fn;
@@ -149,7 +167,7 @@ export default function ImBotDetail({
             cancelled = true;
             unlisten?.();
         };
-    }, [botId, saveBotField]);
+    }, [botId, refreshConfig]);
 
     // Build start params
     const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
@@ -191,6 +209,9 @@ export default function ImBotDetail({
             providerEnvJson: providerEnvJson || null,
             mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
             availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
+            platform: cfg.platform,
+            feishuAppId: cfg.feishuAppId || null,
+            feishuAppSecret: cfg.feishuAppSecret || null,
         };
     }, [providers, apiKeys]);
 
@@ -215,8 +236,12 @@ export default function ImBotDetail({
                     await saveBotField({ enabled: false });
                 }
             } else {
-                if (!botConfigRef.current.botToken) {
-                    toastRef.current.error('请先配置 Bot Token');
+                const cfg = botConfigRef.current;
+                const hasCredentials = cfg.platform === 'feishu'
+                    ? (cfg.feishuAppId && cfg.feishuAppSecret)
+                    : cfg.botToken;
+                if (!hasCredentials) {
+                    toastRef.current.error(cfg.platform === 'feishu' ? '请先配置应用凭证' : '请先配置 Bot Token');
                     setToggling(false);
                     return;
                 }
@@ -250,9 +275,8 @@ export default function ImBotDetail({
                 }
             }
 
-            // Remove from config and sync React state before navigating back
+            // Remove from config — onBack (goToList) handles refreshConfig + view switch
             await removeImBotConfig(botId);
-            await refreshConfig();
             toastRef.current.success('Bot 已删除');
             onBack();
         } catch (err) {
@@ -262,7 +286,7 @@ export default function ImBotDetail({
                 setShowDeleteConfirm(false);
             }
         }
-    }, [botId, onBack, refreshConfig]);
+    }, [botId, onBack]);
 
     // Computed values
     const availableMcpServers = useMemo(
@@ -352,11 +376,11 @@ export default function ImBotDetail({
                     >
                         <ArrowLeft className="h-4 w-4" />
                     </button>
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">{botUsername ? `@${botUsername}` : botConfig.name}</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">{botUsername ? (botConfig.platform === 'telegram' ? `@${botUsername}` : botUsername) : botConfig.name}</h2>
                 </div>
                 <button
                     onClick={toggleBot}
-                    disabled={toggling || (!botConfig.botToken && !isRunning)}
+                    disabled={toggling || (!(botConfig.platform === 'feishu' ? (botConfig.feishuAppId && botConfig.feishuAppSecret) : botConfig.botToken) && !isRunning)}
                     className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                         isRunning
                             ? 'bg-[var(--error-bg)] text-[var(--error)] hover:brightness-95'
@@ -377,39 +401,93 @@ export default function ImBotDetail({
             {/* Bot Status */}
             <BotStatusPanel status={botStatus} />
 
-            {/* Telegram Bot Token */}
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">Telegram Bot</h3>
-                <BotTokenInput
-                    value={botConfig.botToken}
-                    onChange={(token) => {
-                        const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId);
-                        if (others.some(b => b.botToken === token)) {
-                            toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
-                            return;
-                        }
-                        saveBotField({ botToken: token });
-                    }}
-                    verifyStatus={verifyStatus}
-                    botUsername={botUsername}
-                />
+            {/* Platform credentials */}
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
+                <button
+                    type="button"
+                    onClick={() => setCredentialsExpanded(!isCredentialsExpanded)}
+                    className="flex w-full items-center justify-between p-5"
+                >
+                    <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-semibold text-[var(--ink)]">
+                            {botConfig.platform === 'feishu' ? '飞书应用凭证' : 'Telegram Bot'}
+                        </h3>
+                        {!isCredentialsExpanded && hasCredentials && (
+                            <span className="text-xs text-[var(--success)]">
+                                {botUsername ? `已验证: ${botUsername}` : '已配置'}
+                            </span>
+                        )}
+                    </div>
+                    <ChevronDown className={`h-4 w-4 text-[var(--ink-muted)] transition-transform ${isCredentialsExpanded ? '' : '-rotate-90'}`} />
+                </button>
+                {isCredentialsExpanded && (
+                    <div className="px-5 pb-5">
+                        {botConfig.platform === 'feishu' ? (
+                            <FeishuCredentialInput
+                                appId={botConfig.feishuAppId ?? ''}
+                                appSecret={botConfig.feishuAppSecret ?? ''}
+                                onAppIdChange={(appId) => saveBotField({ feishuAppId: appId })}
+                                onAppSecretChange={(appSecret) => saveBotField({ feishuAppSecret: appSecret })}
+                                verifyStatus={verifyStatus}
+                                botName={botUsername}
+                            />
+                        ) : (
+                            <BotTokenInput
+                                value={botConfig.botToken}
+                                onChange={(token) => {
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId);
+                                    if (others.some(b => b.botToken === token)) {
+                                        toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
+                                        return;
+                                    }
+                                    saveBotField({ botToken: token });
+                                }}
+                                verifyStatus={verifyStatus}
+                                botUsername={botUsername}
+                            />
+                        )}
+                    </div>
+                )}
             </div>
 
-            {/* User binding: QR + whitelist */}
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">用户绑定</h3>
-                <div className="space-y-5">
-                    {isRunning && botStatus?.bindUrl && (
-                        <BindQrPanel
-                            bindUrl={botStatus.bindUrl}
-                            hasWhitelistUsers={botConfig.allowedUsers.length > 0}
+            {/* User binding */}
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
+                <button
+                    type="button"
+                    onClick={() => setBindingExpanded(!isBindingExpanded)}
+                    className="flex w-full items-center justify-between p-5"
+                >
+                    <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-semibold text-[var(--ink)]">用户绑定</h3>
+                        {!isBindingExpanded && hasUsers && (
+                            <span className="text-xs text-[var(--ink-muted)]">
+                                {botConfig.allowedUsers.length} 个用户
+                            </span>
+                        )}
+                    </div>
+                    <ChevronDown className={`h-4 w-4 text-[var(--ink-muted)] transition-transform ${isBindingExpanded ? '' : '-rotate-90'}`} />
+                </button>
+                {isBindingExpanded && (
+                    <div className="space-y-5 px-5 pb-5">
+                        {isRunning && botConfig.platform === 'feishu' && botStatus?.bindCode && (
+                            <BindCodePanel
+                                bindCode={botStatus.bindCode}
+                                hasWhitelistUsers={botConfig.allowedUsers.length > 0}
+                            />
+                        )}
+                        {isRunning && botConfig.platform === 'telegram' && botStatus?.bindUrl && (
+                            <BindQrPanel
+                                bindUrl={botStatus.bindUrl}
+                                hasWhitelistUsers={botConfig.allowedUsers.length > 0}
+                            />
+                        )}
+                        <WhitelistManager
+                            users={botConfig.allowedUsers}
+                            onChange={(users) => saveBotField({ allowedUsers: users })}
+                            platform={botConfig.platform}
                         />
-                    )}
-                    <WhitelistManager
-                        users={botConfig.allowedUsers}
-                        onChange={(users) => saveBotField({ allowedUsers: users })}
-                    />
-                </div>
+                    </div>
+                )}
             </div>
 
             {/* Default Workspace */}

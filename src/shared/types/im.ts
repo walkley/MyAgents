@@ -1,9 +1,14 @@
 // IM Bot integration types (shared between frontend, backend, and Rust)
 
 /**
+ * IM platform type
+ */
+export type ImPlatform = 'telegram' | 'feishu';
+
+/**
  * Message source identifier
  */
-export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group';
+export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
 
 /**
  * Metadata attached to each message indicating its origin
@@ -29,14 +34,18 @@ export type ImSourceType = 'private' | 'group';
  * Designed for multi-bot architecture (currently single bot)
  */
 export interface ImBotConfig {
-  // ===== Multi-bot identity (future-proof) =====
+  // ===== Multi-bot identity =====
   id: string;                   // Bot unique ID (UUID)
   name: string;                 // User-defined name (e.g. "工作助手")
-  platform: 'telegram';         // Platform type (future: 'feishu', 'slack')
+  platform: ImPlatform;         // Platform type
 
   // ===== Platform connection =====
-  botToken: string;
-  allowedUsers: string[];       // Telegram user_id or username
+  botToken: string;             // Telegram Bot Token
+  allowedUsers: string[];       // user_id or username
+
+  // ===== Feishu-specific credentials =====
+  feishuAppId?: string;
+  feishuAppSecret?: string;
 
   // ===== AI config (independent from Desktop client) =====
   providerId?: string;          // Provider ID (e.g. 'anthropic-sub', 'deepseek')
@@ -80,6 +89,8 @@ export interface ImBotStatus {
   bufferedMessages: number;
   /** Deep link URL for QR code (e.g. https://t.me/BotName?start=BIND_xxxx) */
   bindUrl?: string;
+  /** Plain bind code for platforms without deep links (e.g. Feishu) */
+  bindCode?: string;
 }
 
 /**
@@ -96,7 +107,7 @@ export interface ImConversation {
 }
 
 /**
- * Default IM Bot configuration
+ * Default Telegram Bot configuration
  */
 export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
   id: '',           // Generated on creation
@@ -113,12 +124,33 @@ export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
 };
 
 /**
+ * Default Feishu Bot configuration
+ */
+export const DEFAULT_FEISHU_BOT_CONFIG: ImBotConfig = {
+  id: '',           // Generated on creation
+  name: '飞书 Bot',
+  platform: 'feishu',
+  botToken: '',     // Not used for Feishu
+  allowedUsers: [],
+  feishuAppId: '',
+  feishuAppSecret: '',
+  providerId: undefined,
+  model: undefined,
+  permissionMode: 'fullAgency',
+  mcpEnabledServers: undefined,
+  enabled: false,
+  setupCompleted: false,
+};
+
+/**
  * Source display labels
  */
 export const SOURCE_LABELS: Record<MessageSource, string> = {
   desktop: '桌面端',
   telegram_private: 'Telegram 私聊',
   telegram_group: 'Telegram 群聊',
+  feishu_private: '飞书私聊',
+  feishu_group: '飞书群聊',
 };
 
 /**
@@ -128,4 +160,6 @@ export const SOURCE_ICONS: Record<MessageSource, string> = {
   desktop: '🖥',
   telegram_private: '📱',
   telegram_group: '👥',
+  feishu_private: '📱',
+  feishu_group: '👥',
 };

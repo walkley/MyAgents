@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use super::types::{BufferedMessage, ImMessage, MessageBufferData};
+use crate::{ulog_info, ulog_warn, ulog_debug};
 
 /// Max buffered messages before oldest are dropped
 const MAX_BUFFER_SIZE: usize = 100;
@@ -29,20 +30,20 @@ impl MessageBuffer {
                 Ok(content) => {
                     match serde_json::from_str::<MessageBufferData>(&content) {
                         Ok(data) => {
-                            log::info!(
+                            ulog_info!(
                                 "[im-buffer] Loaded {} buffered messages from disk",
                                 data.messages.len()
                             );
                             data.messages
                         }
                         Err(e) => {
-                            log::warn!("[im-buffer] Failed to parse buffer file: {}", e);
+                            ulog_warn!("[im-buffer] Failed to parse buffer file: {}", e);
                             VecDeque::new()
                         }
                     }
                 }
                 Err(e) => {
-                    log::warn!("[im-buffer] Failed to read buffer file: {}", e);
+                    ulog_warn!("[im-buffer] Failed to read buffer file: {}", e);
                     VecDeque::new()
                 }
             }
@@ -62,7 +63,7 @@ impl MessageBuffer {
         if self.queue.len() >= MAX_BUFFER_SIZE {
             let dropped = self.queue.pop_front();
             if let Some(d) = dropped {
-                log::warn!(
+                ulog_warn!(
                     "[im-buffer] Buffer full, dropping oldest message from chat {}",
                     d.chat_id
                 );
@@ -119,7 +120,7 @@ impl MessageBuffer {
 
         std::fs::write(path, json).map_err(|e| format!("Failed to write buffer: {}", e))?;
 
-        log::debug!(
+        ulog_debug!(
             "[im-buffer] Persisted {} messages to disk",
             self.queue.len()
         );

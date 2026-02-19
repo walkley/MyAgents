@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
 use super::types::{ImActiveSession, ImHealthState, ImStatus};
+use crate::{ulog_info, ulog_warn};
 
 /// Persist interval (seconds)
 const PERSIST_INTERVAL_SECS: u64 = 5;
@@ -144,12 +145,12 @@ impl HealthManager {
                             let _ = std::fs::create_dir_all(parent);
                         }
                         if let Err(e) = std::fs::write(&persist_path, &json) {
-                            log::warn!("[im-health] Failed to persist: {}", e);
+                            ulog_warn!("[im-health] Failed to persist: {}", e);
                         }
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
-                            log::info!("[im-health] Persist loop shutting down");
+                            ulog_info!("[im-health] Persist loop shutting down");
                             break;
                         }
                     }
@@ -214,16 +215,16 @@ fn migrate_single_file(legacy: &PathBuf, target: &PathBuf, label: &str) {
     }
     match std::fs::copy(legacy, target) {
         Ok(_) => {
-            log::info!("[im-health] Migrated legacy {} file to {:?}", label, target);
+            ulog_info!("[im-health] Migrated legacy {} file to {:?}", label, target);
             // Mark as migrated so no other bot copies the same file
             let migrated = legacy.with_extension("json.migrated");
             if let Err(e) = std::fs::rename(legacy, &migrated) {
-                log::warn!("[im-health] Failed to rename legacy {} to .migrated: {}", label, e);
+                ulog_warn!("[im-health] Failed to rename legacy {} to .migrated: {}", label, e);
                 // Non-fatal: worst case another bot copies the same state (harmless for health)
             }
         }
         Err(e) => {
-            log::warn!("[im-health] Failed to migrate legacy {} file: {}", label, e);
+            ulog_warn!("[im-health] Failed to migrate legacy {} file: {}", label, e);
         }
     }
 }
