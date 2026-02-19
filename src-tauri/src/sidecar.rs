@@ -1300,6 +1300,12 @@ pub fn start_tab_sidecar<R: Runtime>(
         log::debug!("[sidecar] No proxy configured, using direct connection");
     }
 
+    // Inject management API port for Bun→Rust IPC (v0.1.21)
+    let mgmt_port = crate::management_api::get_management_port();
+    if mgmt_port > 0 {
+        cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
+    }
+
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -1718,6 +1724,12 @@ fn create_new_session_sidecar<R: Runtime>(
                 log::error!("[sidecar] Invalid proxy configuration: {}", e);
             }
         }
+    }
+
+    // Inject management API port for Bun→Rust IPC (v0.1.21)
+    let mgmt_port = crate::management_api::get_management_port();
+    if mgmt_port > 0 {
+        cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
 
     cmd.stdout(Stdio::piped())

@@ -6,7 +6,7 @@ import {
     loadAppConfig,
     loadProjects,
     removeProject as removeProjectService,
-    saveAppConfig,
+    atomicModifyConfig,
     updateProject as updateProjectService,
     patchProject as patchProjectService,
     touchProject as touchProjectService,
@@ -149,11 +149,10 @@ export function useConfig(): UseConfigResult {
     }, [load]);
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
-        // Load latest config from disk to avoid overwriting concurrent changes (e.g., API keys)
-        const latestConfig = await loadAppConfig();
-        const newConfig = { ...latestConfig, ...updates };
+        // Atomic read-modify-write: read + merge + write all happen inside the config lock,
+        // preventing races with other atomic config operations (e.g., updateImBotConfig).
+        const newConfig = await atomicModifyConfig(config => ({ ...config, ...updates }));
         setConfig(newConfig);
-        await saveAppConfig(newConfig);
         // Notify other components (e.g., App.tsx) that config has changed
         if (typeof window !== 'undefined') {
             window.dispatchEvent(new Event(CUSTOM_EVENTS.CONFIG_CHANGED));
@@ -304,29 +303,32 @@ export function useConfig(): UseConfigResult {
 
     // Save custom models for a preset provider
     const savePresetCustomModels = useCallback(async (providerId: string, models: ModelEntity[]) => {
-        // Load latest config from disk to avoid overwriting concurrent changes (e.g., API keys)
-        const latestConfig = await loadAppConfig();
-        const newPresetCustomModels = {
-            ...latestConfig.presetCustomModels,
-            [providerId]: models,
-        };
-        // Remove entry if empty
-        if (models.length === 0) {
-            delete newPresetCustomModels[providerId];
-        }
-        const newConfig = { ...latestConfig, presetCustomModels: newPresetCustomModels };
+        const newConfig = await atomicModifyConfig(config => {
+            const newPresetCustomModels = {
+                ...config.presetCustomModels,
+                [providerId]: models,
+            };
+            if (models.length === 0) {
+                delete newPresetCustomModels[providerId];
+            }
+            return { ...config, presetCustomModels: newPresetCustomModels };
+        });
         setConfig(newConfig);
-        await saveAppConfig(newConfig);
     }, []);
 
     // Remove a single custom model from a preset provider
     const removePresetCustomModel = useCallback(async (providerId: string, modelId: string) => {
-        // Load latest config from disk to get current presetCustomModels
-        const latestConfig = await loadAppConfig();
-        const currentModels = latestConfig.presetCustomModels?.[providerId] ?? [];
-        const newModels = currentModels.filter(m => m.model !== modelId);
-        await savePresetCustomModels(providerId, newModels);
-    }, [savePresetCustomModels]);
+        const newConfig = await atomicModifyConfig(config => {
+            const currentModels = config.presetCustomModels?.[providerId] ?? [];
+            const newModels = currentModels.filter(m => m.model !== modelId);
+            const newPresetCustomModels = { ...config.presetCustomModels, [providerId]: newModels };
+            if (newModels.length === 0) {
+                delete newPresetCustomModels[providerId];
+            }
+            return { ...config, presetCustomModels: newPresetCustomModels };
+        });
+        setConfig(newConfig);
+    }, []);
 
     return {
         config,

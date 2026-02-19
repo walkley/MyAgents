@@ -17,6 +17,7 @@ import BindQrPanel from './components/BindQrPanel';
 import BindCodePanel from './components/BindCodePanel';
 import AiConfigCard from './components/AiConfigCard';
 import McpToolsCard from './components/McpToolsCard';
+import HeartbeatConfigCard from './components/HeartbeatConfigCard';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
 
 export default function ImBotDetail({
@@ -96,8 +97,8 @@ export default function ImBotDetail({
                     if (status.botUsername) {
                         setBotUsername(status.botUsername);
                         setVerifyStatus('valid');
-                        // Auto-sync bot name from platform username (once)
-                        if (!nameSyncedRef.current) {
+                        // Auto-sync bot name from platform username (once, skip during toggle)
+                        if (!nameSyncedRef.current && !togglingRef.current) {
                             nameSyncedRef.current = true;
                             // Telegram uses @username, Feishu uses plain app name
                             const platform = botConfigRef.current?.platform;
@@ -212,6 +213,7 @@ export default function ImBotDetail({
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
+            heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
         };
     }, [providers, apiKeys]);
 
@@ -568,6 +570,26 @@ export default function ImBotDetail({
                         ? current.filter(id => id !== serverId)
                         : [...current, serverId];
                     saveBotField({ mcpEnabledServers: updated.length > 0 ? updated : undefined });
+                }}
+            />
+
+            {/* Heartbeat Config */}
+            <HeartbeatConfigCard
+                heartbeat={botConfig.heartbeat}
+                onChange={async (hb) => {
+                    await saveBotField({ heartbeat: hb });
+                    // Hot-update running heartbeat config
+                    if (isRunning && isTauriEnvironment() && hb) {
+                        try {
+                            const { invoke } = await import('@tauri-apps/api/core');
+                            await invoke('cmd_update_heartbeat_config', {
+                                botId,
+                                heartbeatConfigJson: JSON.stringify(hb),
+                            });
+                        } catch {
+                            // Non-critical: config will take effect on next bot restart
+                        }
+                    }
                 }}
             />
 

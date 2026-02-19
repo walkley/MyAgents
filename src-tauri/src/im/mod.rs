@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod buffer;
 pub mod feishu;
 pub mod health;
+pub mod heartbeat;
 pub mod router;
 pub mod telegram;
 pub mod types;
@@ -54,7 +55,7 @@ use telegram::TelegramAdapter;
 use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
 
 /// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
-enum AnyAdapter {
+pub(crate) enum AnyAdapter {
     Telegram(Arc<TelegramAdapter>),
     Feishu(Arc<FeishuAdapter>),
 }
@@ -171,15 +172,28 @@ pub struct ImBotInstance {
     platform: ImPlatform,
     shutdown_tx: watch::Sender<bool>,
     health: Arc<HealthManager>,
-    router: Arc<Mutex<SessionRouter>>,
+    pub(crate) router: Arc<Mutex<SessionRouter>>,
     buffer: Arc<Mutex<MessageBuffer>>,
     started_at: Instant,
     /// JoinHandle for the message processing loop (awaited during graceful shutdown)
     process_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the platform listen loop (long-poll / WebSocket)
+    poll_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the approval callback handler
+    approval_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the health persist loop
+    health_handle: tokio::task::JoinHandle<()>,
     /// Random bind code for QR code binding flow
     bind_code: String,
     #[allow(dead_code)]
     config: ImConfig,
+    // ===== Heartbeat (v0.1.21) =====
+    /// Heartbeat runner background task handle
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Channel to send wake signals to heartbeat runner
+    pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
+    /// Shared heartbeat config (for hot updates)
+    heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
 }
 
 /// Create the managed IM Bot state (called during app setup)
@@ -201,12 +215,18 @@ pub async fn start_im_bot<R: Runtime>(
     if let Some(instance) = im_guard.remove(&bot_id) {
         ulog_info!("[im] Stopping existing IM Bot {} before restart", bot_id);
         let _ = instance.shutdown_tx.send(true);
+        instance.poll_handle.abort(); // Cancel in-flight long-poll immediately
         // Wait briefly for in-flight messages (shorter timeout for restart)
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             instance.process_handle,
         )
         .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
+        if let Some(hb) = instance.heartbeat_handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), hb).await;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
         instance
             .router
             .lock()
@@ -322,12 +342,12 @@ pub async fn start_im_bot<R: Runtime>(
     }
 
     // Start health persist loop
-    let _health_handle = health.start_persist_loop(shutdown_rx.clone());
+    let health_handle = health.start_persist_loop(shutdown_rx.clone());
 
     // Start Telegram long-poll loop
     let adapter_clone = Arc::clone(&adapter);
     let poll_shutdown_rx = shutdown_rx.clone();
-    let _poll_handle = tokio::spawn(async move {
+    let poll_handle = tokio::spawn(async move {
         adapter_clone.listen_loop(poll_shutdown_rx).await;
     });
 
@@ -335,8 +355,20 @@ pub async fn start_im_bot<R: Runtime>(
     let pending_approvals_for_handler = Arc::clone(&pending_approvals);
     let adapter_for_approval = Arc::clone(&adapter);
     let approval_client = Client::new();
-    let _approval_handle = tokio::spawn(async move {
-        while let Some(cb) = approval_rx.recv().await {
+    let mut approval_shutdown_rx = shutdown_rx.clone();
+    let approval_handle = tokio::spawn(async move {
+        loop {
+            let cb = tokio::select! {
+                msg = approval_rx.recv() => match msg {
+                    Some(cb) => cb,
+                    None => break, // Channel closed
+                },
+                _ = approval_shutdown_rx.changed() => {
+                    if *approval_shutdown_rx.borrow() { break; }
+                    continue;
+                }
+            };
+
             let pending = pending_approvals_for_handler.lock().await.remove(&cb.request_id);
             if let Some(p) = pending {
                 // POST decision to Sidecar
@@ -879,6 +911,7 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_sem = Arc::clone(&global_semaphore);
                     let task_locks = Arc::clone(&peer_locks);
                     let task_pending_approvals = Arc::clone(&pending_approvals_for_loop);
+                    let task_bot_id = bot_id_for_loop.clone();
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -966,6 +999,7 @@ pub async fn start_im_bot<R: Runtime>(
                             penv.as_ref(),
                             images,
                             &task_pending_approvals,
+                            Some(&task_bot_id),
                         )
                         .await
                         {
@@ -1030,6 +1064,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         penv.as_ref(),
                                         None, // buffered messages don't preserve attachments
                                         &task_pending_approvals,
+                                        Some(&task_bot_id),
                                     )
                                     .await
                                     {
@@ -1173,6 +1208,33 @@ pub async fn start_im_bot<R: Runtime>(
         bind_code: bind_code_for_status,
     };
 
+    // ===== Heartbeat Runner (v0.1.21) =====
+    let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
+        let hb_config = config.heartbeat_config.clone().unwrap_or_default();
+        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(hb_config);
+        let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
+
+        let hb_shutdown_rx = shutdown_rx.clone();
+        let hb_router = Arc::clone(&router);
+        let hb_sidecar = Arc::clone(sidecar_manager);
+        let hb_adapter = Arc::clone(&adapter);
+        let hb_app = app_handle.clone();
+
+        let handle = tokio::spawn(async move {
+            runner.run_loop(
+                hb_shutdown_rx,
+                wake_rx,
+                hb_router,
+                hb_sidecar,
+                hb_adapter,
+                hb_app,
+            ).await;
+        });
+
+        ulog_info!("[im] Heartbeat runner spawned for bot {}", bot_id);
+        (Some(handle), Some(wake_tx), Some(config_arc))
+    };
+
     // Store instance
     let instance_platform = config.platform.clone();
     im_guard.insert(bot_id.clone(), ImBotInstance {
@@ -1184,8 +1246,14 @@ pub async fn start_im_bot<R: Runtime>(
         buffer,
         started_at,
         process_handle,
+        poll_handle,
+        approval_handle,
+        health_handle,
         bind_code,
         config,
+        heartbeat_handle,
+        heartbeat_wake_tx,
+        heartbeat_config: heartbeat_config_arc,
     });
 
     Ok(status)
@@ -1205,6 +1273,11 @@ pub async fn stop_im_bot(
         // Signal shutdown to all loops
         let _ = instance.shutdown_tx.send(true);
 
+        // Abort poll_handle to cancel in-flight long-poll HTTP request immediately.
+        // Without this, the old getUpdates request hangs for up to 30s on Telegram servers,
+        // causing 409 Conflict errors if the bot is restarted quickly.
+        instance.poll_handle.abort();
+
         // Wait for in-flight messages to finish (graceful: up to 10s)
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -1215,6 +1288,14 @@ pub async fn stop_im_bot(
             Ok(_) => ulog_info!("[im] Processing loop exited gracefully"),
             Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
         }
+
+        // Wait for auxiliary tasks to finish (short timeout — already signaled via shutdown_tx)
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
+        if let Some(hb) = instance.heartbeat_handle {
+            // Heartbeat runner may be mid-HTTP-call; wait before releasing Sidecars
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), hb).await;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
 
         // Persist remaining buffered messages to disk
         if let Err(e) = instance.buffer.lock().await.save_to_disk() {
@@ -1334,6 +1415,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     provider_env: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
     pending_approvals: &PendingApprovals,
+    bot_id: Option<&str>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match (&msg.platform, &msg.source_type) {
@@ -1356,6 +1438,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         if !imgs.is_empty() {
             body["images"] = json!(imgs);
         }
+    }
+    if let Some(bid) = bot_id {
+        body["botId"] = json!(bid);
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     ulog_info!("[im-stream] POST {} (SSE)", url);
@@ -1864,11 +1949,16 @@ pub async fn cmd_start_im_bot(
     platform: Option<String>,
     feishuAppId: Option<String>,
     feishuAppSecret: Option<String>,
+    heartbeatConfigJson: Option<String>,
 ) -> Result<ImBotStatus, String> {
     let im_platform = match platform.as_deref() {
         Some("feishu") => ImPlatform::Feishu,
         _ => ImPlatform::Telegram,
     };
+    let heartbeat_config = heartbeatConfigJson
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "null")
+        .and_then(|s| serde_json::from_str::<types::HeartbeatConfig>(s).ok());
     let config = ImConfig {
         platform: im_platform,
         bot_token: botToken,
@@ -1882,6 +1972,7 @@ pub async fn cmd_start_im_bot(
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
         available_providers_json: availableProvidersJson,
+        heartbeat_config,
     };
 
     start_im_bot(
@@ -1950,5 +2041,30 @@ pub async fn cmd_im_conversations(
         Ok(conversations)
     } else {
         Ok(Vec::new())
+    }
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_heartbeat_config(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    heartbeatConfigJson: String,
+) -> Result<(), String> {
+    let new_config: types::HeartbeatConfig = serde_json::from_str(&heartbeatConfigJson)
+        .map_err(|e| format!("Invalid heartbeat config JSON: {}", e))?;
+
+    let im_guard = imState.lock().await;
+    if let Some(instance) = im_guard.get(&botId) {
+        if let Some(ref config_arc) = instance.heartbeat_config {
+            let mut cfg = config_arc.write().await;
+            *cfg = new_config;
+            ulog_info!("[im] Heartbeat config updated for bot {}", botId);
+            Ok(())
+        } else {
+            Err(format!("Bot {} has no heartbeat runner", botId))
+        }
+    } else {
+        Err(format!("Bot {} not found", botId))
     }
 }

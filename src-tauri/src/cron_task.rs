@@ -9,10 +9,12 @@
 // - Persistence to ~/.myagents/cron_tasks.json with auto-recovery on startup
 
 use chrono::{DateTime, Utc};
+use cron::Schedule as CronExprSchedule;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -33,6 +35,43 @@ fn normalize_path(path: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Parse a cron expression and compute the Duration until next fire time.
+/// Accepts standard 5-field cron expressions (min hour dom month dow) and
+/// converts to the 7-field format required by the `cron` crate (sec min hour dom month dow year).
+/// Returns None if the expression is invalid or has no upcoming fire time.
+fn next_cron_fire_duration(expr: &str, tz: Option<&str>) -> Result<Duration, String> {
+    // Normalize: 5-field → 7-field by prepending "0 " (seconds) and appending " *" (year)
+    let expr7 = {
+        let fields: Vec<&str> = expr.trim().split_whitespace().collect();
+        match fields.len() {
+            5 => format!("0 {} *", expr.trim()),
+            6 => format!("0 {}", expr.trim()),  // already has year
+            7 => expr.trim().to_string(),         // already full 7-field
+            _ => return Err(format!("Invalid cron expression '{}': expected 5-7 fields, got {}", expr, fields.len())),
+        }
+    };
+
+    let schedule = CronExprSchedule::from_str(&expr7)
+        .map_err(|e| format!("Failed to parse cron expression '{}' (normalized: '{}'): {}", expr, expr7, e))?;
+
+    // Resolve timezone
+    let now = if let Some(tz_str) = tz {
+        let tz: chrono_tz::Tz = tz_str.parse()
+            .map_err(|_| format!("Invalid timezone '{}' for cron expression", tz_str))?;
+        Utc::now().with_timezone(&tz)
+    } else {
+        // Default to UTC — use a fixed-offset representation
+        Utc::now().with_timezone(&chrono_tz::UTC)
+    };
+
+    let next = schedule.after(&now).next()
+        .ok_or_else(|| format!("No upcoming fire time for cron expression '{}'", expr))?;
+
+    let next_utc = next.with_timezone(&Utc);
+    let duration_secs = (next_utc - Utc::now()).num_seconds().max(1) as u64;
+    Ok(Duration::from_secs(duration_secs))
 }
 
 /// Atomic file save helper - writes to temp file first, then renames
@@ -114,6 +153,27 @@ pub struct TaskProviderEnv {
     pub api_key: Option<String>,
 }
 
+/// Delivery target for IM Bot cron task results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronDelivery {
+    pub bot_id: String,
+    pub chat_id: String,
+    pub platform: String,
+}
+
+/// Flexible schedule types for cron tasks (v0.1.21)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CronSchedule {
+    /// One-shot: execute at a specific time, then stop
+    At { at: String },
+    /// Recurring interval in minutes
+    Every { minutes: u32 },
+    /// Cron expression with optional timezone
+    Cron { expr: String, tz: Option<String> },
+}
+
 /// A scheduled cron task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +206,19 @@ pub struct CronTask {
     /// Last error message (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    // ===== IM Bot cron fields (v0.1.21) =====
+    /// Source IM Bot ID that created this task
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bot_id: Option<String>,
+    /// Where to deliver execution results
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<CronDelivery>,
+    /// Flexible schedule (overrides interval_minutes when present)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<CronSchedule>,
+    /// Human-readable name for the task
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Configuration for creating a new cron task
@@ -170,6 +243,15 @@ pub struct CronTaskConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    // ===== IM Bot cron fields (v0.1.21) =====
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<CronDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<CronSchedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -360,7 +442,11 @@ impl CronTaskManager {
         let app_handle = Arc::clone(&self.app_handle);
         let storage_path = self.storage_path.clone();
         let task_id_owned = task_id.to_string();
-        let interval_mins = task.interval_minutes;
+        let schedule = task.schedule.clone();
+        let interval_mins = match &schedule {
+            Some(CronSchedule::Every { minutes }) => *minutes,
+            _ => task.interval_minutes,
+        };
         let last_executed = task.last_executed_at;
         let execution_count = task.execution_count;
 
@@ -407,10 +493,54 @@ impl CronTaskManager {
             }
 
             // Calculate initial wait time
-            // - First execution (execution_count == 0): execute immediately (2s delay for UI readiness)
-            // - Subsequent executions: calculate based on last_executed_at
-            let interval_duration = Duration::from_secs(interval_mins as u64 * 60);
-            let initial_wait = if execution_count == 0 {
+            // For CronSchedule::At — calculate delay until target time, then one-shot
+            // For CronSchedule::Cron — compute next fire time from cron expression
+            let is_one_shot = matches!(&schedule, Some(CronSchedule::At { .. }));
+            let is_cron_expr = matches!(&schedule, Some(CronSchedule::Cron { .. }));
+            let cron_expr_info = match &schedule {
+                Some(CronSchedule::Cron { expr, tz }) => Some((expr.clone(), tz.clone())),
+                _ => None,
+            };
+            let interval_duration = Duration::from_secs(interval_mins.max(5) as u64 * 60);
+            let initial_wait = if let Some(CronSchedule::At { ref at }) = schedule {
+                // One-shot: calculate delay until target time
+                match DateTime::parse_from_rfc3339(at).or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S")) {
+                    Ok(target) => {
+                        let target_utc = target.with_timezone(&Utc);
+                        let now = Utc::now();
+                        if target_utc > now {
+                            let wait_secs = (target_utc - now).num_seconds().max(1) as u64;
+                            log::info!("[CronTask] Task {} scheduled at {}, waiting {} seconds", task_id_owned, at, wait_secs);
+                            Duration::from_secs(wait_secs)
+                        } else {
+                            log::info!("[CronTask] Task {} target time {} already passed, executing immediately", task_id_owned, at);
+                            Duration::from_secs(2)
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[CronTask] Task {} invalid 'at' time '{}': {}, executing in 2s", task_id_owned, at, e);
+                        Duration::from_secs(2)
+                    }
+                }
+            } else if let Some(CronSchedule::Cron { ref expr, ref tz }) = schedule {
+                // Cron expression: compute next fire time
+                match next_cron_fire_duration(expr, tz.as_deref()) {
+                    Ok(d) => {
+                        log::info!("[CronTask] Task {} cron expr '{}' (tz={:?}), next fire in {} seconds",
+                            task_id_owned, expr, tz, d.as_secs());
+                        d
+                    }
+                    Err(e) => {
+                        log::error!("[CronTask] Task {} invalid cron config: {}, stopping scheduler", task_id_owned, e);
+                        // Clean up and exit — invalid cron expression is unrecoverable
+                        {
+                            let mut active = active_schedulers.write().await;
+                            active.remove(&task_id_owned);
+                        }
+                        return;
+                    }
+                }
+            } else if execution_count == 0 {
                 // First execution - execute immediately with small delay for UI to be ready
                 log::info!("[CronTask] Task {} first execution, starting in 2 seconds", task_id_owned);
                 Duration::from_secs(2)
@@ -440,7 +570,7 @@ impl CronTaskManager {
             // Wait for initial period
             tokio::time::sleep(initial_wait).await;
 
-            // Create interval timer for subsequent executions
+            // Create interval timer for subsequent executions (used for Every/fallback, not Cron)
             let mut timer = interval(interval_duration);
             // Skip the first immediate tick since we already waited
             timer.tick().await;
@@ -492,8 +622,12 @@ impl CronTaskManager {
                     let executing = executing_tasks.read().await;
                     if executing.contains(&task_id_owned) {
                         log::warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
-                        // Wait for next interval before checking again
-                        timer.tick().await;
+                        // Wait before checking again (short poll for cron, full interval for fixed)
+                        if is_cron_expr {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        } else {
+                            timer.tick().await;
+                        }
                         continue;
                     }
                 }
@@ -506,8 +640,12 @@ impl CronTaskManager {
 
                 let Some(handle) = handle_opt else {
                     log::error!("[CronTask] No app handle available for task {}, will retry next interval", task_id_owned);
-                    // Wait for next interval before retrying (prevents tight loop)
-                    timer.tick().await;
+                    // Wait before retrying (prevents tight loop)
+                    if is_cron_expr {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    } else {
+                        timer.tick().await;
+                    }
                     continue;
                 };
 
@@ -592,10 +730,36 @@ impl CronTaskManager {
                             }
                         }
 
+                        // Deliver results to IM Bot + wake heartbeat (v0.1.21)
+                        if let Some(ref delivery) = task.delivery {
+                            let summary = if success {
+                                format!("Cron task '{}' completed successfully.", task.name.as_deref().unwrap_or(&task_id_owned))
+                            } else {
+                                format!("Cron task '{}' completed with issues.", task.name.as_deref().unwrap_or(&task_id_owned))
+                            };
+                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &summary).await;
+                        }
+
                         // Check if AI requested exit
                         if let Some(reason) = ai_exit_reason {
                             log::info!("[CronTask] Task {} AI requested exit: {}", task_id_owned, reason);
                             stop_task_internal(&handle, &tasks, &task_id_owned, Some(reason)).await;
+                            break;
+                        }
+
+                        // One-shot tasks (CronSchedule::At) auto-delete after first execution
+                        if is_one_shot {
+                            log::info!("[CronTask] Task {} is one-shot (schedule::at), auto-deleting after execution", task_id_owned);
+                            stop_task_internal(&handle, &tasks, &task_id_owned, Some("One-shot task completed".to_string())).await;
+                            // Remove from persistence (CT-08: one-shot tasks auto-delete)
+                            {
+                                let mut tasks_guard = tasks.write().await;
+                                tasks_guard.remove(&task_id_owned);
+                            }
+                            let manager = get_cron_task_manager();
+                            if let Err(e) = manager.save_to_disk().await {
+                                log::warn!("[CronTask] Failed to save after one-shot deletion: {}", e);
+                            }
                             break;
                         }
 
@@ -646,10 +810,25 @@ impl CronTaskManager {
                     log::warn!("[CronTask] Failed to save task state: {}", e);
                 }
 
-                // Wait for the next interval before checking/executing again
-                // This is critical - without this, the loop would run continuously
-                log::info!("[CronTask] Task {} waiting {} minutes for next execution", task_id_owned, interval_mins);
-                timer.tick().await;
+                // Wait for the next execution time
+                // For cron expressions, recalculate dynamically; for fixed intervals, use timer
+                if is_cron_expr {
+                    if let Some((ref expr, ref tz)) = cron_expr_info {
+                        match next_cron_fire_duration(expr, tz.as_deref()) {
+                            Ok(wait) => {
+                                log::info!("[CronTask] Task {} cron next fire in {} seconds", task_id_owned, wait.as_secs());
+                                tokio::time::sleep(wait).await;
+                            }
+                            Err(e) => {
+                                log::error!("[CronTask] Task {} cron schedule error: {}, stopping", task_id_owned, e);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    log::info!("[CronTask] Task {} waiting {} minutes for next execution", task_id_owned, interval_mins);
+                    timer.tick().await;
+                }
             }
 
             // Clean up: remove from active schedulers
@@ -684,7 +863,7 @@ impl CronTaskManager {
     }
 
     /// Save tasks to disk using atomic writes (temp file + rename)
-    async fn save_to_disk(&self) -> Result<(), String> {
+    pub(crate) async fn save_to_disk(&self) -> Result<(), String> {
         atomic_save_tasks(&self.storage_path, &self.tasks).await
     }
 
@@ -714,6 +893,10 @@ impl CronTaskManager {
             model: config.model,
             provider_env: config.provider_env,
             last_error: None,
+            source_bot_id: config.source_bot_id,
+            delivery: config.delivery,
+            schedule: config.schedule,
+            name: config.name,
         };
 
         let mut tasks = self.tasks.write().await;
@@ -773,6 +956,47 @@ impl CronTaskManager {
             .values()
             .find(|t| t.tab_id.as_deref() == Some(tab_id) && t.status == TaskStatus::Running)
             .cloned()
+    }
+
+    /// Get tasks created by a specific IM Bot (v0.1.21)
+    pub async fn get_tasks_for_bot(&self, bot_id: &str) -> Vec<CronTask> {
+        let tasks = self.tasks.read().await;
+        tasks
+            .values()
+            .filter(|t| t.source_bot_id.as_deref() == Some(bot_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Update task fields (partial update, for management API)
+    pub async fn update_task_fields(&self, task_id: &str, patch: serde_json::Value) -> Result<CronTask, String> {
+        let mut tasks = self.tasks.write().await;
+        let task = tasks.get_mut(task_id)
+            .ok_or_else(|| format!("Task not found: {}", task_id))?;
+
+        // Apply allowed patches
+        if let Some(name) = patch.get("name").and_then(|v| v.as_str()) {
+            task.name = Some(name.to_string());
+        }
+        if let Some(prompt) = patch.get("prompt").and_then(|v| v.as_str()) {
+            task.prompt = prompt.to_string();
+        }
+        if let Some(interval) = patch.get("intervalMinutes").and_then(|v| v.as_u64()) {
+            task.interval_minutes = interval.max(5) as u32;
+        }
+        if let Some(schedule_val) = patch.get("schedule") {
+            if schedule_val.is_null() {
+                task.schedule = None;
+            } else if let Ok(s) = serde_json::from_value::<CronSchedule>(schedule_val.clone()) {
+                task.schedule = Some(s);
+            }
+        }
+
+        let updated = task.clone();
+        drop(tasks);
+        self.save_to_disk().await?;
+        log::info!("[CronTask] Updated task fields: {}", task_id);
+        Ok(updated)
     }
 
     /// Start a task (begin scheduling)
@@ -1462,6 +1686,69 @@ pub async fn cmd_mark_task_complete(task_id: String) -> Result<(), String> {
 pub async fn cmd_is_task_executing(task_id: String) -> Result<bool, String> {
     let manager = get_cron_task_manager();
     Ok(manager.is_task_executing(&task_id).await)
+}
+
+/// Deliver cron task completion result to IM Bot (v0.1.21)
+/// 1. POST system event to the Bot's Sidecar for heartbeat to pick up
+/// 2. Wake the Bot's heartbeat runner
+async fn deliver_cron_result_to_bot(
+    handle: &AppHandle,
+    delivery: &CronDelivery,
+    task_id: &str,
+    summary: &str,
+) {
+    // 1. Find the Bot's sidecar port and POST system event
+    let im_state: tauri::State<'_, crate::im::ManagedImBots> = match handle.try_state() {
+        Some(s) => s,
+        None => {
+            log::warn!("[CronTask] Cannot deliver result: IM state not available");
+            return;
+        }
+    };
+
+    let im_guard = im_state.lock().await;
+    let instance = match im_guard.get(&delivery.bot_id) {
+        Some(i) => i,
+        None => {
+            log::warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+            return;
+        }
+    };
+
+    // Find a sidecar port for the bot
+    let port = {
+        let router = instance.router.lock().await;
+        router.find_any_active_session().map(|(p, _, _)| p)
+    };
+
+    if let Some(port) = port {
+        // POST system event to Bun sidecar
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/api/im/system-event", port);
+        let body = serde_json::json!({
+            "event": "cron_complete",
+            "content": summary,
+        });
+        match client.post(&url).json(&body).send().await {
+            Ok(_) => log::info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),
+            Err(e) => log::warn!("[CronTask] Failed to deliver system event: {}", e),
+        }
+    }
+
+    // 2. Wake the heartbeat runner
+    if let Some(ref wake_tx) = instance.heartbeat_wake_tx {
+        let reason = crate::im::types::WakeReason::CronComplete {
+            task_id: task_id.to_string(),
+            summary: summary.to_string(),
+        };
+        if let Err(e) = wake_tx.send(reason).await {
+            log::warn!("[CronTask] Failed to wake heartbeat: {}", e);
+        } else {
+            log::info!("[CronTask] Heartbeat wake sent for bot {}", delivery.bot_id);
+        }
+    }
+
+    drop(im_guard);
 }
 
 /// Initialize cron task manager with app handle (called during app setup)

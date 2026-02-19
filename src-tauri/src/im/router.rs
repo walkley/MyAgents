@@ -356,6 +356,25 @@ impl SessionRouter {
         &self.default_workspace
     }
 
+    /// Find any active session with a running Sidecar.
+    /// Returns (port, source_string, source_id) for heartbeat to use.
+    /// source_string is like "telegram_private", source_id is the chat_id.
+    pub fn find_any_active_session(&self) -> Option<(u16, String, String)> {
+        self.peer_sessions
+            .values()
+            .find(|ps| ps.sidecar_port > 0)
+            .map(|ps| {
+                let source_str = match (&ps.source_type, &ps.session_key) {
+                    _ if ps.session_key.contains("telegram") && ps.session_key.contains("private") => "telegram_private".to_string(),
+                    _ if ps.session_key.contains("telegram") && ps.session_key.contains("group") => "telegram_group".to_string(),
+                    _ if ps.session_key.contains("feishu") && ps.session_key.contains("private") => "feishu_private".to_string(),
+                    _ if ps.session_key.contains("feishu") && ps.session_key.contains("group") => "feishu_group".to_string(),
+                    _ => "telegram_private".to_string(),
+                };
+                (ps.sidecar_port, source_str, ps.source_id.clone())
+            })
+    }
+
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
         self.peer_sessions

@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.1.20"
+version = "0.1.21"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -38,6 +38,7 @@ reqwest = { version = "0.13.1", features = ["stream", "json", "blocking"] }
 futures-util = "0.3.31"
 tokio = { version = "1.49.0", features = ["rt", "sync", "time", "macros"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 futures = "0.3"
 base64 = "0.22"
 dirs = "6.0"
@@ -45,3 +46,5 @@ uuid = { version = "1.11", features = ["v4"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 prost = "0.13"
 pulldown-cmark = "0.12"
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "query", "http1"] }
+cron = "0.15"

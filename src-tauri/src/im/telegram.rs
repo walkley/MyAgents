@@ -670,7 +670,16 @@ impl TelegramAdapter {
                 break;
             }
 
-            match self.get_updates(offset).await {
+            // Wrap getUpdates in select! so shutdown can interrupt the 30s long-poll
+            let result = tokio::select! {
+                result = self.get_updates(offset) => result,
+                _ = shutdown_rx.changed() => {
+                    ulog_info!("[telegram] Shutdown during long-poll, exiting");
+                    break;
+                }
+            };
+
+            match result {
                 Ok(updates) => {
                     backoff_secs = INITIAL_BACKOFF_SECS; // Reset backoff on success
 

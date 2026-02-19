@@ -6,6 +6,7 @@ import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@a
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -114,7 +115,7 @@ export type MessageWire = {
     isImage?: boolean;
   }[];
   metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
     sourceId?: string;
     senderName?: string;
   };
@@ -533,6 +534,10 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
  * so this does NOT trigger schedulePreWarm(). The debounced pre-warm
  * from MCP/agents sync will pick up the model automatically.
  */
+export function getSessionModel(): string | undefined {
+  return currentModel;
+}
+
 export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
@@ -613,6 +618,15 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     }
     // Not in cron context - this tool shouldn't be available
     return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
+  }
+
+  // Special case: im-cron is a built-in MCP server for IM Bot scheduled tasks
+  if (serverId === 'im-cron') {
+    const imCtx = getImCronContext();
+    if (imCtx) {
+      return { allowed: true };
+    }
+    return { allowed: false, reason: 'IM 定时任务工具只能在 IM Bot 会话中使用' };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -718,6 +732,13 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
   if (cronContext.taskId) {
     result['cron-tools'] = cronToolsServer;
     console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+  }
+
+  // Add IM cron tool if we're in an IM context with management API available
+  const imCronCtx = getImCronContext();
+  if (imCronCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
+    result['im-cron'] = imCronToolServer;
+    console.log(`[agent] Added im-cron MCP server for bot ${imCronCtx.botId}`);
   }
 
   // Return early if no user MCP servers (but may have cron-tools)
@@ -2509,7 +2530,7 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv,
-  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string },
+  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
   if (rewindPromise) {
@@ -3084,11 +3105,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: cron-tools is a built-in trusted server
+        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
         // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        // (AI should be able to exit cron task without user approval)
-        if (toolName.startsWith('mcp__cron-tools__')) {
-          console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
+        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
+          console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
             updatedInput: input as Record<string, unknown>

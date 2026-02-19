@@ -61,7 +61,48 @@ export interface ImBotConfig {
 
   /** Wizard completed (Token verified + user bound). Defaults to false for new bots. */
   setupCompleted?: boolean;
+
+  // ===== Heartbeat (v0.1.21) =====
+  heartbeat?: HeartbeatConfig;
 }
+
+/**
+ * Heartbeat configuration for periodic autonomous checks.
+ * The actual checklist content lives in HEARTBEAT.md in the workspace root,
+ * not in this config — the config only controls timing and behavior.
+ */
+export interface HeartbeatConfig {
+  /** Enable/disable heartbeat (default: true) */
+  enabled: boolean;
+  /** Interval in minutes between heartbeat checks (default: 30, min: 5) */
+  intervalMinutes: number;
+  /** Active hours window — heartbeat only fires within this window */
+  activeHours?: ActiveHoursConfig;
+  /** Max chars for HEARTBEAT_OK detection after stripping token (default: 300) */
+  ackMaxChars?: number;
+}
+
+/**
+ * Active hours window for heartbeat scheduling
+ */
+export interface ActiveHoursConfig {
+  /** Start time in HH:MM format (inclusive) */
+  start: string;
+  /** End time in HH:MM format (exclusive) */
+  end: string;
+  /** IANA timezone name (default: "Asia/Shanghai") */
+  timezone: string;
+}
+
+/**
+ * Default heartbeat configuration
+ */
+export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
+  enabled: true,
+  intervalMinutes: 30,
+  activeHours: undefined,
+  ackMaxChars: 300,
+};
 
 /**
  * Active IM session info (for status display)
