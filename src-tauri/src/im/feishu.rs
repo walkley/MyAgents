@@ -708,23 +708,36 @@ impl FeishuAdapter {
         pong.encode_to_vec()
     }
 
-    /// Build a protobuf ACK frame for a received data frame.
-    /// Feishu requires ACK for data frames; without it, events are replayed on reconnect.
-    fn build_ack_frame(data_frame: &WsFrame) -> Vec<u8> {
-        let ack = WsFrame {
+    /// Build a protobuf response frame for a received data frame.
+    ///
+    /// The official Feishu SDK (`larksuite/oapi-sdk-go` ws/client.go) responds to data
+    /// frames by sending back the *same* frame structure with:
+    ///   - Original headers preserved, plus a `biz_rt` header (processing time in ms)
+    ///   - A JSON payload: `{"StatusCode":200,"Headers":{},"Data":null}`
+    ///
+    /// Without a valid response payload, the Feishu server considers the event
+    /// unacknowledged and retries delivery with exponential backoff (seconds → hours).
+    fn build_response_frame(data_frame: &WsFrame) -> Vec<u8> {
+        let mut headers = data_frame.headers.clone();
+        headers.push(WsHeader {
+            key: "biz_rt".to_string(),
+            value: "0".to_string(),
+        });
+
+        let response_payload = br#"{"StatusCode":200,"Headers":{},"Data":null}"#;
+
+        let resp = WsFrame {
             seq_id: data_frame.seq_id,
             log_id: data_frame.log_id,
             service: data_frame.service,
             method: FRAME_METHOD_DATA,
-            headers: vec![
-                WsHeader { key: "type".to_string(), value: "ack".to_string() },
-            ],
+            headers,
             payload_encoding: None,
             payload_type: None,
-            payload: None,
+            payload: Some(response_payload.to_vec()),
             log_id_new: data_frame.log_id_new.clone(),
         };
-        ack.encode_to_vec()
+        resp.encode_to_vec()
     }
 
     /// WebSocket listen loop with reconnection.
@@ -819,10 +832,11 @@ impl FeishuAdapter {
                                             continue;
                                         }
 
-                                        // ACK the data frame immediately to prevent replay on reconnect
-                                        let ack_data = Self::build_ack_frame(&frame);
-                                        if let Err(e) = ws_write.send(WsMessage::Binary(ack_data.into())).await {
-                                            ulog_warn!("[feishu] Failed to send ACK for seq_id={}: {}", frame.seq_id, e);
+                                        // Respond to the data frame immediately to prevent replay on reconnect.
+                                        // Must include a JSON response payload per the official Feishu WS protocol.
+                                        let resp_data = Self::build_response_frame(&frame);
+                                        if let Err(e) = ws_write.send(WsMessage::Binary(resp_data.into())).await {
+                                            ulog_warn!("[feishu] Failed to send response for seq_id={}: {}", frame.seq_id, e);
                                         }
 
                                         // Check for fragmentation (sum = total parts, seq = part index)
@@ -1103,7 +1117,8 @@ impl FeishuAdapter {
             }
 
             ulog_info!(
-                "[feishu] Dispatching message from {} (chat {}): {} chars",
+                "[feishu] Dispatching message {} from {} (chat {}): {} chars",
+                msg.message_id,
                 msg.sender_id,
                 msg.chat_id,
                 msg.text.len(),
