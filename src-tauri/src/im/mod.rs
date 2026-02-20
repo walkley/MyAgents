@@ -208,6 +208,26 @@ pub fn create_im_bot_state() -> ManagedImBots {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// Signal all running IM bots to shut down (sync, for use in app exit handlers).
+/// Best-effort: uses try_lock to avoid blocking if mutex is held.
+pub fn signal_all_bots_shutdown(im_state: &ManagedImBots) {
+    if let Ok(bots) = im_state.try_lock() {
+        for (bot_id, instance) in bots.iter() {
+            log::info!("[im] Signaling shutdown for bot {}", bot_id);
+            let _ = instance.shutdown_tx.send(true);
+            instance.poll_handle.abort();
+            instance.process_handle.abort();
+            instance.approval_handle.abort();
+            instance.health_handle.abort();
+            if let Some(ref h) = instance.heartbeat_handle {
+                h.abort();
+            }
+        }
+    } else {
+        log::warn!("[im] Could not acquire lock for shutdown signal, IM bots may linger");
+    }
+}
+
 /// Start the IM Bot
 pub async fn start_im_bot<R: Runtime>(
     app_handle: &AppHandle<R>,

@@ -64,12 +64,14 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('SIGTERM', () => {
   crashLog('SIGNAL', 'SIGTERM');
-  console.error('[process] SIGTERM received');
+  console.error('[process] SIGTERM received, shutting down...');
+  process.exit(0);  // Trigger SDK's process.on('exit') handler → SIGTERM CLI subprocess
 });
 
 process.on('SIGINT', () => {
   crashLog('SIGNAL', 'SIGINT');
-  console.error('[process] SIGINT received');
+  console.error('[process] SIGINT received, shutting down...');
+  process.exit(0);
 });
 
 crashLog('STARTUP', 'Server starting...');

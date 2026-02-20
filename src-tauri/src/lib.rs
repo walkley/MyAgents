@@ -45,6 +45,10 @@ pub fn run() {
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
 
+    let im_state_for_window = im_bot_state.clone();
+    let im_state_for_exit = im_bot_state.clone();
+    let im_state_for_tray_exit = im_bot_state.clone();
+
     // Track if cleanup has been performed to avoid duplicate cleanup
     // All clones share the same underlying AtomicBool - whichever exit path
     // triggers first will do cleanup, and all others will see the flag as true
@@ -188,6 +192,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_tray_exit.swap(true, Relaxed) {
                     log::info!("[App] Cleaning up sidecars before exit...");
+                    im::signal_all_bots_shutdown(&im_state_for_tray_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
                 }
                 app_handle_for_tray.exit(0);
@@ -259,6 +264,7 @@ pub fn run() {
                     use std::sync::atomic::Ordering::Relaxed;
                     if !cleanup_done_for_window.swap(true, Relaxed) {
                         log::info!("[App] Window destroyed, cleaning up sidecars...");
+                        im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
                     }
                 }
@@ -277,6 +283,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
                     log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
                 }
             }

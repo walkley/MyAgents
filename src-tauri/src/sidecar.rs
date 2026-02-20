@@ -125,9 +125,13 @@ pub fn cleanup_stale_sidecars() {
         // This is specific to our MCP installation path, won't affect other apps
         let mcp_count = kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
 
+        // 4. Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
+        let mcp_ext1 = kill_processes_by_pattern("MCP-ext", "@playwright/mcp", true);
+        let mcp_ext2 = kill_processes_by_pattern("MCP-ext", "@anthropic-ai/mcp", true);
+
         eprintln!(
-            "[sidecar] Startup cleanup complete: {} sidecar, {} SDK, {} MCP processes cleaned",
-            sidecar_count, sdk_count, mcp_count
+            "[sidecar] Startup cleanup complete: {} sidecar, {} SDK, {} MCP, {} MCP-ext processes cleaned",
+            sidecar_count, sdk_count, mcp_count, mcp_ext1 + mcp_ext2
         );
     }
 
@@ -142,6 +146,10 @@ pub fn cleanup_stale_sidecars() {
 
         // 3. Clean up MCP child processes
         kill_windows_processes_by_pattern(".myagents\\mcp\\");
+
+        // 4. Clean up MCP servers launched via bun x / npx
+        kill_windows_processes_by_pattern("@playwright\\mcp");
+        kill_windows_processes_by_pattern("@anthropic-ai\\mcp");
 
         // Verify cleanup completed (max 1 second wait)
         let start = std::time::Instant::now();
@@ -803,8 +811,9 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
 
     #[cfg(unix)]
     {
+        // Kill the entire process group (negative PID) so SDK CLI + MCP servers are also signaled
         unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+            libc::kill(-(pid as i32), libc::SIGTERM);
         }
     }
     #[cfg(windows)]
@@ -847,8 +856,10 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
                 let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
 
                 if result > 0 {
-                    // Process has exited
-                    log::debug!("[sidecar] Process {} exited gracefully", pid);
+                    // Direct child exited; give group members a brief grace period then SIGKILL the group
+                    log::debug!("[sidecar] Process {} exited gracefully, cleaning up process group", pid);
+                    std::thread::sleep(Duration::from_millis(500));
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
                     return;
                 } else if result < 0 {
                     // Error (process might already be gone)
@@ -865,11 +876,11 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
             }
 
             if start.elapsed() > timeout {
-                log::warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing", pid);
+                log::warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing process group", pid);
                 #[cfg(unix)]
                 {
                     unsafe {
-                        libc::kill(pid as i32, libc::SIGKILL);
+                        libc::kill(-(pid as i32), libc::SIGKILL);
                     }
                 }
                 return;
@@ -1318,6 +1329,13 @@ pub fn start_tab_sidecar<R: Runtime>(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // Unix: Make child a process group leader so kill(-PGID) kills the entire tree
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     // 关键诊断日志：打印当前可执行文件路径，确认运行的是正确版本
     log::info!("[sidecar] current_exe = {:?}", std::env::current_exe().ok());
 
@@ -1741,6 +1759,13 @@ fn create_new_session_sidecar<R: Runtime>(
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    // Unix: Make child a process group leader so kill(-PGID) kills the entire tree
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
 
     // Spawn
@@ -2277,6 +2302,10 @@ fn cleanup_child_processes() {
 
     // Clean up MCP child processes (with SIGKILL fallback for app shutdown)
     kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
+
+    // Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
+    kill_processes_by_pattern("MCP-ext", "@playwright/mcp", true);
+    kill_processes_by_pattern("MCP-ext", "@anthropic-ai/mcp", true);
 }
 
 #[cfg(windows)]
@@ -2289,6 +2318,10 @@ fn cleanup_child_processes() {
 
     // Clean up MCP child processes
     kill_windows_processes_by_pattern(".myagents\\mcp\\");
+
+    // Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
+    kill_windows_processes_by_pattern("@playwright\\mcp");
+    kill_windows_processes_by_pattern("@anthropic-ai\\mcp");
 }
 
 #[cfg(windows)]
