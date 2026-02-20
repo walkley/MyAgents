@@ -626,6 +626,17 @@ pub async fn start_im_bot<R: Runtime>(
                     let is_telegram_bind = text.starts_with("/start BIND_");
                     let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
                     if is_telegram_bind || is_feishu_bind {
+                        // If sender is already bound, silently ignore stale BIND_ messages
+                        // (Feishu may re-deliver old messages after bot restart clears dedup cache)
+                        let already_bound = {
+                            let users = allowed_users_for_loop.read().await;
+                            users.contains(&msg.sender_id)
+                        };
+                        if already_bound {
+                            ulog_debug!("[im] Ignoring stale BIND message from already-bound user {}", msg.sender_id);
+                            continue;
+                        }
+
                         let code = if is_telegram_bind {
                             text.strip_prefix("/start ").unwrap_or("")
                         } else {
