@@ -64,6 +64,7 @@ async function verifyViaSdk(
     sessionId: string;
     logPrefix: string;
     parseError: (text: string) => string;
+    settingSources: ('user' | 'project')[];
   },
 ): Promise<{ success: boolean; error?: string }> {
   const TIMEOUT_MS = 30000;
@@ -88,7 +89,7 @@ async function verifyViaSdk(
       options: {
         maxTurns: 1,
         cwd,
-        settingSources: ['user'],
+        settingSources: opts.settingSources,
         pathToClaudeCodeExecutable: cliPath,
         executable: 'bun',
         env,
@@ -194,6 +195,11 @@ export async function verifyProviderViaSdk(
     sessionId: 'verify-provider-session',
     logPrefix: 'provider/verify',
     parseError: parseProviderError,
+    // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
+    // enabledPlugins (e.g. rust-analyzer-lsp) that the SDK subprocess will try
+    // to start, causing 30s+ initialization and triggering our timeout.
+    // Chat sessions use ['project'] for the same reason (see buildSettingSources).
+    settingSources: [],
   });
 }
 
@@ -243,6 +249,8 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
     sessionId: 'verify-subscription-session',
     logPrefix: 'subscription/verify',
     parseError: parseSubscriptionError,
+    // Subscription needs 'user' to read ~/.claude/ OAuth credentials
+    settingSources: ['user'],
   });
 }
 
