@@ -3,13 +3,16 @@
 // tenant_access_token management, and event parsing.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::time::{sleep, Instant};
+use tokio::time::sleep;
 
 use prost::Message as ProstMessage;
 
@@ -57,11 +60,13 @@ struct WsHeader {
 const FRAME_METHOD_CONTROL: i32 = 0;
 const FRAME_METHOD_DATA: i32 = 1;
 
-/// Dedup cache TTL (24 hours — must survive WebSocket reconnection replays)
-/// Feishu replays unACKed events on reconnect; half-day idle gaps are common.
-const DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Dedup cache TTL (72 hours — matching Feishu's max event retry window).
+/// Feishu retransmits unACKed events on reconnect with exponential backoff for up to 72h.
+const DEDUP_TTL_SECS: u64 = 72 * 60 * 60;
 /// Max dedup cache size before forced cleanup
 const DEDUP_MAX_SIZE: usize = 5000;
+/// Minimum interval between dedup disk writes (ms) to coalesce bursts
+const DEDUP_PERSIST_INTERVAL_MS: u64 = 500;
 
 /// Feishu API base URL
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
@@ -73,6 +78,29 @@ const TOKEN_VALIDITY_SECS: u64 = 7200;
 const WS_INITIAL_BACKOFF_SECS: u64 = 1;
 /// WebSocket reconnect max backoff
 const WS_MAX_BACKOFF_SECS: u64 = 60;
+
+/// Persist dedup cache to disk (atomic: write tmp → rename).
+/// Free function so it can be used from `spawn_blocking` ('static closure).
+fn save_dedup_cache_to_disk(path: &std::path::Path, cache: &HashMap<String, u64>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp_path = path.with_extension("json.tmp.dedup");
+    match serde_json::to_string(cache) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&tmp_path, &json) {
+                ulog_warn!("[feishu] Failed to write dedup cache tmp: {}", e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                ulog_warn!("[feishu] Failed to rename dedup cache: {}", e);
+            }
+        }
+        Err(e) => {
+            ulog_warn!("[feishu] Failed to serialize dedup cache: {}", e);
+        }
+    }
+}
 
 /// Cached tenant access token
 struct TokenCache {
@@ -305,8 +333,12 @@ pub struct FeishuAdapter {
     msg_tx: mpsc::Sender<ImMessage>,
     allowed_users: Arc<RwLock<Vec<String>>>,
     bot_name: Arc<RwLock<Option<String>>>,
-    /// Message dedup cache: message_id → timestamp (30min TTL)
-    dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Message dedup cache: message_id → unix_timestamp_secs (72h TTL, disk-persisted)
+    dedup_cache: Arc<Mutex<HashMap<String, u64>>>,
+    /// Path for persisting dedup cache across restarts
+    dedup_persist_path: Option<PathBuf>,
+    /// Epoch millis of last dedup disk write (debounce: at most once per 500ms)
+    dedup_last_persist_ms: AtomicU64,
     /// Channel for forwarding approval callbacks from card button clicks
     approval_tx: mpsc::Sender<ApprovalCallback>,
 }
@@ -317,6 +349,7 @@ impl FeishuAdapter {
         msg_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
         approval_tx: mpsc::Sender<ApprovalCallback>,
+        dedup_path: Option<PathBuf>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(30));
@@ -329,6 +362,9 @@ impl FeishuAdapter {
                     .expect("Failed to create HTTP client")
             });
 
+        // Load dedup cache from disk (survives app restart)
+        let dedup_cache = Self::load_dedup_cache(dedup_path.as_deref());
+
         Self {
             app_id: config.feishu_app_id.clone().unwrap_or_default(),
             app_secret: config.feishu_app_secret.clone().unwrap_or_default(),
@@ -338,8 +374,55 @@ impl FeishuAdapter {
             msg_tx,
             allowed_users,
             bot_name: Arc::new(RwLock::new(None)),
-            dedup_cache: Arc::new(Mutex::new(HashMap::new())),
+            dedup_cache: Arc::new(Mutex::new(dedup_cache)),
+            dedup_persist_path: dedup_path,
+            dedup_last_persist_ms: AtomicU64::new(0),
             approval_tx,
+        }
+    }
+
+    /// Load dedup cache from disk, filtering out expired entries.
+    fn load_dedup_cache(path: Option<&std::path::Path>) -> HashMap<String, u64> {
+        let path = match path {
+            Some(p) if p.exists() => p,
+            _ => return HashMap::new(),
+        };
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                match serde_json::from_str::<HashMap<String, u64>>(&content) {
+                    Ok(mut cache) => {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let before = cache.len();
+                        cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
+                        ulog_info!(
+                            "[feishu] Loaded dedup cache from disk: {} entries ({} expired)",
+                            cache.len(),
+                            before - cache.len()
+                        );
+                        cache
+                    }
+                    Err(e) => {
+                        ulog_warn!("[feishu] Failed to parse dedup cache file: {}", e);
+                        HashMap::new()
+                    }
+                }
+            }
+            Err(e) => {
+                ulog_warn!("[feishu] Failed to read dedup cache file: {}", e);
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Flush dedup cache to disk unconditionally (call on graceful shutdown).
+    pub async fn flush_dedup_cache(&self) {
+        if let Some(path) = &self.dedup_persist_path {
+            let snapshot = self.dedup_cache.lock().await.clone();
+            save_dedup_cache_to_disk(path, &snapshot);
+            ulog_info!("[feishu] Dedup cache flushed to disk ({} entries)", snapshot.len());
         }
     }
 
@@ -1090,21 +1173,46 @@ impl FeishuAdapter {
         }
 
         if let Some(msg) = self.parse_im_event(&event) {
-            // Dedup check: skip if message_id was seen within TTL
-            {
+            // Dedup check: skip if message_id was seen within TTL (72h, disk-persisted)
+            let persist_snapshot = {
                 let mut cache = self.dedup_cache.lock().await;
-                let now = Instant::now();
-                // Periodic cleanup: remove expired entries (every 100 inserts or when exceeding max)
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                // Periodic cleanup: remove expired entries
                 if cache.len() > DEDUP_MAX_SIZE || cache.len() % 100 == 0 {
-                    cache.retain(|_, ts| now.duration_since(*ts) < DEDUP_TTL);
+                    cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
                 }
                 if let Some(prev) = cache.get(&msg.message_id) {
-                    if now.duration_since(*prev) < DEDUP_TTL {
+                    if now.saturating_sub(*prev) < DEDUP_TTL_SECS {
                         ulog_debug!("[feishu] Dedup: skipping duplicate message {}", msg.message_id);
                         return;
                     }
                 }
                 cache.insert(msg.message_id.clone(), now);
+                // Debounced persist: snapshot the cache if enough time elapsed since last write.
+                // Dedup hits (duplicates) return early above — only new messages reach here,
+                // so burst writes only occur on first startup with empty cache, not on reconnect replay.
+                if self.dedup_persist_path.is_some() {
+                    let now_ms = now * 1000;
+                    let last_ms = self.dedup_last_persist_ms.load(Ordering::Relaxed);
+                    if now_ms.saturating_sub(last_ms) >= DEDUP_PERSIST_INTERVAL_MS {
+                        self.dedup_last_persist_ms.store(now_ms, Ordering::Relaxed);
+                        Some(cache.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }; // Mutex released here — IO happens outside the lock
+
+            // Persist to disk via blocking thread pool (non-blocking for async runtime)
+            if let (Some(snapshot), Some(path)) = (persist_snapshot, self.dedup_persist_path.clone()) {
+                tokio::task::spawn_blocking(move || {
+                    save_dedup_cache_to_disk(&path, &snapshot);
+                });
             }
 
             // Check bind code (plain text BIND_xxx in private chat)

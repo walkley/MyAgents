@@ -194,6 +194,8 @@ pub struct ImBotInstance {
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    /// Platform adapter (retained for graceful shutdown — e.g. dedup flush)
+    adapter: Arc<AnyAdapter>,
     // ===== Hot-reloadable config =====
     pub(crate) current_model: Arc<tokio::sync::RwLock<Option<String>>>,
     pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
@@ -331,12 +333,16 @@ pub async fn start_im_bot<R: Runtime>(
             Arc::clone(&allowed_users),
             approval_tx.clone(),
         )))),
-        ImPlatform::Feishu => Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
-            &config,
-            msg_tx,
-            Arc::clone(&allowed_users),
-            approval_tx.clone(),
-        )))),
+        ImPlatform::Feishu => {
+            let dedup_path = Some(health::bot_dedup_path(&bot_id));
+            Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
+                &config,
+                msg_tx,
+                Arc::clone(&allowed_users),
+                approval_tx.clone(),
+                dedup_path,
+            ))))
+        }
     };
 
     // Verify bot connection via ImAdapter + ImStreamAdapter traits
@@ -1303,6 +1309,7 @@ pub async fn start_im_bot<R: Runtime>(
         heartbeat_handle,
         heartbeat_wake_tx,
         heartbeat_config: heartbeat_config_arc,
+        adapter: Arc::clone(&adapter),
         // Hot-reloadable config (Arc clones shared with processing loop)
         current_model,
         current_provider_env,
@@ -1356,6 +1363,11 @@ pub async fn stop_im_bot(
         // Persist remaining buffered messages to disk
         if let Err(e) = instance.buffer.lock().await.save_to_disk() {
             ulog_warn!("[im] Failed to persist buffer on shutdown: {}", e);
+        }
+
+        // Flush dedup cache to disk (Feishu only — ensures last entries survive restart)
+        if let AnyAdapter::Feishu(ref feishu) = *instance.adapter {
+            feishu.flush_dedup_cache().await;
         }
 
         // Persist active sessions in health state before releasing Sidecars

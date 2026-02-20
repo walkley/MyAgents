@@ -184,6 +184,14 @@ pub fn bot_buffer_path(bot_id: &str) -> PathBuf {
         .join(format!("im_{}_buffer.json", bot_id))
 }
 
+/// Get per-bot dedup cache file path
+pub fn bot_dedup_path(bot_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".myagents")
+        .join(format!("im_{}_dedup.json", bot_id))
+}
+
 /// Migrate legacy health/buffer files to per-bot paths.
 ///
 /// Strategy: copy then rename original to `.migrated`.
