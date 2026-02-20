@@ -4356,6 +4356,27 @@ async function main() {
         }
       }
 
+      // GET /api/session/config - Read sidecar's current config state
+      // Used by Tabs joining an existing sidecar (e.g. IM Bot session) to adopt
+      // the session's config instead of pushing their own.
+      if (pathname === '/api/session/config' && request.method === 'GET') {
+        try {
+          const { getSessionModel, getMcpServers, getAgents } = await import('./agent-session');
+          const model = getSessionModel();
+          const mcpServers = getMcpServers();
+          const agents = getAgents();
+          return jsonResponse({
+            success: true,
+            model: model ?? null,
+            mcpServerIds: mcpServers?.map(s => s.id) ?? null,
+            agentNames: agents ? Object.keys(agents) : null,
+          });
+        } catch (error) {
+          console.error('[api/session/config] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to get session config' }, 500);
+        }
+      }
+
       // GET /api/agent/:name - Get agent detail
       if (pathname.startsWith('/api/agent/') && request.method === 'GET') {
         try {
