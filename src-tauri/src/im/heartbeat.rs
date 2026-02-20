@@ -40,6 +40,7 @@ struct HeartbeatRequest {
 
 /// HeartbeatRunner manages the periodic heartbeat loop for an IM Bot.
 pub struct HeartbeatRunner {
+    bot_label: String, // e.g. "feishu_mino" or "@mino115_bot" for log identification
     config: Arc<RwLock<HeartbeatConfig>>,
     last_push_text: Arc<Mutex<Option<String>>>,
     http_client: reqwest::Client,
@@ -49,9 +50,10 @@ pub struct HeartbeatRunner {
 impl HeartbeatRunner {
     /// Create a new HeartbeatRunner.
     /// Returns (runner, wake_sender) — caller keeps wake_sender for external wake signals.
-    pub fn new(config: HeartbeatConfig) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
+    pub fn new(config: HeartbeatConfig, bot_label: String) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
         let config = Arc::new(RwLock::new(config));
         let runner = Self {
+            bot_label,
             config: Arc::clone(&config),
             last_push_text: Arc::new(Mutex::new(None)),
             http_client: reqwest::Client::builder()
@@ -82,7 +84,8 @@ impl HeartbeatRunner {
         interval.tick().await;
 
         ulog_info!(
-            "[heartbeat] Runner started (interval={}min)",
+            "[heartbeat] Runner started for {} (interval={}min)",
+            self.bot_label,
             initial_interval.as_secs() / 60
         );
 
@@ -144,7 +147,7 @@ impl HeartbeatRunner {
             }
         }
 
-        ulog_info!("[heartbeat] Runner stopped");
+        ulog_info!("[heartbeat] Runner stopped for {}", self.bot_label);
     }
 
     /// Execute a single heartbeat cycle.
@@ -202,13 +205,13 @@ impl HeartbeatRunner {
             now_text
         );
 
-        // Find a Sidecar port to call
+        // Find a Sidecar port to call (also touches last_active to prevent idle collection)
         let (port, source, source_id) = {
-            let router_guard = router.lock().await;
+            let mut router_guard = router.lock().await;
             match router_guard.find_any_active_session() {
                 Some((p, src, sid)) => (p, src, sid),
                 None => {
-                    ulog_warn!("[heartbeat] No active session found, skipping");
+                    ulog_debug!("[heartbeat] No active session found for {}, skipping", self.bot_label);
                     *self.executing.lock().await = false;
                     return;
                 }

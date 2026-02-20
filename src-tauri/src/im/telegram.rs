@@ -289,6 +289,11 @@ impl TelegramAdapter {
                 400 if description.contains("thread not found") => {
                     return Err(TelegramError::ThreadNotFound);
                 }
+                400 if description.contains("REACTION_INVALID") || description.contains("REACTION_EMPTY") => {
+                    // Permanent error: emoji not available as reaction in this chat
+                    ulog_debug!("[telegram] Reaction not available on {} (non-retryable): {}", method, description);
+                    return Err(TelegramError::Other(description.to_string()));
+                }
                 403 if description.contains("was kicked") || description.contains("was blocked") => {
                     return Err(TelegramError::BotKicked);
                 }
@@ -491,9 +496,9 @@ impl TelegramAdapter {
         let _ = self.set_reaction(chat_id, message_id, "👀").await;
     }
 
-    /// ACK: processing (⏳)
+    /// ACK: processing (⚡)
     pub async fn ack_processing(&self, chat_id: &str, message_id: i64) {
-        let _ = self.set_reaction(chat_id, message_id, "⏳").await;
+        let _ = self.set_reaction(chat_id, message_id, "⚡").await;
     }
 
     /// ACK: clear reaction

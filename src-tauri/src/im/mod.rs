@@ -194,6 +194,13 @@ pub struct ImBotInstance {
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    // ===== Hot-reloadable config =====
+    pub(crate) current_model: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+    pub(crate) permission_mode: Arc<tokio::sync::RwLock<String>>,
+    pub(crate) mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) available_providers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) allowed_users: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
 /// Create the managed IM Bot state (called during app setup)
@@ -428,7 +435,7 @@ pub async fn start_im_bot<R: Runtime>(
     let adapter_for_reply = Arc::clone(&adapter);
     let app_clone = app_handle.clone();
     let manager_clone = Arc::clone(sidecar_manager);
-    let permission_mode = config.permission_mode.clone();
+    let permission_mode = Arc::new(tokio::sync::RwLock::new(config.permission_mode.clone()));
     // Parse provider env from config (for per-message forwarding to Sidecar)
     // Wrapped in RwLock so /provider command can update it at runtime
     let provider_env: Option<serde_json::Value> = config
@@ -436,15 +443,18 @@ pub async fn start_im_bot<R: Runtime>(
         .as_ref()
         .and_then(|json_str| serde_json::from_str(json_str).ok());
     let current_provider_env = Arc::new(tokio::sync::RwLock::new(provider_env));
-    // Available providers list (for /provider command menu)
-    let available_providers_json = config.available_providers_json.clone();
+    // Available providers list (for /provider command menu) — hot-reloadable
+    let available_providers_json = Arc::new(tokio::sync::RwLock::new(config.available_providers_json.clone()));
+    // MCP servers JSON — hot-reloadable
+    let mcp_servers_json = Arc::new(tokio::sync::RwLock::new(config.mcp_servers_json.clone()));
     let bind_code_for_loop = bind_code.clone();
     let bot_id_for_loop = bot_id.clone();
     let allowed_users_for_loop = Arc::clone(&allowed_users);
     let current_model_for_loop = Arc::clone(&current_model);
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
-    let available_providers_for_loop = available_providers_json.clone();
-    let mcp_servers_json_for_loop = config.mcp_servers_json.clone();
+    let available_providers_for_loop = Arc::clone(&available_providers_json);
+    let permission_mode_for_loop = Arc::clone(&permission_mode);
+    let mcp_servers_json_for_loop = Arc::clone(&mcp_servers_json);
     let pending_approvals_for_loop = Arc::clone(&pending_approvals);
     let approval_tx_for_loop = approval_tx.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
@@ -780,11 +790,13 @@ pub async fn start_im_bot<R: Runtime>(
                     if text.starts_with("/provider") {
                         let arg = text.strip_prefix("/provider").unwrap_or("").trim().to_string();
 
-                        // Parse available providers from startup config
-                        let providers: Vec<serde_json::Value> = available_providers_for_loop
-                            .as_ref()
-                            .and_then(|json| serde_json::from_str(json).ok())
-                            .unwrap_or_default();
+                        // Parse available providers from config (hot-reloadable)
+                        let providers: Vec<serde_json::Value> = {
+                            let ap = available_providers_for_loop.read().await;
+                            ap.as_ref()
+                                .and_then(|json| serde_json::from_str(json).ok())
+                                .unwrap_or_default()
+                        };
 
                         if arg.is_empty() {
                             // Show current provider + available list
@@ -903,10 +915,10 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_manager = Arc::clone(&manager_clone);
                     let task_buffer = Arc::clone(&buffer_clone);
                     let task_health = Arc::clone(&health_clone);
-                    let task_perm = permission_mode.clone();
+                    let task_perm = permission_mode_for_loop.read().await.clone();
                     let task_provider_env = Arc::clone(&current_provider_env_for_loop);
                     let task_model = Arc::clone(&current_model_for_loop);
-                    let task_mcp_json = mcp_servers_json_for_loop.clone();
+                    let task_mcp_json = mcp_servers_json_for_loop.read().await.clone();
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
                     let task_locks = Arc::clone(&peer_locks);
@@ -1196,7 +1208,7 @@ pub async fn start_im_bot<R: Runtime>(
     };
 
     let status = ImBotStatus {
-        bot_username: bot_username_for_url,
+        bot_username: bot_username_for_url.clone(),
         status: ImStatus::Online,
         uptime_seconds: 0,
         last_message_at: None,
@@ -1211,7 +1223,8 @@ pub async fn start_im_bot<R: Runtime>(
     // ===== Heartbeat Runner (v0.1.21) =====
     let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
         let hb_config = config.heartbeat_config.clone().unwrap_or_default();
-        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(hb_config);
+        let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
+        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(hb_config, hb_bot_label);
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
 
         let hb_shutdown_rx = shutdown_rx.clone();
@@ -1254,6 +1267,13 @@ pub async fn start_im_bot<R: Runtime>(
         heartbeat_handle,
         heartbeat_wake_tx,
         heartbeat_config: heartbeat_config_arc,
+        // Hot-reloadable config (Arc clones shared with processing loop)
+        current_model,
+        current_provider_env,
+        permission_mode,
+        mcp_servers_json,
+        available_providers_json,
+        allowed_users,
     });
 
     Ok(status)
@@ -2067,4 +2087,145 @@ pub async fn cmd_update_heartbeat_config(
     } else {
         Err(format!("Bot {} not found", botId))
     }
+}
+
+/// Hot-update AI config (model + provider env + available providers) for a running bot.
+/// Model is synced to all active Sidecars via POST /api/model/set (SDK hot-switch).
+/// Provider env is updated in memory — next message automatically uses the new value.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_ai_config(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    model: Option<String>,
+    providerEnvJson: Option<String>,
+    availableProvidersJson: Option<String>,
+) -> Result<(), String> {
+    let (router, current_model, current_provider_env, available_providers) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        (
+            Arc::clone(&inst.router),
+            Arc::clone(&inst.current_model),
+            Arc::clone(&inst.current_provider_env),
+            Arc::clone(&inst.available_providers_json),
+        )
+    };
+
+    // Selective update: None = don't change, Some("") = clear, Some(json) = set.
+    // This allows model-only updates without wiping provider config.
+    if let Some(ref m) = model {
+        *current_model.write().await = if m.is_empty() { None } else { Some(m.clone()) };
+    }
+    if let Some(ref s) = providerEnvJson {
+        if s.is_empty() {
+            *current_provider_env.write().await = None;
+        } else {
+            let penv = serde_json::from_str(s).ok();
+            *current_provider_env.write().await = penv;
+        }
+    }
+    if let Some(ref s) = availableProvidersJson {
+        if s.is_empty() {
+            *available_providers.write().await = None;
+        } else {
+            *available_providers.write().await = Some(s.clone());
+        }
+    }
+
+    // Sync model to all active Sidecars (SDK hot-switch, no session restart needed)
+    if model.is_some() {
+        let router = router.lock().await;
+        for port in router.active_sidecar_ports() {
+            router.sync_ai_config(port, model.as_deref(), None).await;
+        }
+    }
+
+    ulog_info!("[im] AI config hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update permission mode for a running bot.
+/// Permission mode is read from memory on each message — update takes effect immediately.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_permission_mode(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    permissionMode: String,
+) -> Result<(), String> {
+    let perm = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.permission_mode)
+    };
+    *perm.write().await = permissionMode;
+    ulog_info!("[im] Permission mode hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update MCP servers for a running bot.
+/// Syncs to all active Sidecars via POST /api/mcp/set — Sidecar internally handles
+/// abort+resume (or deferred restart if a turn is in progress).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_mcp_servers(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    mcpServersJson: Option<String>,
+) -> Result<(), String> {
+    let (router, mcp_servers) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        (Arc::clone(&inst.router), Arc::clone(&inst.mcp_servers_json))
+    };
+
+    *mcp_servers.write().await = mcpServersJson.clone();
+
+    // Sync to all active Sidecars — setMcpServers() handles abort+resume internally
+    let router = router.lock().await;
+    for port in router.active_sidecar_ports() {
+        router.sync_ai_config(port, None, mcpServersJson.as_deref()).await;
+    }
+
+    ulog_info!("[im] MCP servers hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update allowed users whitelist for a running bot.
+/// The adapter shares the same Arc — change takes effect immediately on next message auth check.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_allowed_users(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    allowedUsers: Vec<String>,
+) -> Result<(), String> {
+    let users = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.allowed_users)
+    };
+    *users.write().await = allowedUsers;
+    ulog_info!("[im] Allowed users hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update default workspace for a running bot.
+/// Only affects new sessions — existing sessions keep their current workspace.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_workspace(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    workspacePath: String,
+) -> Result<(), String> {
+    let router = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.router)
+    };
+    router.lock().await.set_default_workspace(PathBuf::from(&workspacePath));
+    ulog_info!("[im] Workspace hot-updated for bot {}: {}", botId, workspacePath);
+    Ok(())
 }

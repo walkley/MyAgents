@@ -1717,7 +1717,7 @@ async fn deliver_cron_result_to_bot(
 
     // Find a sidecar port for the bot
     let port = {
-        let router = instance.router.lock().await;
+        let mut router = instance.router.lock().await;
         router.find_any_active_session().map(|(p, _, _)| p)
     };
 

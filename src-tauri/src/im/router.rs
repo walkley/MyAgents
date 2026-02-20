@@ -359,11 +359,14 @@ impl SessionRouter {
     /// Find any active session with a running Sidecar.
     /// Returns (port, source_string, source_id) for heartbeat to use.
     /// source_string is like "telegram_private", source_id is the chat_id.
-    pub fn find_any_active_session(&self) -> Option<(u16, String, String)> {
+    /// Also touches `last_active` to prevent the idle collector from releasing
+    /// the Sidecar while heartbeat is using it.
+    pub fn find_any_active_session(&mut self) -> Option<(u16, String, String)> {
         self.peer_sessions
-            .values()
+            .values_mut()
             .find(|ps| ps.sidecar_port > 0)
             .map(|ps| {
+                ps.last_active = Instant::now(); // Keep alive for heartbeat
                 let source_str = match (&ps.source_type, &ps.session_key) {
                     _ if ps.session_key.contains("telegram") && ps.session_key.contains("private") => "telegram_private".to_string(),
                     _ if ps.session_key.contains("telegram") && ps.session_key.contains("group") => "telegram_group".to_string(),
@@ -422,6 +425,27 @@ impl SessionRouter {
                 self.default_workspace.display(),
             );
         }
+    }
+
+    /// Get all unique active Sidecar ports (for hot-reload config broadcast).
+    pub fn active_sidecar_ports(&self) -> Vec<u16> {
+        let mut seen = std::collections::HashSet::new();
+        self.peer_sessions
+            .values()
+            .filter(|ps| ps.sidecar_port > 0)
+            .filter_map(|ps| {
+                if seen.insert(ps.sidecar_port) {
+                    Some(ps.sidecar_port)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Update default workspace path (hot-reload, only affects new sessions).
+    pub fn set_default_workspace(&mut self, path: PathBuf) {
+        self.default_workspace = path;
     }
 
     /// Sync AI config (model + MCP) to a newly created Sidecar.
