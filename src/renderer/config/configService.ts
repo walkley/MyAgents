@@ -31,6 +31,8 @@ import type { ImBotConfig } from '../../shared/types/im';
 import { isDebugMode } from '@/utils/debug';
 
 // 异步互斥锁 — 序列化读-改-写操作，防止并发损坏
+// NOTE: NOT reentrant. Functions holding withConfigLock must use _writeAppConfigLocked()
+// instead of saveAppConfig() to avoid deadlock.
 
 function createAsyncLock() {
     let queue: Promise<void> = Promise.resolve();
@@ -224,44 +226,51 @@ function migrateImBotConfig(config: AppConfig): AppConfig {
 
 /**
  * Add or update an IM bot config entry (upsert by id).
- * Always reads latest from disk to avoid stale React state overwrites.
+ * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
  */
 export async function addOrUpdateImBotConfig(botConfig: ImBotConfig): Promise<void> {
-    const latest = await loadAppConfig();
-    const configs = [...(latest.imBotConfigs ?? [])];
-    const idx = configs.findIndex(c => c.id === botConfig.id);
-    if (idx >= 0) {
-        configs[idx] = botConfig;
-    } else {
-        configs.push(botConfig);
-    }
-    await saveAppConfig({ ...latest, imBotConfigs: configs });
+    return withConfigLock(async () => {
+        const latest = await loadAppConfig();
+        const configs = [...(latest.imBotConfigs ?? [])];
+        const idx = configs.findIndex(c => c.id === botConfig.id);
+        if (idx >= 0) {
+            configs[idx] = botConfig;
+        } else {
+            configs.push(botConfig);
+        }
+        await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
+    });
 }
 
 /**
  * Partially update an IM bot config by merging fields.
- * Only the specified fields are overwritten; everything else is preserved from disk.
+ * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
  */
 export async function updateImBotConfig(
     botId: string,
     updates: Partial<ImBotConfig>,
 ): Promise<void> {
-    const latest = await loadAppConfig();
-    const configs = [...(latest.imBotConfigs ?? [])];
-    const idx = configs.findIndex(c => c.id === botId);
-    if (idx >= 0) {
-        configs[idx] = { ...configs[idx], ...updates };
-        await saveAppConfig({ ...latest, imBotConfigs: configs });
-    }
+    return withConfigLock(async () => {
+        const latest = await loadAppConfig();
+        const configs = [...(latest.imBotConfigs ?? [])];
+        const idx = configs.findIndex(c => c.id === botId);
+        if (idx >= 0) {
+            configs[idx] = { ...configs[idx], ...updates };
+            await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
+        }
+    });
 }
 
 /**
  * Remove an IM bot config by id.
+ * Atomic: read-modify-write is serialized under withConfigLock to prevent races.
  */
 export async function removeImBotConfig(botId: string): Promise<void> {
-    const latest = await loadAppConfig();
-    const configs = (latest.imBotConfigs ?? []).filter(c => c.id !== botId);
-    await saveAppConfig({ ...latest, imBotConfigs: configs });
+    return withConfigLock(async () => {
+        const latest = await loadAppConfig();
+        const configs = (latest.imBotConfigs ?? []).filter(c => c.id !== botId);
+        await _writeAppConfigLocked({ ...latest, imBotConfigs: configs });
+    });
 }
 
 export async function loadAppConfig(): Promise<AppConfig> {
@@ -308,10 +317,7 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
     // (multiple callers sharing the same .tmp file path)
     return withConfigLock(async () => {
         try {
-            await ensureConfigDir();
-            const dir = await getConfigDir();
-            const configPath = await join(dir, CONFIG_FILE);
-            await safeWriteJson(configPath, config);
+            await _writeAppConfigLocked(config);
         } catch (error) {
             console.error('[configService] Failed to save app config:', error);
             throw error;
@@ -319,13 +325,57 @@ export async function saveAppConfig(config: AppConfig): Promise<void> {
     });
 }
 
+/**
+ * Atomically read-modify-write the app config.
+ * The modifier callback receives the latest config from disk and returns the
+ * modified version. Both the read and write happen inside withConfigLock,
+ * preventing races with other atomic config operations (updateImBotConfig,
+ * saveApiKey, etc.).
+ *
+ * Returns the final config so callers can update React state with the
+ * authoritative version.
+ */
+export async function atomicModifyConfig(
+    modifier: (config: AppConfig) => AppConfig,
+): Promise<AppConfig> {
+    if (isBrowserDevMode()) {
+        const latest = await loadAppConfig();
+        const modified = modifier(latest);
+        mockSaveConfig(modified);
+        return modified;
+    }
+    return withConfigLock(async () => {
+        const latest = await loadAppConfig();
+        const modified = modifier(latest);
+        await _writeAppConfigLocked(modified);
+        return modified;
+    });
+}
+
+/**
+ * Internal: write config to disk without acquiring withConfigLock.
+ * MUST only be called from within a withConfigLock block.
+ */
+async function _writeAppConfigLocked(config: AppConfig): Promise<void> {
+    if (isBrowserDevMode()) {
+        mockSaveConfig(config);
+        return;
+    }
+    await ensureConfigDir();
+    const dir = await getConfigDir();
+    const configPath = await join(dir, CONFIG_FILE);
+    await safeWriteJson(configPath, config);
+}
+
 // API Key Management (stored in AppConfig.providerApiKeys)
 export async function saveApiKey(providerId: string, apiKey: string): Promise<void> {
-    const config = await loadAppConfig();
-    const apiKeys = config.providerApiKeys ?? {};
-    apiKeys[providerId] = apiKey;
-    await saveAppConfig({ ...config, providerApiKeys: apiKeys });
-    console.log('[configService] Saved API key for provider:', providerId);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const apiKeys = config.providerApiKeys ?? {};
+        apiKeys[providerId] = apiKey;
+        await _writeAppConfigLocked({ ...config, providerApiKeys: apiKeys });
+        console.log('[configService] Saved API key for provider:', providerId);
+    });
 }
 
 export async function loadApiKeys(): Promise<Record<string, string>> {
@@ -334,14 +384,16 @@ export async function loadApiKeys(): Promise<Record<string, string>> {
 }
 
 export async function deleteApiKey(providerId: string): Promise<void> {
-    const config = await loadAppConfig();
-    const apiKeys = { ...config.providerApiKeys };
-    delete apiKeys[providerId];
-    // Also delete verification status when API key is deleted
-    const verifyStatus = { ...config.providerVerifyStatus };
-    delete verifyStatus[providerId];
-    await saveAppConfig({ ...config, providerApiKeys: apiKeys, providerVerifyStatus: verifyStatus });
-    console.log('[configService] Deleted API key for provider:', providerId);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const apiKeys = { ...config.providerApiKeys };
+        delete apiKeys[providerId];
+        // Also delete verification status when API key is deleted
+        const verifyStatus = { ...config.providerVerifyStatus };
+        delete verifyStatus[providerId];
+        await _writeAppConfigLocked({ ...config, providerApiKeys: apiKeys, providerVerifyStatus: verifyStatus });
+        console.log('[configService] Deleted API key for provider:', providerId);
+    });
 }
 
 // Provider Verification Status Management
@@ -352,15 +404,17 @@ export async function saveProviderVerifyStatus(
     status: 'valid' | 'invalid',
     accountEmail?: string
 ): Promise<void> {
-    const config = await loadAppConfig();
-    const verifyStatus = config.providerVerifyStatus ?? {};
-    verifyStatus[providerId] = {
-        status,
-        verifiedAt: new Date().toISOString(),
-        accountEmail,
-    };
-    await saveAppConfig({ ...config, providerVerifyStatus: verifyStatus });
-    console.log('[configService] Saved verify status for provider:', providerId, status);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const verifyStatus = config.providerVerifyStatus ?? {};
+        verifyStatus[providerId] = {
+            status,
+            verifiedAt: new Date().toISOString(),
+            accountEmail,
+        };
+        await _writeAppConfigLocked({ ...config, providerVerifyStatus: verifyStatus });
+        console.log('[configService] Saved verify status for provider:', providerId, status);
+    });
 }
 
 export async function loadProviderVerifyStatus(): Promise<Record<string, ProviderVerifyStatus>> {
@@ -369,11 +423,13 @@ export async function loadProviderVerifyStatus(): Promise<Record<string, Provide
 }
 
 export async function deleteProviderVerifyStatus(providerId: string): Promise<void> {
-    const config = await loadAppConfig();
-    const verifyStatus = { ...config.providerVerifyStatus };
-    delete verifyStatus[providerId];
-    await saveAppConfig({ ...config, providerVerifyStatus: verifyStatus });
-    console.log('[configService] Deleted verify status for provider:', providerId);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const verifyStatus = { ...config.providerVerifyStatus };
+        delete verifyStatus[providerId];
+        await _writeAppConfigLocked({ ...config, providerVerifyStatus: verifyStatus });
+        console.log('[configService] Deleted verify status for provider:', providerId);
+    });
 }
 
 // ===== MCP Server Management =====
@@ -400,65 +456,73 @@ export async function getEnabledMcpServerIds(): Promise<string[]> {
  * Toggle MCP server enabled status globally
  */
 export async function toggleMcpServerEnabled(serverId: string, enabled: boolean): Promise<void> {
-    const config = await loadAppConfig();
-    const enabledServers = new Set(config.mcpEnabledServers ?? []);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const enabledServers = new Set(config.mcpEnabledServers ?? []);
 
-    if (enabled) {
-        enabledServers.add(serverId);
-    } else {
-        enabledServers.delete(serverId);
-    }
+        if (enabled) {
+            enabledServers.add(serverId);
+        } else {
+            enabledServers.delete(serverId);
+        }
 
-    await saveAppConfig({ ...config, mcpEnabledServers: Array.from(enabledServers) });
-    console.log('[configService] MCP server toggled:', serverId, enabled);
+        await _writeAppConfigLocked({ ...config, mcpEnabledServers: Array.from(enabledServers) });
+        console.log('[configService] MCP server toggled:', serverId, enabled);
+    });
 }
 
 /**
  * Add a custom MCP server
  */
 export async function addCustomMcpServer(server: McpServerDefinition): Promise<void> {
-    const config = await loadAppConfig();
-    const customServers = [...(config.mcpServers ?? [])];
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const customServers = [...(config.mcpServers ?? [])];
 
-    // Check if server with same ID exists
-    const existingIndex = customServers.findIndex(s => s.id === server.id);
-    if (existingIndex >= 0) {
-        customServers[existingIndex] = server;
-    } else {
-        customServers.push(server);
-    }
+        // Check if server with same ID exists
+        const existingIndex = customServers.findIndex(s => s.id === server.id);
+        if (existingIndex >= 0) {
+            customServers[existingIndex] = server;
+        } else {
+            customServers.push(server);
+        }
 
-    await saveAppConfig({ ...config, mcpServers: customServers });
-    console.log('[configService] Custom MCP server added:', server.id);
+        await _writeAppConfigLocked({ ...config, mcpServers: customServers });
+        console.log('[configService] Custom MCP server added:', server.id);
+    });
 }
 
 /**
  * Delete a custom MCP server
  */
 export async function deleteCustomMcpServer(serverId: string): Promise<void> {
-    const config = await loadAppConfig();
-    const customServers = (config.mcpServers ?? []).filter(s => s.id !== serverId);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const customServers = (config.mcpServers ?? []).filter(s => s.id !== serverId);
 
-    // Also remove from enabled list
-    const enabledServers = (config.mcpEnabledServers ?? []).filter(id => id !== serverId);
+        // Also remove from enabled list
+        const enabledServers = (config.mcpEnabledServers ?? []).filter(id => id !== serverId);
 
-    await saveAppConfig({
-        ...config,
-        mcpServers: customServers,
-        mcpEnabledServers: enabledServers,
+        await _writeAppConfigLocked({
+            ...config,
+            mcpServers: customServers,
+            mcpEnabledServers: enabledServers,
+        });
+        console.log('[configService] Custom MCP server deleted:', serverId);
     });
-    console.log('[configService] Custom MCP server deleted:', serverId);
 }
 
 /**
  * Save MCP server environment variables (for servers requiring config like API keys)
  */
 export async function saveMcpServerEnv(serverId: string, env: Record<string, string>): Promise<void> {
-    const config = await loadAppConfig();
-    const mcpServerEnv = { ...(config.mcpServerEnv ?? {}) };
-    mcpServerEnv[serverId] = env;
-    await saveAppConfig({ ...config, mcpServerEnv });
-    console.log('[configService] MCP server env saved:', serverId);
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const mcpServerEnv = { ...(config.mcpServerEnv ?? {}) };
+        mcpServerEnv[serverId] = env;
+        await _writeAppConfigLocked({ ...config, mcpServerEnv });
+        console.log('[configService] MCP server env saved:', serverId);
+    });
 }
 
 /**
@@ -905,10 +969,12 @@ export async function ensureBundledWorkspace(): Promise<boolean> {
         if (result.is_new) {
             // First time: mino was just copied to user directory
             await addProject(result.path);
-            const config = await loadAppConfig();
-            if (!config.defaultWorkspacePath) {
-                await saveAppConfig({ ...config, defaultWorkspacePath: result.path });
-            }
+            await withConfigLock(async () => {
+                const config = await loadAppConfig();
+                if (!config.defaultWorkspacePath) {
+                    await _writeAppConfigLocked({ ...config, defaultWorkspacePath: result.path });
+                }
+            });
             console.log('[configService] Bundled workspace initialized:', result.path);
             return true;
         }

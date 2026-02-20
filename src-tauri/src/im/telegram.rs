@@ -289,6 +289,11 @@ impl TelegramAdapter {
                 400 if description.contains("thread not found") => {
                     return Err(TelegramError::ThreadNotFound);
                 }
+                400 if description.contains("REACTION_INVALID") || description.contains("REACTION_EMPTY") => {
+                    // Permanent error: emoji not available as reaction in this chat
+                    ulog_debug!("[telegram] Reaction not available on {} (non-retryable): {}", method, description);
+                    return Err(TelegramError::Other(description.to_string()));
+                }
                 403 if description.contains("was kicked") || description.contains("was blocked") => {
                     return Err(TelegramError::BotKicked);
                 }
@@ -332,7 +337,9 @@ impl TelegramAdapter {
                 { "command": "workspace", "description": "切换工作区 /workspace <path>" },
                 { "command": "model", "description": "查看或切换 AI 模型" },
                 { "command": "provider", "description": "查看或切换 AI 供应商" },
-                { "command": "status", "description": "查看当前状态" }
+                { "command": "mode", "description": "查看或切换权限模式" },
+                { "command": "status", "description": "查看当前状态" },
+                { "command": "help", "description": "查看所有命令" }
             ]
         });
         self.api_call("setMyCommands", &commands).await?;
@@ -491,9 +498,9 @@ impl TelegramAdapter {
         let _ = self.set_reaction(chat_id, message_id, "👀").await;
     }
 
-    /// ACK: processing (⏳)
+    /// ACK: processing (⚡)
     pub async fn ack_processing(&self, chat_id: &str, message_id: i64) {
-        let _ = self.set_reaction(chat_id, message_id, "⏳").await;
+        let _ = self.set_reaction(chat_id, message_id, "⚡").await;
     }
 
     /// ACK: clear reaction
@@ -670,7 +677,16 @@ impl TelegramAdapter {
                 break;
             }
 
-            match self.get_updates(offset).await {
+            // Wrap getUpdates in select! so shutdown can interrupt the 30s long-poll
+            let result = tokio::select! {
+                result = self.get_updates(offset) => result,
+                _ = shutdown_rx.changed() => {
+                    ulog_info!("[telegram] Shutdown during long-poll, exiting");
+                    break;
+                }
+            };
+
+            match result {
                 Ok(updates) => {
                     backoff_secs = INITIAL_BACKOFF_SECS; // Reset backoff on success
 

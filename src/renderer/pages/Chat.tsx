@@ -41,15 +41,21 @@ interface ChatProps {
   initialMessage?: InitialMessage;
   /** Called after initialMessage has been consumed */
   onInitialMessageConsumed?: () => void;
+  /** Tab joined an already-running sidecar (e.g. IM Bot session) — skip config push, adopt sidecar config */
+  joinedExistingSidecar?: boolean;
+  /** Called after sidecar config has been adopted */
+  onJoinedExistingSidecarHandled?: () => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
     agentDir,
     sessionId,
     messages,
+    historyMessages,
+    streamingMessage,
     isLoading,
     sessionState,
     unifiedLogs,
@@ -145,6 +151,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
+
+  // Track whether we're joining an existing sidecar (e.g. IM Bot session)
+  // When true, mount effects skip config push and adopt sidecar's config instead.
+  const joinedExistingSidecarRef = useRef(joinedExistingSidecar ?? false);
+  joinedExistingSidecarRef.current = joinedExistingSidecar ?? false;
 
   // Ref for chat content area (for Tauri drop zone)
   const chatContentRef = useRef<HTMLDivElement>(null);
@@ -508,10 +519,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   useEffect(() => {
     const loadMcpConfig = async () => {
       try {
+        // When joining an existing sidecar (e.g. IM Bot session), skip pushing Tab's
+        // MCP config to avoid overwriting the session's current config.
+        // Still load local MCP state for sidebar display.
         const servers = await getAllMcpServers();
         const enabledIds = await getEnabledMcpServerIds();
         setMcpServers(servers);
         setGlobalMcpEnabled(enabledIds);
+
+        if (joinedExistingSidecarRef.current) {
+          if (isDebugMode()) {
+            console.log('[Chat] Skipping MCP push (joined existing sidecar)');
+          }
+          return;
+        }
 
         // CRITICAL: Always sync effective MCP servers to backend on initial load
         // This ensures the Agent SDK has correct MCP config (including empty = no MCP)
@@ -542,6 +563,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       const response = await apiGet<{ success: boolean; agents: Record<string, { description: string; prompt: string; model?: string; scope?: 'user' | 'project' }> }>('/api/agents/enabled');
       if (response.success && response.agents) {
         setEnabledAgents(response.agents);
+        // Skip push when joining existing sidecar to avoid overwriting session config
+        if (joinedExistingSidecarRef.current) {
+          if (isDebugMode()) {
+            console.log('[Chat] Skipping agents push (joined existing sidecar)');
+          }
+          return;
+        }
         // Sync to backend for SDK injection
         await apiPost('/api/agents/set', { agents: response.agents });
         if (isDebugMode()) {
@@ -629,7 +657,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     projectSyncedRef.current = true;
     // permissionMode: null means "use global default" (per Project type contract)
     setPermissionMode(currentProject.permissionMode ?? config.defaultPermissionMode);
-    if (currentProject.model) {
+    // Skip model override when joining existing sidecar — adoption effect will set the correct model
+    if (currentProject.model && !joinedExistingSidecarRef.current) {
       setSelectedModel(currentProject.model);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
@@ -640,11 +669,45 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // causing a blocking setModel() call during pre-warm → active transition.
   useEffect(() => {
     if (selectedModel) {
+      // Skip push when joining existing sidecar — adoption effect will set the correct model
+      if (joinedExistingSidecarRef.current) {
+        if (isDebugMode()) {
+          console.log('[Chat] Skipping model push (joined existing sidecar)');
+        }
+        return;
+      }
       apiPost('/api/model/set', { model: selectedModel }).catch(err => {
         console.error('[Chat] Failed to sync model to backend:', err);
       });
     }
   }, [selectedModel, apiPost]);
+
+  // Adopt sidecar config when joining an existing sidecar (e.g. IM Bot session).
+  // Reads the sidecar's current model and applies it to React state so the Tab
+  // reflects the session's actual config instead of overwriting it with its own.
+  const onJoinedExistingSidecarHandledRef = useRef(onJoinedExistingSidecarHandled);
+  onJoinedExistingSidecarHandledRef.current = onJoinedExistingSidecarHandled;
+  useEffect(() => {
+    if (!joinedExistingSidecar) return;
+
+    const adoptConfig = async () => {
+      try {
+        const config = await apiGet<{ success: boolean; model?: string | null }>('/api/session/config');
+        if (config.success && config.model) {
+          setSelectedModel(config.model);
+          console.log('[Chat] Adopted sidecar config: model=' + config.model);
+        }
+      } catch (err) {
+        console.error('[Chat] Failed to read sidecar config:', err);
+      } finally {
+        // Clear the flag whether adoption succeeded or failed
+        onJoinedExistingSidecarHandledRef.current?.();
+      }
+    };
+
+    adoptConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
+  }, [joinedExistingSidecar]);
 
   const { containerRef: messagesContainerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
 
@@ -677,6 +740,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         const enabledIds = await getEnabledMcpServerIds();
         setMcpServers(servers);
         setGlobalMcpEnabled(enabledIds);
+
+        // Skip MCP push when still in the adoption window (joined existing sidecar)
+        if (joinedExistingSidecarRef.current) {
+          if (isDebugMode()) {
+            console.log('[Chat] Skipping MCP push on tab activate (joined existing sidecar)');
+          }
+          return;
+        }
 
         // 3. Sync effective MCP servers to backend for next message
         const workspaceEnabled = currentProject?.mcpEnabledServers ?? [];
@@ -1142,7 +1213,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
           >
             <MessageList
-              messages={messages}
+              historyMessages={historyMessages}
+              streamingMessage={streamingMessage}
               isLoading={isLoading}
               containerRef={messagesContainerRef}
               bottomPadding={140}

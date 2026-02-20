@@ -3,17 +3,20 @@
 // tenant_access_token management, and event parsing.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::time::{sleep, Instant};
+use tokio::time::sleep;
 
 use prost::Message as ProstMessage;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::types::{ImConfig, ImMessage, ImPlatform, ImSourceType};
 use super::ApprovalCallback;
@@ -57,11 +60,13 @@ struct WsHeader {
 const FRAME_METHOD_CONTROL: i32 = 0;
 const FRAME_METHOD_DATA: i32 = 1;
 
-/// Dedup cache TTL (24 hours — must survive WebSocket reconnection replays)
-/// Feishu replays unACKed events on reconnect; half-day idle gaps are common.
-const DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Dedup cache TTL (72 hours — matching Feishu's max event retry window).
+/// Feishu retransmits unACKed events on reconnect with exponential backoff for up to 72h.
+const DEDUP_TTL_SECS: u64 = 72 * 60 * 60;
 /// Max dedup cache size before forced cleanup
 const DEDUP_MAX_SIZE: usize = 5000;
+/// Minimum interval between dedup disk writes (ms) to coalesce bursts
+const DEDUP_PERSIST_INTERVAL_MS: u64 = 500;
 
 /// Feishu API base URL
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
@@ -73,6 +78,29 @@ const TOKEN_VALIDITY_SECS: u64 = 7200;
 const WS_INITIAL_BACKOFF_SECS: u64 = 1;
 /// WebSocket reconnect max backoff
 const WS_MAX_BACKOFF_SECS: u64 = 60;
+
+/// Persist dedup cache to disk (atomic: write tmp → rename).
+/// Free function so it can be used from `spawn_blocking` ('static closure).
+fn save_dedup_cache_to_disk(path: &std::path::Path, cache: &HashMap<String, u64>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp_path = path.with_extension("json.tmp.dedup");
+    match serde_json::to_string(cache) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&tmp_path, &json) {
+                ulog_warn!("[feishu] Failed to write dedup cache tmp: {}", e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, path) {
+                ulog_warn!("[feishu] Failed to rename dedup cache: {}", e);
+            }
+        }
+        Err(e) => {
+            ulog_warn!("[feishu] Failed to serialize dedup cache: {}", e);
+        }
+    }
+}
 
 /// Cached tenant access token
 struct TokenCache {
@@ -188,19 +216,36 @@ fn markdown_to_feishu_post(md: &str) -> Value {
                     paragraphs.push(std::mem::take(&mut current_line));
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 if !current_line.is_empty() {
                     paragraphs.push(std::mem::take(&mut current_line));
                 }
                 in_code_block = true;
                 code_block_buf.clear();
+                // Extract language hint if present (take first word, ignore metadata)
+                if let CodeBlockKind::Fenced(lang) = kind {
+                    let lang_str = lang.split_whitespace().next().unwrap_or("").to_string();
+                    if !lang_str.is_empty() {
+                        code_block_buf.push_str(&format!("[{}]\n", lang_str));
+                    }
+                }
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                // Each line of code block becomes a separate paragraph
                 let buf = std::mem::take(&mut code_block_buf);
-                for line in buf.lines() {
-                    paragraphs.push(vec![json!({"tag": "text", "text": line})]);
+                if buf.trim().is_empty() {
+                    // Skip empty code blocks
+                } else {
+                    // Wrap code block with visual separator (Feishu Post has no native code block)
+                    paragraphs.push(vec![json!({"tag": "text", "text": "─── ✦ ───"})]);
+                    for line in buf.lines() {
+                        paragraphs.push(vec![json!({
+                            "tag": "text",
+                            "text": format!("  {}", line),
+                            "style": ["italic"],
+                        })]);
+                    }
+                    paragraphs.push(vec![json!({"tag": "text", "text": "─── ✦ ───"})]);
                 }
             }
             Event::Text(text) => {
@@ -248,13 +293,17 @@ fn markdown_to_feishu_post(md: &str) -> Value {
                 }
             }
             Event::Code(code) => {
-                // Inline code: preserve backticks as plain text
-                let text = format!("`{}`", code);
+                // Inline code: map to bold+italic (Feishu has no inline code style)
+                let code_text = code.to_string();
                 if let Some(prefix) = item_prefix.take() {
-                    current_line.push(json!({"tag": "text", "text": format!("{}{}", prefix, text)}));
-                } else {
-                    current_line.push(json!({"tag": "text", "text": text}));
+                    // Emit prefix as plain text, then code as styled
+                    current_line.push(json!({"tag": "text", "text": prefix}));
                 }
+                current_line.push(json!({
+                    "tag": "text",
+                    "text": code_text,
+                    "style": ["bold", "italic"],
+                }));
             }
             Event::SoftBreak => {
                 // Flush current line as a paragraph
@@ -294,6 +343,107 @@ fn markdown_to_feishu_post(md: &str) -> Value {
     })
 }
 
+// ── Feishu Post → plain text converter (receive direction) ──
+
+/// Extract plain text from a Feishu Post rich-text content JSON.
+///
+/// Post content structure (received):
+/// ```json
+/// { "title": "...", "content": [[{"tag":"text","text":"..."}, ...], ...] }
+/// ```
+/// Or wrapped in a locale key:
+/// ```json
+/// { "zh_cn": { "title": "...", "content": [[...]] } }
+/// ```
+fn feishu_post_to_text(content: &Value) -> String {
+    // Post content may be wrapped in a locale key (zh_cn / en_us / etc.)
+    // Direct structure: {"title": "...", "content": [[...]]}
+    // Locale-wrapped:  {"zh_cn": {"title": "...", "content": [[...]]}}
+    let post = if let Some(obj) = content.as_object() {
+        if obj.get("content").map_or(false, |v| v.is_array()) {
+            // Direct structure — "content" is the paragraph array
+            content
+        } else {
+            // Locale-wrapped — prefer zh_cn, fallback to first available
+            obj.get("zh_cn")
+                .or_else(|| obj.get("en_us"))
+                .or_else(|| obj.values().next())
+                .unwrap_or(content)
+        }
+    } else {
+        content
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Optional title
+    if let Some(title) = post["title"].as_str() {
+        if !title.is_empty() {
+            lines.push(title.to_string());
+        }
+    }
+
+    // Paragraphs: [[element, ...], ...]
+    if let Some(paragraphs) = post["content"].as_array() {
+        for para in paragraphs {
+            if let Some(elements) = para.as_array() {
+                let mut line_parts: Vec<String> = Vec::new();
+                for elem in elements {
+                    let tag = elem["tag"].as_str().unwrap_or("");
+                    match tag {
+                        "text" => {
+                            if let Some(t) = elem["text"].as_str() {
+                                line_parts.push(t.to_string());
+                            }
+                        }
+                        "a" => {
+                            // Hyperlink: show text + URL
+                            let text = elem["text"].as_str().unwrap_or("");
+                            let href = elem["href"].as_str().unwrap_or("");
+                            if !href.is_empty() && text != href {
+                                line_parts.push(format!("{} ({})", text, href));
+                            } else if !text.is_empty() {
+                                line_parts.push(text.to_string());
+                            } else {
+                                line_parts.push(href.to_string());
+                            }
+                        }
+                        "at" => {
+                            let name = elem["user_name"].as_str().unwrap_or("@someone");
+                            line_parts.push(format!("@{}", name));
+                        }
+                        "img" | "media" => {
+                            line_parts.push("[附件]".to_string());
+                        }
+                        "code_block" => {
+                            // Undocumented but may appear; try to extract text/code
+                            if let Some(t) = elem["text"].as_str().or(elem["code"].as_str()) {
+                                line_parts.push(format!("```\n{}\n```", t));
+                            } else {
+                                ulog_debug!("[feishu] code_block element has no text/code: {}", elem);
+                            }
+                        }
+                        "emotion" => {
+                            let emoji = elem["emoji_type"].as_str().unwrap_or("emoji");
+                            line_parts.push(format!("[{}]", emoji));
+                        }
+                        other => {
+                            // Unknown tag — best effort: extract text field if present
+                            ulog_debug!("[feishu] Unknown post element tag: '{}', elem: {}", other, elem);
+                            if let Some(t) = elem["text"].as_str() {
+                                line_parts.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                lines.push(line_parts.join(""));
+            }
+        }
+    }
+
+    lines.join("\n")
+}
+
 /// Feishu Bot API adapter
 pub struct FeishuAdapter {
     app_id: String,
@@ -305,8 +455,12 @@ pub struct FeishuAdapter {
     msg_tx: mpsc::Sender<ImMessage>,
     allowed_users: Arc<RwLock<Vec<String>>>,
     bot_name: Arc<RwLock<Option<String>>>,
-    /// Message dedup cache: message_id → timestamp (30min TTL)
-    dedup_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Message dedup cache: message_id → unix_timestamp_secs (72h TTL, disk-persisted)
+    dedup_cache: Arc<Mutex<HashMap<String, u64>>>,
+    /// Path for persisting dedup cache across restarts
+    dedup_persist_path: Option<PathBuf>,
+    /// Epoch millis of last dedup disk write (debounce: at most once per 500ms)
+    dedup_last_persist_ms: AtomicU64,
     /// Channel for forwarding approval callbacks from card button clicks
     approval_tx: mpsc::Sender<ApprovalCallback>,
 }
@@ -317,6 +471,7 @@ impl FeishuAdapter {
         msg_tx: mpsc::Sender<ImMessage>,
         allowed_users: Arc<RwLock<Vec<String>>>,
         approval_tx: mpsc::Sender<ApprovalCallback>,
+        dedup_path: Option<PathBuf>,
     ) -> Self {
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(30));
@@ -329,6 +484,9 @@ impl FeishuAdapter {
                     .expect("Failed to create HTTP client")
             });
 
+        // Load dedup cache from disk (survives app restart)
+        let dedup_cache = Self::load_dedup_cache(dedup_path.as_deref());
+
         Self {
             app_id: config.feishu_app_id.clone().unwrap_or_default(),
             app_secret: config.feishu_app_secret.clone().unwrap_or_default(),
@@ -338,8 +496,55 @@ impl FeishuAdapter {
             msg_tx,
             allowed_users,
             bot_name: Arc::new(RwLock::new(None)),
-            dedup_cache: Arc::new(Mutex::new(HashMap::new())),
+            dedup_cache: Arc::new(Mutex::new(dedup_cache)),
+            dedup_persist_path: dedup_path,
+            dedup_last_persist_ms: AtomicU64::new(0),
             approval_tx,
+        }
+    }
+
+    /// Load dedup cache from disk, filtering out expired entries.
+    fn load_dedup_cache(path: Option<&std::path::Path>) -> HashMap<String, u64> {
+        let path = match path {
+            Some(p) if p.exists() => p,
+            _ => return HashMap::new(),
+        };
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                match serde_json::from_str::<HashMap<String, u64>>(&content) {
+                    Ok(mut cache) => {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let before = cache.len();
+                        cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
+                        ulog_info!(
+                            "[feishu] Loaded dedup cache from disk: {} entries ({} expired)",
+                            cache.len(),
+                            before - cache.len()
+                        );
+                        cache
+                    }
+                    Err(e) => {
+                        ulog_warn!("[feishu] Failed to parse dedup cache file: {}", e);
+                        HashMap::new()
+                    }
+                }
+            }
+            Err(e) => {
+                ulog_warn!("[feishu] Failed to read dedup cache file: {}", e);
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Flush dedup cache to disk unconditionally (call on graceful shutdown).
+    pub async fn flush_dedup_cache(&self) {
+        if let Some(path) = &self.dedup_persist_path {
+            let snapshot = self.dedup_cache.lock().await.clone();
+            save_dedup_cache_to_disk(path, &snapshot);
+            ulog_info!("[feishu] Dedup cache flushed to disk ({} entries)", snapshot.len());
         }
     }
 
@@ -627,19 +832,40 @@ impl FeishuAdapter {
         let message_id = message["message_id"].as_str()?.to_string();
         let msg_type = message["message_type"].as_str()?;
 
-        // Only handle text messages for MVP
-        if msg_type != "text" {
-            ulog_debug!("[feishu] Ignoring non-text message type: {}", msg_type);
+        let content_str = message["content"].as_str()?;
+        let content: Value = match serde_json::from_str(content_str) {
+            Ok(v) => v,
+            Err(e) => {
+                ulog_warn!("[feishu] Failed to parse message content JSON: {}", e);
+                return None;
+            }
+        };
+
+        let text = match msg_type {
+            "text" => {
+                content["text"].as_str().unwrap_or("").to_string()
+            }
+            "post" => {
+                feishu_post_to_text(&content)
+            }
+            _ => {
+                ulog_debug!("[feishu] Ignoring unsupported message type: {}", msg_type);
+                return None;
+            }
+        };
+
+        if text.trim().is_empty() {
+            ulog_debug!("[feishu] Ignoring empty {} message", msg_type);
             return None;
         }
 
-        let content_str = message["content"].as_str()?;
-        let content: Value = serde_json::from_str(content_str).ok()?;
-        let text = content["text"].as_str().unwrap_or("").to_string();
-
-        let sender_id = sender["sender_id"]["open_id"].as_str()
-            .unwrap_or("")
-            .to_string();
+        let sender_id = match sender["sender_id"]["open_id"].as_str() {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                ulog_warn!("[feishu] Missing sender open_id in message {}", message_id);
+                return None;
+            }
+        };
 
         // Sender type: "user" for users
         let sender_type = sender["sender_type"].as_str().unwrap_or("user");
@@ -708,23 +934,36 @@ impl FeishuAdapter {
         pong.encode_to_vec()
     }
 
-    /// Build a protobuf ACK frame for a received data frame.
-    /// Feishu requires ACK for data frames; without it, events are replayed on reconnect.
-    fn build_ack_frame(data_frame: &WsFrame) -> Vec<u8> {
-        let ack = WsFrame {
+    /// Build a protobuf response frame for a received data frame.
+    ///
+    /// The official Feishu SDK (`larksuite/oapi-sdk-go` ws/client.go) responds to data
+    /// frames by sending back the *same* frame structure with:
+    ///   - Original headers preserved, plus a `biz_rt` header (processing time in ms)
+    ///   - A JSON payload: `{"StatusCode":200,"Headers":{},"Data":null}`
+    ///
+    /// Without a valid response payload, the Feishu server considers the event
+    /// unacknowledged and retries delivery with exponential backoff (seconds → hours).
+    fn build_response_frame(data_frame: &WsFrame) -> Vec<u8> {
+        let mut headers = data_frame.headers.clone();
+        headers.push(WsHeader {
+            key: "biz_rt".to_string(),
+            value: "0".to_string(),
+        });
+
+        let response_payload = br#"{"StatusCode":200,"Headers":{},"Data":null}"#;
+
+        let resp = WsFrame {
             seq_id: data_frame.seq_id,
             log_id: data_frame.log_id,
             service: data_frame.service,
             method: FRAME_METHOD_DATA,
-            headers: vec![
-                WsHeader { key: "type".to_string(), value: "ack".to_string() },
-            ],
+            headers,
             payload_encoding: None,
             payload_type: None,
-            payload: None,
+            payload: Some(response_payload.to_vec()),
             log_id_new: data_frame.log_id_new.clone(),
         };
-        ack.encode_to_vec()
+        resp.encode_to_vec()
     }
 
     /// WebSocket listen loop with reconnection.
@@ -819,10 +1058,11 @@ impl FeishuAdapter {
                                             continue;
                                         }
 
-                                        // ACK the data frame immediately to prevent replay on reconnect
-                                        let ack_data = Self::build_ack_frame(&frame);
-                                        if let Err(e) = ws_write.send(WsMessage::Binary(ack_data.into())).await {
-                                            ulog_warn!("[feishu] Failed to send ACK for seq_id={}: {}", frame.seq_id, e);
+                                        // Respond to the data frame immediately to prevent replay on reconnect.
+                                        // Must include a JSON response payload per the official Feishu WS protocol.
+                                        let resp_data = Self::build_response_frame(&frame);
+                                        if let Err(e) = ws_write.send(WsMessage::Binary(resp_data.into())).await {
+                                            ulog_warn!("[feishu] Failed to send response for seq_id={}: {}", frame.seq_id, e);
                                         }
 
                                         // Check for fragmentation (sum = total parts, seq = part index)
@@ -1076,21 +1316,46 @@ impl FeishuAdapter {
         }
 
         if let Some(msg) = self.parse_im_event(&event) {
-            // Dedup check: skip if message_id was seen within TTL
-            {
+            // Dedup check: skip if message_id was seen within TTL (72h, disk-persisted)
+            let persist_snapshot = {
                 let mut cache = self.dedup_cache.lock().await;
-                let now = Instant::now();
-                // Periodic cleanup: remove expired entries (every 100 inserts or when exceeding max)
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                // Periodic cleanup: remove expired entries
                 if cache.len() > DEDUP_MAX_SIZE || cache.len() % 100 == 0 {
-                    cache.retain(|_, ts| now.duration_since(*ts) < DEDUP_TTL);
+                    cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
                 }
                 if let Some(prev) = cache.get(&msg.message_id) {
-                    if now.duration_since(*prev) < DEDUP_TTL {
+                    if now.saturating_sub(*prev) < DEDUP_TTL_SECS {
                         ulog_debug!("[feishu] Dedup: skipping duplicate message {}", msg.message_id);
                         return;
                     }
                 }
                 cache.insert(msg.message_id.clone(), now);
+                // Debounced persist: snapshot the cache if enough time elapsed since last write.
+                // Dedup hits (duplicates) return early above — only new messages reach here,
+                // so burst writes only occur on first startup with empty cache, not on reconnect replay.
+                if self.dedup_persist_path.is_some() {
+                    let now_ms = now * 1000;
+                    let last_ms = self.dedup_last_persist_ms.load(Ordering::Relaxed);
+                    if now_ms.saturating_sub(last_ms) >= DEDUP_PERSIST_INTERVAL_MS {
+                        self.dedup_last_persist_ms.store(now_ms, Ordering::Relaxed);
+                        Some(cache.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }; // Mutex released here — IO happens outside the lock
+
+            // Persist to disk via blocking thread pool (non-blocking for async runtime)
+            if let (Some(snapshot), Some(path)) = (persist_snapshot, self.dedup_persist_path.clone()) {
+                tokio::task::spawn_blocking(move || {
+                    save_dedup_cache_to_disk(&path, &snapshot);
+                });
             }
 
             // Check bind code (plain text BIND_xxx in private chat)
@@ -1103,7 +1368,8 @@ impl FeishuAdapter {
             }
 
             ulog_info!(
-                "[feishu] Dispatching message from {} (chat {}): {} chars",
+                "[feishu] Dispatching message {} from {} (chat {}): {} chars",
+                msg.message_id,
                 msg.sender_id,
                 msg.chat_id,
                 msg.text.len(),

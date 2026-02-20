@@ -936,6 +936,19 @@ export async function upgradeSessionId(
 }
 
 /**
+ * Check if a session's Sidecar has persistent background owners (CronTask or ImBot)
+ * that will keep it alive after a Tab releases its ownership.
+ */
+export async function sessionHasPersistentOwners(sessionId: string): Promise<boolean> {
+    if (!isTauri()) return false;
+    try {
+        return await invoke<boolean>('cmd_session_has_persistent_owners', { sessionId });
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Execute a cron task synchronously via Sidecar
  * This is the full execution that waits for completion and returns results
  *

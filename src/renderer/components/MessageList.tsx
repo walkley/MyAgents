@@ -27,7 +27,8 @@ function formatElapsedTime(totalSeconds: number): string {
 }
 
 interface MessageListProps {
-  messages: MessageType[];
+  historyMessages: MessageType[];
+  streamingMessage: MessageType | null;
   isLoading: boolean;
   containerRef: RefObject<HTMLDivElement | null>;
   bottomPadding?: number;
@@ -116,7 +117,8 @@ const StatusTimer = memo(function StatusTimer({ message }: { message: string }) 
 });
 
 const MessageList = memo(function MessageList({
-  messages,
+  historyMessages,
+  streamingMessage,
   isLoading,
   containerRef,
   bottomPadding,
@@ -133,31 +135,42 @@ const MessageList = memo(function MessageList({
     bottomPadding ? { paddingBottom: bottomPadding } : undefined;
 
   // Keep the same random message during one streaming session
-  // Use messages.length as a stable key - new message is picked when a new AI response starts
-  const streamingMessage = useMemo(
+  // Use historyMessages.length as a stable key - new message is picked when a new AI response starts
+  const streamingStatusMessage = useMemo(
     () => getRandomStreamingMessage(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only change when message count changes
-    [messages.length]
+    [historyMessages.length]
   );
 
   // Determine status display
   const showStatus = isLoading || !!systemStatus;
   const statusMessage = systemStatus
     ? (SYSTEM_STATUS_MESSAGES[systemStatus] || systemStatus)
-    : streamingMessage;
+    : streamingStatusMessage;
 
   return (
     <div ref={containerRef} className={`relative ${containerClasses}`} style={containerStyle}>
       <div className="mx-auto max-w-3xl space-y-2">
-        {messages.map((message, index) => (
+        {/* History messages — reference-stable during streaming, zero re-iteration */}
+        {historyMessages.map((message) => (
           <Message
             key={message.id}
             message={message}
-            isLoading={isLoading && index === messages.length - 1}
+            isLoading={false}
             isStreaming={isStreaming}
             onRewind={onRewind}
           />
         ))}
+        {/* Streaming message — only this component re-renders during streaming */}
+        {streamingMessage && (
+          <Message
+            key={streamingMessage.id}
+            message={streamingMessage}
+            isLoading={isLoading}
+            isStreaming={isStreaming}
+            onRewind={onRewind}
+          />
+        )}
         {/* Permission prompt inline after messages */}
         {pendingPermission && onPermissionDecision && (
           <div className="py-2">

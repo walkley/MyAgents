@@ -6,6 +6,7 @@ import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@a
 import { getScriptDir, getBundledBunDir } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -114,7 +115,7 @@ export type MessageWire = {
     isImage?: boolean;
   }[];
   metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
     sourceId?: string;
     senderName?: string;
   };
@@ -140,7 +141,7 @@ const streamIndexToToolId: Map<number, string> = new Map();
 const toolResultIndexToId: Map<number, string> = new Map();
 
 // IM Draft Stream: callback for streaming text to Telegram
-type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request', data: string) => void;
+type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
@@ -533,6 +534,10 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
  * so this does NOT trigger schedulePreWarm(). The debounced pre-warm
  * from MCP/agents sync will pick up the model automatically.
  */
+export function getSessionModel(): string | undefined {
+  return currentModel;
+}
+
 export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
@@ -613,6 +618,15 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     }
     // Not in cron context - this tool shouldn't be available
     return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
+  }
+
+  // Special case: im-cron is a built-in MCP server for IM Bot scheduled tasks
+  if (serverId === 'im-cron') {
+    const imCtx = getImCronContext();
+    if (imCtx) {
+      return { allowed: true };
+    }
+    return { allowed: false, reason: 'IM 定时任务工具只能在 IM Bot 会话中使用' };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -718,6 +732,13 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
   if (cronContext.taskId) {
     result['cron-tools'] = cronToolsServer;
     console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+  }
+
+  // Add IM cron tool if we're in an IM context with management API available
+  const imCronCtx = getImCronContext();
+  if (imCronCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
+    result['im-cron'] = imCronToolServer;
+    console.log(`[agent] Added im-cron MCP server for bot ${imCronCtx.botId}`);
   }
 
   // Return early if no user MCP servers (but may have cron-tools)
@@ -1184,10 +1205,14 @@ function persistMessagesToStorage(
 ): void {
   const sessionMessages: SessionMessage[] = messages.map((msg, index) => {
     const isLastAssistant = index === messages.length - 1 && msg.role === 'assistant';
+    // Strip Playwright tool results from disk persistence (keep in-memory data for SDK context)
+    const contentForDisk = typeof msg.content === 'string'
+      ? msg.content
+      : JSON.stringify(stripPlaywrightResults(msg.content));
     return {
       id: msg.id,
       role: msg.role,
-      content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+      content: contentForDisk,
       timestamp: msg.timestamp,
       sdkUuid: msg.sdkUuid,
       attachments: msg.attachments?.map((att) => ({
@@ -1907,6 +1932,36 @@ function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
   return null;
 }
 
+/** Sentinel value for stripped Playwright tool results (truthy, so ProcessRow sees tool as complete) */
+const PLAYWRIGHT_RESULT_SENTINEL = '[playwright_result_stripped]';
+
+/** Set of tool_use IDs whose results are stripped from frontend broadcast in the current turn */
+const strippedToolResultIds = new Set<string>();
+
+function isPlaywrightTool(toolUseId: string): boolean {
+  const toolBlock = findToolBlockById(toolUseId);
+  return toolBlock?.tool.name.startsWith('mcp__playwright__') ?? false;
+}
+
+/**
+ * Strip Playwright tool results from ContentBlock[] for frontend/persistence.
+ * Replaces tool.result with a sentinel so ProcessRow still sees the tool as complete.
+ * Keeps in-memory SDK data intact for conversation context.
+ */
+export function stripPlaywrightResults(content: ContentBlock[]): ContentBlock[] {
+  return content.map(block => {
+    if (
+      block.type === 'tool_use' &&
+      block.tool?.name.startsWith('mcp__playwright__') &&
+      block.tool.result &&
+      block.tool.result !== PLAYWRIGHT_RESULT_SENTINEL
+    ) {
+      return { ...block, tool: { ...block.tool, result: PLAYWRIGHT_RESULT_SENTINEL } };
+    }
+    return block;
+  });
+}
+
 function appendToolResultDelta(toolUseId: string, delta: string): void {
   if (appendSubagentToolResultDelta(toolUseId, delta)) {
     return;
@@ -2154,6 +2209,7 @@ function clearMessageState(): void {
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
+  strippedToolResultIds.clear();
   isStreamingMessage = false;
   messageSequence = 0;
   pendingConfigRestart = false;
@@ -2509,7 +2565,7 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv,
-  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string },
+  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
   if (rewindPromise) {
@@ -3084,11 +3140,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: cron-tools is a built-in trusted server
+        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
         // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        // (AI should be able to exit cron task without user approval)
-        if (toolName.startsWith('mcp__cron-tools__')) {
-          console.log(`[permission] cron-tools auto-allowed: ${toolName}`);
+        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
+          console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
             updatedInput: input as Record<string, unknown>
@@ -3267,10 +3322,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   delta: streamEvent.delta.text
                 });
               } else {
-                broadcast('chat:tool-result-delta', {
-                  toolUseId: sdkMessage.parent_tool_use_id,
-                  delta: streamEvent.delta.text
-                });
+                // Skip broadcasting delta for stripped Playwright tools (keep in-memory data intact)
+                if (!strippedToolResultIds.has(sdkMessage.parent_tool_use_id)) {
+                  broadcast('chat:tool-result-delta', {
+                    toolUseId: sdkMessage.parent_tool_use_id,
+                    delta: streamEvent.delta.text
+                  });
+                }
               }
               appendToolResultDelta(sdkMessage.parent_tool_use_id, streamEvent.delta.text);
             } else {
@@ -3320,8 +3378,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         } else if (streamEvent.type === 'content_block_start') {
           // IM stream: track text block indices (non-subagent only)
-          if (imStreamCallback && streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
-            imTextBlockIndices.add(streamEvent.index);
+          if (imStreamCallback && !sdkMessage.parent_tool_use_id) {
+            if (streamEvent.content_block.type === 'text') {
+              imTextBlockIndices.add(streamEvent.index);
+            } else {
+              // Notify non-text block activity (thinking, tool_use) so IM can show placeholder
+              imStreamCallback('activity', streamEvent.content_block.type);
+            }
           }
           if (streamEvent.content_block.type === 'thinking') {
             broadcast('chat:thinking-start', { index: streamEvent.index });
@@ -3415,9 +3478,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   isError: toolResultBlock.is_error || false
                 });
               } else {
+                // Strip Playwright tool results from frontend broadcast
+                const shouldStripResult = isPlaywrightTool(toolResultBlock.tool_use_id);
+                if (shouldStripResult) {
+                  strippedToolResultIds.add(toolResultBlock.tool_use_id);
+                }
                 broadcast('chat:tool-result-start', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  content: shouldStripResult ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
               }
@@ -3534,9 +3602,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 });
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
+                const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
                 });
               }
               handleToolResultComplete(toolResultBlock.tool_use_id, contentStr);
@@ -3601,9 +3670,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const text = formatAssistantContent(assistantMessage.content);
           if (text) {
             const next = appendToolResultContent(sdkMessage.parent_tool_use_id, text);
+            const stripped = strippedToolResultIds.has(sdkMessage.parent_tool_use_id) || isPlaywrightTool(sdkMessage.parent_tool_use_id);
             broadcast('chat:tool-result-complete', {
               toolUseId: sdkMessage.parent_tool_use_id,
-              content: next
+              content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : next
             });
           }
         }
@@ -3661,9 +3731,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   isError: toolResultBlock.is_error || false
                 });
               } else {
+                const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
               }

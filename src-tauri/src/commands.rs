@@ -377,6 +377,121 @@ pub fn cmd_initialize_bundled_workspace<R: Runtime>(
     })
 }
 
+/// Command: Create a dedicated workspace for an IM Bot by copying bundled mino template.
+/// Sanitizes the name for path safety and auto-appends numeric suffix on collision.
+/// Returns the created workspace path.
+#[tauri::command]
+pub fn cmd_create_bot_workspace<R: Runtime>(
+    app_handle: AppHandle<R>,
+    workspace_name: String,
+) -> Result<InitBundledWorkspaceResult, String> {
+    let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
+    let projects_dir = home_dir.join(".myagents").join("projects");
+
+    // Sanitize name: remove @, replace non-alphanumeric (except CJK) with dash, trim
+    let sanitized = sanitize_workspace_name(&workspace_name);
+    if sanitized.is_empty() {
+        return Err("Workspace name is empty after sanitization".to_string());
+    }
+
+    // Find available path (handle collisions with numeric suffix)
+    let dest = find_available_workspace_path(&projects_dir, &sanitized);
+
+    // Copy mino template from bundled resources
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    let mino_src = resource_dir.join("mino");
+    if !mino_src.exists() {
+        return Err("Bundled mino template not found in resources".to_string());
+    }
+
+    copy_dir_recursive(&mino_src, &dest)
+        .map_err(|e| format!("Failed to copy workspace template: {}", e))?;
+
+    Ok(InitBundledWorkspaceResult {
+        path: dest.to_string_lossy().to_string(),
+        is_new: true,
+    })
+}
+
+/// Command: Remove a workspace directory created by `cmd_create_bot_workspace`.
+/// Safety: only allows deleting directories under `~/.myagents/projects/`.
+#[tauri::command]
+pub fn cmd_remove_bot_workspace(workspace_path: String) -> Result<(), String> {
+    let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
+    let projects_dir = home_dir.join(".myagents").join("projects");
+
+    let target = PathBuf::from(&workspace_path);
+    // Canonicalize both paths to prevent traversal attacks
+    let canon_projects = projects_dir.canonicalize()
+        .map_err(|e| format!("Failed to resolve projects dir: {}", e))?;
+    let canon_target = target.canonicalize()
+        .map_err(|e| format!("Failed to resolve workspace path: {}", e))?;
+
+    if !canon_target.starts_with(&canon_projects) || canon_target == canon_projects {
+        return Err("Refusing to delete: path is not inside ~/.myagents/projects/".to_string());
+    }
+
+    fs::remove_dir_all(&canon_target)
+        .map_err(|e| format!("Failed to remove workspace directory: {}", e))?;
+
+    Ok(())
+}
+
+/// Sanitize a workspace name for use as a directory name.
+/// Keeps alphanumeric, CJK characters, hyphens, and underscores.
+fn sanitize_workspace_name(name: &str) -> String {
+    let result: String = name
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                Some(c)
+            } else if c == ' ' || c == '@' || c == '/' || c == '\\' {
+                Some('-')
+            } else if c > '\u{2E7F}' {
+                // Keep CJK and other non-ASCII characters
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Trim leading/trailing dashes and collapse consecutive dashes
+    let mut collapsed = String::new();
+    let mut prev_dash = false;
+    for c in result.chars() {
+        if c == '-' {
+            if !prev_dash && !collapsed.is_empty() {
+                collapsed.push(c);
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+    collapsed.trim_end_matches('-').to_string()
+}
+
+/// Find an available workspace path, appending numeric suffix on collision.
+fn find_available_workspace_path(projects_dir: &Path, base_name: &str) -> PathBuf {
+    let first = projects_dir.join(base_name);
+    if !first.exists() {
+        return first;
+    }
+    for i in 2..=100 {
+        let candidate = projects_dir.join(format!("{}-{}", base_name, i));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Extremely unlikely fallback
+    projects_dir.join(format!("{}-{}", base_name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x")))
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {

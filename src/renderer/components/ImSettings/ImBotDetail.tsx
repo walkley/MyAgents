@@ -5,7 +5,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
-import { getAllMcpServers, getEnabledMcpServerIds, loadAppConfig, removeImBotConfig, updateImBotConfig } from '@/config/configService';
+import { getAllMcpServers, getEnabledMcpServerIds, removeImBotConfig, updateImBotConfig } from '@/config/configService';
 import { getProviderModels, type McpServerDefinition } from '@/config/types';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
@@ -17,6 +17,7 @@ import BindQrPanel from './components/BindQrPanel';
 import BindCodePanel from './components/BindCodePanel';
 import AiConfigCard from './components/AiConfigCard';
 import McpToolsCard from './components/McpToolsCard';
+import HeartbeatConfigCard from './components/HeartbeatConfigCard';
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
 
 export default function ImBotDetail({
@@ -96,8 +97,8 @@ export default function ImBotDetail({
                     if (status.botUsername) {
                         setBotUsername(status.botUsername);
                         setVerifyStatus('valid');
-                        // Auto-sync bot name from platform username (once)
-                        if (!nameSyncedRef.current) {
+                        // Auto-sync bot name from platform username (once, skip during toggle)
+                        if (!nameSyncedRef.current && !togglingRef.current) {
                             nameSyncedRef.current = true;
                             // Telegram uses @username, Feishu uses plain app name
                             const platform = botConfigRef.current?.platform;
@@ -212,6 +213,7 @@ export default function ImBotDetail({
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
+            heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
         };
     }, [providers, apiKeys]);
 
@@ -326,31 +328,24 @@ export default function ImBotDetail({
         return '';
     }, [botConfig?.model, selectedProvider?.primaryModel, modelOptions]);
 
-    // Stable refs for workspace handler
-    const buildStartParamsRef = useRef(buildStartParams);
-    buildStartParamsRef.current = buildStartParams;
-
-    const handleWorkspaceChange = useCallback(async (path: string) => {
-        if (!path) return;
-        await saveBotField({ defaultWorkspacePath: path });
-
+    // Helper: invoke hot-update Tauri command if bot is currently running
+    const hotUpdateRunning = useCallback(async (command: string, params: Record<string, unknown>) => {
         const status = botStatusRef.current;
         if ((status?.status === 'online' || status?.status === 'connecting') && isTauriEnvironment()) {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                // Read latest config from disk since we just updated it
-                const latest = await loadAppConfig();
-                const cfg = (latest.imBotConfigs ?? []).find(c => c.id === botId);
-                if (cfg) {
-                    const params = await buildStartParamsRef.current(cfg);
-                    await invoke('cmd_start_im_bot', params);
-                    toastRef.current.success('已切换工作区，Bot 已重启');
-                }
+                await invoke(command, { botId, ...params });
             } catch (err) {
-                toastRef.current.error(`重启失败: ${err}`);
+                console.error(`[ImBotDetail] Hot-update ${command} failed:`, err);
             }
         }
-    }, [botId, saveBotField]);
+    }, [botId]);
+
+    const handleWorkspaceChange = useCallback(async (path: string) => {
+        if (!path) return;
+        await saveBotField({ defaultWorkspacePath: path });
+        await hotUpdateRunning('cmd_update_im_bot_workspace', { workspacePath: path });
+    }, [saveBotField, hotUpdateRunning]);
 
     if (!botConfig) {
         return (
@@ -426,7 +421,14 @@ export default function ImBotDetail({
                             <FeishuCredentialInput
                                 appId={botConfig.feishuAppId ?? ''}
                                 appSecret={botConfig.feishuAppSecret ?? ''}
-                                onAppIdChange={(appId) => saveBotField({ feishuAppId: appId })}
+                                onAppIdChange={(appId) => {
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
+                                    if (others.some(b => b.feishuAppId === appId)) {
+                                        toastRef.current.error('该飞书应用凭证已被其他 Bot 使用');
+                                        return;
+                                    }
+                                    saveBotField({ feishuAppId: appId });
+                                }}
                                 onAppSecretChange={(appSecret) => saveBotField({ feishuAppSecret: appSecret })}
                                 verifyStatus={verifyStatus}
                                 botName={botUsername}
@@ -435,7 +437,7 @@ export default function ImBotDetail({
                             <BotTokenInput
                                 value={botConfig.botToken}
                                 onChange={(token) => {
-                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId);
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
                                     if (others.some(b => b.botToken === token)) {
                                         toastRef.current.error('该 Bot Token 已被其他 Bot 使用');
                                         return;
@@ -483,7 +485,10 @@ export default function ImBotDetail({
                         )}
                         <WhitelistManager
                             users={botConfig.allowedUsers}
-                            onChange={(users) => saveBotField({ allowedUsers: users })}
+                            onChange={async (users) => {
+                                await saveBotField({ allowedUsers: users });
+                                await hotUpdateRunning('cmd_update_im_bot_allowed_users', { allowedUsers: users });
+                            }}
                             platform={botConfig.platform}
                         />
                     </div>
@@ -533,7 +538,10 @@ export default function ImBotDetail({
                 <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">权限模式</h3>
                 <PermissionModeSelect
                     value={botConfig.permissionMode}
-                    onChange={(mode) => saveBotField({ permissionMode: mode })}
+                    onChange={async (mode) => {
+                        await saveBotField({ permissionMode: mode });
+                        await hotUpdateRunning('cmd_update_im_bot_permission_mode', { permissionMode: mode });
+                    }}
                 />
             </div>
 
@@ -543,24 +551,76 @@ export default function ImBotDetail({
                 model={effectiveModel}
                 providerOptions={providerOptions}
                 modelOptions={modelOptions}
-                onProviderChange={(providerId) => {
+                onProviderChange={async (providerId) => {
                     const provider = providers.find(p => p.id === providerId);
                     const newModel = provider ? provider.primaryModel : undefined;
-                    saveBotField({ providerId: providerId || undefined, model: newModel });
+                    await saveBotField({ providerId: providerId || undefined, model: newModel });
+                    // Hot-update: build provider env and sync to running bot
+                    let providerEnvJson: string | null = null;
+                    if (provider && provider.type !== 'subscription') {
+                        providerEnvJson = JSON.stringify({
+                            baseUrl: provider.config.baseUrl,
+                            apiKey: apiKeys[provider.id],
+                            authType: provider.authType,
+                        });
+                    }
+                    const availableProvidersList = providers
+                        .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
+                        .map(p => ({
+                            id: p.id, name: p.name, primaryModel: p.primaryModel,
+                            baseUrl: p.config.baseUrl, authType: p.authType,
+                            apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
+                        }));
+                    await hotUpdateRunning('cmd_update_im_bot_ai_config', {
+                        model: newModel || null,
+                        // Empty string = explicit clear (subscription); null would mean "don't change"
+                        providerEnvJson: providerEnvJson ?? '',
+                        availableProvidersJson: availableProvidersList.length > 0 ? JSON.stringify(availableProvidersList) : '',
+                    });
                 }}
-                onModelChange={(model) => saveBotField({ model: model || undefined })}
+                onModelChange={async (model) => {
+                    await saveBotField({ model: model || undefined });
+                    await hotUpdateRunning('cmd_update_im_bot_ai_config', { model: model || null });
+                }}
             />
 
             {/* MCP Tools */}
             <McpToolsCard
                 availableMcpServers={availableMcpServers}
                 enabledServerIds={botConfig.mcpEnabledServers ?? []}
-                onToggle={(serverId) => {
+                onToggle={async (serverId) => {
                     const current = botConfig.mcpEnabledServers ?? [];
                     const updated = current.includes(serverId)
                         ? current.filter(id => id !== serverId)
                         : [...current, serverId];
-                    saveBotField({ mcpEnabledServers: updated.length > 0 ? updated : undefined });
+                    await saveBotField({ mcpEnabledServers: updated.length > 0 ? updated : undefined });
+                    // Hot-update MCP: build JSON from enabled + globally-enabled servers
+                    const enabledDefs = mcpServers.filter(
+                        s => globalMcpEnabled.includes(s.id) && updated.includes(s.id)
+                    );
+                    await hotUpdateRunning('cmd_update_im_bot_mcp_servers', {
+                        mcpServersJson: enabledDefs.length > 0 ? JSON.stringify(enabledDefs) : null,
+                    });
+                }}
+            />
+
+            {/* Heartbeat Config */}
+            <HeartbeatConfigCard
+                heartbeat={botConfig.heartbeat}
+                onChange={async (hb) => {
+                    await saveBotField({ heartbeat: hb });
+                    // Hot-update running heartbeat config
+                    if (isRunning && isTauriEnvironment() && hb) {
+                        try {
+                            const { invoke } = await import('@tauri-apps/api/core');
+                            await invoke('cmd_update_heartbeat_config', {
+                                botId,
+                                heartbeatConfigJson: JSON.stringify(hb),
+                            });
+                        } catch {
+                            // Non-critical: config will take effect on next bot restart
+                        }
+                    }
                 }}
             />
 

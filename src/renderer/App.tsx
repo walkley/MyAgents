@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, sessionHasPersistentOwners } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -44,6 +44,7 @@ interface TabContentProps {
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
+  onClearJoinedExistingSidecar: (tabId: string) => void;
   // Settings callbacks
   onSettingsSectionChange: () => void;
   updateReady: boolean;
@@ -58,6 +59,7 @@ const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error,
   onLaunchProject, onBack, onSwitchSession, onNewSession,
   onUpdateGenerating, onUpdateSessionId, onClearInitialMessage,
+  onClearJoinedExistingSidecar,
   settingsInitialSection, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
   onCheckForUpdate, onRestartAndUpdate,
@@ -101,6 +103,8 @@ const MemoizedTabContent = memo(function TabContent({
             onNewSession={() => onNewSession(tab.id)}
             initialMessage={tab.initialMessage}
             onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
+            joinedExistingSidecar={tab.joinedExistingSidecar}
+            onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
           />
         </TabProvider>
       )}
@@ -124,7 +128,7 @@ const MemoizedTabContent = memo(function TabContent({
 
 export default function App() {
   // Auto-update state (silent background updates)
-  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate } = useUpdater();
+  const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
   // Stable callback for Settings prop — ref pattern ensures memo comparator correctness
   const restartAndUpdateRef = useRef(restartAndUpdate);
@@ -488,19 +492,23 @@ export default function App() {
   }, []);
 
   // Close tab with confirmation if generating (shows custom dialog)
-  const closeTabWithConfirmation = useCallback((tabId: string) => {
+  // Exception: if a persistent owner (CronTask / ImBot) keeps the Sidecar alive,
+  // closing the Tab just releases the Tab owner — no work is lost, so skip confirmation.
+  const closeTabWithConfirmation = useCallback(async (tabId: string) => {
     const tab = tabsRef.current.find(t => t.id === tabId);
 
-    // If generating, show confirmation dialog
-    if (tab?.isGenerating) {
-      setCloseConfirmState({
-        tabId,
-        tabTitle: tab.title
-      });
+    if (tab?.isGenerating && tab.sessionId) {
+      // Ask Rust if the Sidecar has background owners that survive this Tab closing
+      const hasBgOwner = await sessionHasPersistentOwners(tab.sessionId);
+      if (hasBgOwner) {
+        void performCloseTab(tabId);
+        return;
+      }
+
+      setCloseConfirmState({ tabId, tabTitle: tab.title });
       return;
     }
 
-    // Otherwise, close directly
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
@@ -519,7 +527,7 @@ export default function App() {
     }
 
     // Multiple tabs OR last tab is chat/settings: use the unified confirmation logic
-    closeTabWithConfirmation(currentActiveTabId);
+    void closeTabWithConfirmation(currentActiveTabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
@@ -648,6 +656,7 @@ export default function App() {
                   sessionId: sessionId,
                   view: 'chat',
                   title: getFolderName(project.path),
+                  joinedExistingSidecar: !result.isNew,
                 }
                 : t
             )
@@ -736,6 +745,7 @@ export default function App() {
               // Only set initialMessage when explicitly provided (from Launcher send).
               // Omitting undefined prevents overwriting a prior initialMessage in race conditions.
               ...(initialMessage ? { initialMessage } : {}),
+              joinedExistingSidecar: !result.isNew,
             }
             : t
         )
@@ -775,6 +785,12 @@ export default function App() {
   const clearInitialMessage = useCallback((tabId: string) => {
     setTabs(prev => prev.map(t =>
       t.id === tabId ? { ...t, initialMessage: undefined } : t
+    ));
+  }, []);
+
+  const clearJoinedExistingSidecar = useCallback((tabId: string) => {
+    setTabs(prev => prev.map(t =>
+      t.id === tabId ? { ...t, joinedExistingSidecar: undefined } : t
     ));
   }, []);
 
@@ -825,6 +841,7 @@ export default function App() {
               ? {
                 ...t,
                 sessionId,
+                joinedExistingSidecar: !result.isNew,
               }
               : t
           )
@@ -873,6 +890,7 @@ export default function App() {
                 sessionId,
                 view: 'chat',
                 title: getFolderName(currentTabForScenario3.agentDir ?? ''),
+                joinedExistingSidecar: !result.isNew,
               }
               : t
           )
@@ -912,6 +930,10 @@ export default function App() {
       // First, cancel any background completion on the TARGET session (user reconnecting)
       await cancelBackgroundCompletion(sessionId);
 
+      // Track whether Tab is joining a pre-existing sidecar (e.g. IM Bot session)
+      // to skip automatic config sync in Chat.tsx mount
+      let joinedExisting = false;
+
       if (oldSessionId) {
         // Check if AI is running on old session → background completion
         const bgResult = await startBackgroundCompletion(oldSessionId);
@@ -926,6 +948,7 @@ export default function App() {
           // Create/reuse Sidecar for the target session
           const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
           await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
+          joinedExisting = !result.isNew;
           console.log(`[App] Created new Sidecar for session ${sessionId} on port ${result.port}`);
         } else {
           // AI is idle → check if target session already has a sidecar (e.g., from BG completion)
@@ -940,6 +963,7 @@ export default function App() {
             await deactivateSession(oldSessionId);
             const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
             await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
+            joinedExisting = !result.isNew;
           } else {
             // No existing sidecar for target → hot-swap via upgradeSessionId (efficient, no new process)
             const upgraded = await upgradeSessionId(oldSessionId, sessionId);
@@ -950,16 +974,19 @@ export default function App() {
               if (port !== null) {
                 await activateSession(sessionId, tabId, null, port, currentTabForScenario4.agentDir, false);
                 console.log(`[App] Session ${sessionId} took over Sidecar from ${oldSessionId} on port ${port}`);
+                // upgradeSessionId: Tab already owned this sidecar → joinedExisting stays false
               } else {
                 console.warn(`[App] Port not found after upgrade, creating new Sidecar`);
                 const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
                 await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
+                joinedExisting = !result.isNew;
               }
             } else {
               console.log(`[App] Sidecar upgrade failed, creating new Sidecar for session ${sessionId}`);
               await deactivateSession(oldSessionId);
               const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
               await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
+              joinedExisting = !result.isNew;
             }
           }
         }
@@ -968,13 +995,14 @@ export default function App() {
         console.log(`[App] No previous session, creating new Sidecar for session ${sessionId}`);
         const result = await ensureSessionSidecar(sessionId, currentTabForScenario4.agentDir, 'tab', tabId);
         await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
+        joinedExisting = !result.isNew;
       }
 
       // Update UI state - TabProvider will detect sessionId change and call loadSession()
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
-            ? { ...t, sessionId }
+            ? { ...t, sessionId, joinedExistingSidecar: joinedExisting }
             : t
         )
       );
@@ -1074,10 +1102,12 @@ export default function App() {
       await activateSession(pendingSessionId, tabId, null, result.port, currentTab.agentDir, false);
 
       // Update tab state → TabProvider will detect sessionId change and reconnect
+      // Explicitly clear joinedExistingSidecar to prevent stale flag from blocking config sync
+      // on the new session (e.g. user clicks "New Session" while still in IM Bot adoption window)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
-            ? { ...t, sessionId: pendingSessionId }
+            ? { ...t, sessionId: pendingSessionId, joinedExistingSidecar: undefined }
             : t
         )
       );
@@ -1101,7 +1131,7 @@ export default function App() {
       return;
     }
 
-    closeTabWithConfirmation(tabId);
+    void closeTabWithConfirmation(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
@@ -1271,6 +1301,7 @@ export default function App() {
             onUpdateGenerating={updateTabGenerating}
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
+            onClearJoinedExistingSidecar={clearJoinedExistingSidecar}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             onSettingsSectionChange={handleSettingsSectionChange}
             updateReady={updateReady}
@@ -1315,6 +1346,22 @@ export default function App() {
             exitConfirmState.resolve(false);
             setExitConfirmState(null);
           }}
+        />
+      )}
+
+      {/* Windows: startup dialog for pending update from previous session */}
+      {pendingUpdateOnStartup && (
+        <ConfirmDialog
+          title="发现新版本"
+          message={`最新版本 v${pendingUpdateOnStartup} 已下载完成，是否立即安装？`}
+          confirmText="安装"
+          cancelText="稍后"
+          confirmVariant="primary"
+          onConfirm={() => {
+            dismissPendingUpdate();
+            void restartAndUpdate();
+          }}
+          onCancel={dismissPendingUpdate}
         />
       )}
     </div>

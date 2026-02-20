@@ -5,6 +5,7 @@ mod commands;
 pub mod cron_task;
 pub mod im;
 pub mod logger;
+pub mod management_api;
 mod proxy_config;
 mod sidecar;
 mod sse_proxy;
@@ -20,7 +21,7 @@ use sidecar::{
     cmd_execute_cron_task,
     // Session-centric Sidecar API (v0.1.11)
     cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
-    cmd_upgrade_session_id,
+    cmd_upgrade_session_id, cmd_session_has_persistent_owners,
     // Background session completion
     cmd_start_background_completion, cmd_cancel_background_completion,
 };
@@ -43,6 +44,10 @@ pub fn run() {
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
+
+    let im_state_for_window = im_bot_state.clone();
+    let im_state_for_exit = im_bot_state.clone();
+    let im_state_for_tray_exit = im_bot_state.clone();
 
     // Track if cleanup has been performed to avoid duplicate cleanup
     // All clones share the same underlying AtomicBool - whichever exit path
@@ -97,11 +102,15 @@ pub fn run() {
             updater::check_and_download_update,
             updater::restart_app,
             updater::test_update_connectivity,
+            updater::check_pending_update,
+            updater::install_pending_update,
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
             // Bundled workspace initialization
             commands::cmd_initialize_bundled_workspace,
+            commands::cmd_create_bot_workspace,
+            commands::cmd_remove_bot_workspace,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,
@@ -133,6 +142,7 @@ pub fn run() {
             cmd_release_session_sidecar,
             cmd_get_session_port,
             cmd_upgrade_session_id,
+            cmd_session_has_persistent_owners,
             // Background session completion
             cmd_start_background_completion,
             cmd_cancel_background_completion,
@@ -142,6 +152,13 @@ pub fn run() {
             im::cmd_im_bot_status,
             im::cmd_im_all_bots_status,
             im::cmd_im_conversations,
+            im::cmd_update_heartbeat_config,
+            // IM Bot hot-update commands
+            im::cmd_update_im_bot_ai_config,
+            im::cmd_update_im_bot_permission_mode,
+            im::cmd_update_im_bot_mcp_servers,
+            im::cmd_update_im_bot_allowed_users,
+            im::cmd_update_im_bot_workspace,
         ])
         .setup(|app| {
             // Initialize logging for all builds
@@ -178,6 +195,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_tray_exit.swap(true, Relaxed) {
                     log::info!("[App] Cleaning up sidecars before exit...");
+                    im::signal_all_bots_shutdown(&im_state_for_tray_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
                 }
                 app_handle_for_tray.exit(0);
@@ -201,6 +219,14 @@ pub fn run() {
                     log::info!("[App] Windows: Disabled system decorations for custom title bar");
                 }
             }
+
+            // Start management API (internal HTTP server for Bun→Rust IPC)
+            tauri::async_runtime::spawn(async move {
+                match management_api::start_management_api().await {
+                    Ok(port) => log::info!("[App] Management API started on port {}", port),
+                    Err(e) => log::error!("[App] Failed to start management API: {}", e),
+                }
+            });
 
             // Initialize cron task manager with app handle
             let cron_app_handle = app.handle().clone();
@@ -241,6 +267,7 @@ pub fn run() {
                     use std::sync::atomic::Ordering::Relaxed;
                     if !cleanup_done_for_window.swap(true, Relaxed) {
                         log::info!("[App] Window destroyed, cleaning up sidecars...");
+                        im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
                     }
                 }
@@ -259,6 +286,7 @@ pub fn run() {
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
                     log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
                 }
             }

@@ -25,6 +25,7 @@ export interface Tab {
     // Note: cronTaskId and sidecarPort are no longer stored in Tab.
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.
     // Use getSessionPort(sessionId) to get the port when needed.
+    joinedExistingSidecar?: boolean;  // Tab joined an already-running sidecar (e.g. IM Bot session)
 }
 
 export interface TabState {

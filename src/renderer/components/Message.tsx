@@ -6,6 +6,7 @@ import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
+import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
 
 interface MessageProps {
   message: MessageType;
@@ -139,8 +140,8 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
           {/* IM source indicator */}
           {isImMessage && (
             <div className="mr-2 mb-1 flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
-              {imSource === 'telegram_group' && <span>👥</span>}
-              <span>via {imSource === 'telegram_private' ? 'Telegram' : 'Telegram 群聊'}</span>
+              {imSource?.includes('group') && <span>👥</span>}
+              <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
               {message.metadata?.senderName && (
                 <span>· {message.metadata.senderName}</span>
               )}

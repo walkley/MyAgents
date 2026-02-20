@@ -38,7 +38,14 @@ interface UseUpdaterResult {
     downloading: boolean;
     /** Manually trigger an update check. Returns result for caller to show toast feedback. */
     checkForUpdate: () => Promise<CheckUpdateResult>;
+    /** Version of a pending update discovered on startup (Windows only, from disk) */
+    pendingUpdateOnStartup: string | null;
+    /** Dismiss the startup pending update dialog (keeps "Restart to Update" button visible) */
+    dismissPendingUpdate: () => void;
 }
+
+// Detect Windows platform
+const isWindows = typeof navigator !== 'undefined' && navigator.platform?.includes('Win');
 
 // Periodic check interval: 30 minutes
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
@@ -48,6 +55,8 @@ export function useUpdater(): UseUpdaterResult {
     const [updateVersion, setUpdateVersion] = useState<string | null>(null);
     const [checking, setChecking] = useState(false);
     const [downloading, setDownloading] = useState(false);
+    // Windows: version from disk-persisted pending update (shown as startup dialog)
+    const [pendingUpdateOnStartup, setPendingUpdateOnStartup] = useState<string | null>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
     const updateReadyRef = useRef(false);
     // Ref guards for checkForUpdate to prevent race conditions on rapid clicks.
@@ -124,6 +133,11 @@ export function useUpdater(): UseUpdaterResult {
         }
     }, []); // Stable reference — all mutable state accessed via refs
 
+    // Dismiss the startup pending update dialog (keeps "Restart to Update" button visible)
+    const dismissPendingUpdate = useCallback(() => {
+        setPendingUpdateOnStartup(null);
+    }, []);
+
     // Restart app to apply the update
     const restartAndUpdate = useCallback(async () => {
         if (!isTauriEnvironment()) return;
@@ -144,6 +158,33 @@ export function useUpdater(): UseUpdaterResult {
             // Continue anyway — startup cleanup_stale_sidecars will handle leftovers
         }
 
+        // Windows: use install_pending_update which launches NSIS from saved bytes
+        // This avoids relaunch() which would just restart without applying the update
+        if (isWindows) {
+            try {
+                await invoke('install_pending_update');
+                // install_pending_update calls exit(0) on Windows, so we won't reach here
+            } catch (err) {
+                const errStr = String(err);
+                if (errStr.includes('VERSION_MISMATCH')) {
+                    console.warn('[useUpdater] Pending update version mismatch, will re-download');
+                    setUpdateReady(false);
+                    setUpdateVersion(null);
+                    setPendingUpdateOnStartup(null);
+                    // Trigger a fresh download
+                    void invoke('check_and_download_update');
+                } else if (errStr.includes('NETWORK_ERROR')) {
+                    // Offline: update bytes are on disk but we can't verify version.
+                    // Keep the update ready state so user can retry when online.
+                    console.warn('[useUpdater] Network required to verify update, will retry when online');
+                } else {
+                    console.error('[useUpdater] install_pending_update failed:', err);
+                }
+            }
+            return;
+        }
+
+        // macOS: relaunch picks up the already-installed update
         try {
             await relaunch();
         } catch (err) {
@@ -201,6 +242,30 @@ export function useUpdater(): UseUpdaterResult {
         };
     }, []);
 
+    // Windows: check for pending update on disk at startup
+    // If found, show a dialog prompting the user to install it
+    useEffect(() => {
+        if (!isTauriEnvironment() || !isWindows) return;
+
+        const checkPending = async () => {
+            try {
+                const version = await invoke('check_pending_update') as string | null;
+                if (version) {
+                    if (isDebugMode()) {
+                        console.log(`[useUpdater] Found pending update v${version} on disk`);
+                    }
+                    setPendingUpdateOnStartup(version);
+                    setUpdateVersion(version);
+                    setUpdateReady(true);
+                }
+            } catch (err) {
+                console.error('[useUpdater] Failed to check pending update:', err);
+            }
+        };
+
+        void checkPending();
+    }, []);
+
     // Periodic background check (silent - just triggers Rust to check and download)
     // Uses ref to avoid recreating interval when updateReady changes
     useEffect(() => {
@@ -238,5 +303,7 @@ export function useUpdater(): UseUpdaterResult {
         checking,
         downloading,
         checkForUpdate,
+        pendingUpdateOnStartup,
+        dismissPendingUpdate,
     };
 }

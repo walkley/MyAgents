@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod buffer;
 pub mod feishu;
 pub mod health;
+pub mod heartbeat;
 pub mod router;
 pub mod telegram;
 pub mod types;
@@ -54,7 +55,7 @@ use telegram::TelegramAdapter;
 use types::{ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
 
 /// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
-enum AnyAdapter {
+pub(crate) enum AnyAdapter {
     Telegram(Arc<TelegramAdapter>),
     Feishu(Arc<FeishuAdapter>),
 }
@@ -171,20 +172,62 @@ pub struct ImBotInstance {
     platform: ImPlatform,
     shutdown_tx: watch::Sender<bool>,
     health: Arc<HealthManager>,
-    router: Arc<Mutex<SessionRouter>>,
+    pub(crate) router: Arc<Mutex<SessionRouter>>,
     buffer: Arc<Mutex<MessageBuffer>>,
     started_at: Instant,
     /// JoinHandle for the message processing loop (awaited during graceful shutdown)
     process_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the platform listen loop (long-poll / WebSocket)
+    poll_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the approval callback handler
+    approval_handle: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the health persist loop
+    health_handle: tokio::task::JoinHandle<()>,
     /// Random bind code for QR code binding flow
     bind_code: String,
     #[allow(dead_code)]
     config: ImConfig,
+    // ===== Heartbeat (v0.1.21) =====
+    /// Heartbeat runner background task handle
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Channel to send wake signals to heartbeat runner
+    pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
+    /// Shared heartbeat config (for hot updates)
+    heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    /// Platform adapter (retained for graceful shutdown — e.g. dedup flush)
+    adapter: Arc<AnyAdapter>,
+    // ===== Hot-reloadable config =====
+    pub(crate) current_model: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+    pub(crate) permission_mode: Arc<tokio::sync::RwLock<String>>,
+    pub(crate) mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) available_providers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) allowed_users: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
 /// Create the managed IM Bot state (called during app setup)
 pub fn create_im_bot_state() -> ManagedImBots {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Signal all running IM bots to shut down (sync, for use in app exit handlers).
+/// Best-effort: uses try_lock to avoid blocking if mutex is held.
+pub fn signal_all_bots_shutdown(im_state: &ManagedImBots) {
+    if let Ok(bots) = im_state.try_lock() {
+        for (bot_id, instance) in bots.iter() {
+            log::info!("[im] Signaling shutdown for bot {}", bot_id);
+            let _ = instance.shutdown_tx.send(true);
+            instance.poll_handle.abort();
+            instance.process_handle.abort();
+            instance.approval_handle.abort();
+            instance.health_handle.abort();
+            if let Some(ref h) = instance.heartbeat_handle {
+                h.abort();
+            }
+        }
+    } else {
+        log::warn!("[im] Could not acquire lock for shutdown signal, IM bots may linger");
+    }
 }
 
 /// Start the IM Bot
@@ -201,12 +244,18 @@ pub async fn start_im_bot<R: Runtime>(
     if let Some(instance) = im_guard.remove(&bot_id) {
         ulog_info!("[im] Stopping existing IM Bot {} before restart", bot_id);
         let _ = instance.shutdown_tx.send(true);
+        instance.poll_handle.abort(); // Cancel in-flight long-poll immediately
         // Wait briefly for in-flight messages (shorter timeout for restart)
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             instance.process_handle,
         )
         .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
+        if let Some(hb) = instance.heartbeat_handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), hb).await;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
         instance
             .router
             .lock()
@@ -284,12 +333,16 @@ pub async fn start_im_bot<R: Runtime>(
             Arc::clone(&allowed_users),
             approval_tx.clone(),
         )))),
-        ImPlatform::Feishu => Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
-            &config,
-            msg_tx,
-            Arc::clone(&allowed_users),
-            approval_tx.clone(),
-        )))),
+        ImPlatform::Feishu => {
+            let dedup_path = Some(health::bot_dedup_path(&bot_id));
+            Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
+                &config,
+                msg_tx,
+                Arc::clone(&allowed_users),
+                approval_tx.clone(),
+                dedup_path,
+            ))))
+        }
     };
 
     // Verify bot connection via ImAdapter + ImStreamAdapter traits
@@ -322,12 +375,12 @@ pub async fn start_im_bot<R: Runtime>(
     }
 
     // Start health persist loop
-    let _health_handle = health.start_persist_loop(shutdown_rx.clone());
+    let health_handle = health.start_persist_loop(shutdown_rx.clone());
 
     // Start Telegram long-poll loop
     let adapter_clone = Arc::clone(&adapter);
     let poll_shutdown_rx = shutdown_rx.clone();
-    let _poll_handle = tokio::spawn(async move {
+    let poll_handle = tokio::spawn(async move {
         adapter_clone.listen_loop(poll_shutdown_rx).await;
     });
 
@@ -335,8 +388,20 @@ pub async fn start_im_bot<R: Runtime>(
     let pending_approvals_for_handler = Arc::clone(&pending_approvals);
     let adapter_for_approval = Arc::clone(&adapter);
     let approval_client = Client::new();
-    let _approval_handle = tokio::spawn(async move {
-        while let Some(cb) = approval_rx.recv().await {
+    let mut approval_shutdown_rx = shutdown_rx.clone();
+    let approval_handle = tokio::spawn(async move {
+        loop {
+            let cb = tokio::select! {
+                msg = approval_rx.recv() => match msg {
+                    Some(cb) => cb,
+                    None => break, // Channel closed
+                },
+                _ = approval_shutdown_rx.changed() => {
+                    if *approval_shutdown_rx.borrow() { break; }
+                    continue;
+                }
+            };
+
             let pending = pending_approvals_for_handler.lock().await.remove(&cb.request_id);
             if let Some(p) = pending {
                 // POST decision to Sidecar
@@ -396,7 +461,7 @@ pub async fn start_im_bot<R: Runtime>(
     let adapter_for_reply = Arc::clone(&adapter);
     let app_clone = app_handle.clone();
     let manager_clone = Arc::clone(sidecar_manager);
-    let permission_mode = config.permission_mode.clone();
+    let permission_mode = Arc::new(tokio::sync::RwLock::new(config.permission_mode.clone()));
     // Parse provider env from config (for per-message forwarding to Sidecar)
     // Wrapped in RwLock so /provider command can update it at runtime
     let provider_env: Option<serde_json::Value> = config
@@ -404,15 +469,18 @@ pub async fn start_im_bot<R: Runtime>(
         .as_ref()
         .and_then(|json_str| serde_json::from_str(json_str).ok());
     let current_provider_env = Arc::new(tokio::sync::RwLock::new(provider_env));
-    // Available providers list (for /provider command menu)
-    let available_providers_json = config.available_providers_json.clone();
+    // Available providers list (for /provider command menu) — hot-reloadable
+    let available_providers_json = Arc::new(tokio::sync::RwLock::new(config.available_providers_json.clone()));
+    // MCP servers JSON — hot-reloadable
+    let mcp_servers_json = Arc::new(tokio::sync::RwLock::new(config.mcp_servers_json.clone()));
     let bind_code_for_loop = bind_code.clone();
     let bot_id_for_loop = bot_id.clone();
     let allowed_users_for_loop = Arc::clone(&allowed_users);
     let current_model_for_loop = Arc::clone(&current_model);
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
-    let available_providers_for_loop = available_providers_json.clone();
-    let mcp_servers_json_for_loop = config.mcp_servers_json.clone();
+    let available_providers_for_loop = Arc::clone(&available_providers_json);
+    let permission_mode_for_loop = Arc::clone(&permission_mode);
+    let mcp_servers_json_for_loop = Arc::clone(&mcp_servers_json);
     let pending_approvals_for_loop = Arc::clone(&pending_approvals);
     let approval_tx_for_loop = approval_tx.clone();
     let mut process_shutdown_rx = shutdown_rx.clone();
@@ -564,6 +632,17 @@ pub async fn start_im_bot<R: Runtime>(
                     let is_telegram_bind = text.starts_with("/start BIND_");
                     let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
                     if is_telegram_bind || is_feishu_bind {
+                        // If sender is already bound, silently ignore stale BIND_ messages
+                        // (Feishu may re-deliver old messages after bot restart clears dedup cache)
+                        let already_bound = {
+                            let users = allowed_users_for_loop.read().await;
+                            users.contains(&msg.sender_id)
+                        };
+                        if already_bound {
+                            ulog_debug!("[im] Ignoring stale BIND message from already-bound user {}", msg.sender_id);
+                            continue;
+                        }
+
                         let code = if is_telegram_bind {
                             text.strip_prefix("/start ").unwrap_or("")
                         } else {
@@ -618,12 +697,35 @@ pub async fn start_im_bot<R: Runtime>(
                             &chat_id,
                             "👋 你好！我是 MyAgents Bot。\n\n\
                              可用命令：\n\
+                             /help — 查看所有命令\n\
                              /new — 开始新对话\n\
                              /workspace <路径> — 切换工作区\n\
                              /model — 查看或切换 AI 模型\n\
                              /provider — 查看或切换 AI 供应商\n\
+                             /mode — 切换权限模式\n\
                              /status — 查看状态\n\n\
                              直接发消息即可开始对话。",
+                        ).await;
+                        continue;
+                    }
+
+                    if text == "/help" {
+                        let _ = adapter_for_reply.send_message(
+                            &chat_id,
+                            "📖 可用命令\n\n\
+                             /new — 开始新对话（清空当前上下文）\n\
+                             /workspace — 查看当前工作区\n\
+                             /workspace <路径> — 切换工作区目录\n\
+                             /model — 查看当前 AI 模型\n\
+                             /model <名称> — 切换模型（sonnet / opus / haiku）\n\
+                             /provider — 查看可用 AI 供应商\n\
+                             /provider <序号或ID> — 切换供应商\n\
+                             /mode — 查看当前权限模式\n\
+                             /mode <模式> — 切换模式（plan / auto / full）\n\
+                             /status — 查看会话状态\n\
+                             /help — 显示本帮助\n\n\
+                             💬 直接发送文字即可与 AI 对话。\n\
+                             🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。",
                         ).await;
                         continue;
                     }
@@ -748,11 +850,13 @@ pub async fn start_im_bot<R: Runtime>(
                     if text.starts_with("/provider") {
                         let arg = text.strip_prefix("/provider").unwrap_or("").trim().to_string();
 
-                        // Parse available providers from startup config
-                        let providers: Vec<serde_json::Value> = available_providers_for_loop
-                            .as_ref()
-                            .and_then(|json| serde_json::from_str(json).ok())
-                            .unwrap_or_default();
+                        // Parse available providers from config (hot-reloadable)
+                        let providers: Vec<serde_json::Value> = {
+                            let ap = available_providers_for_loop.read().await;
+                            ap.as_ref()
+                                .and_then(|json| serde_json::from_str(json).ok())
+                                .unwrap_or_default()
+                        };
 
                         if arg.is_empty() {
                             // Show current provider + available list
@@ -829,6 +933,60 @@ pub async fn start_im_bot<R: Runtime>(
                         continue;
                     }
 
+                    // /mode — show or switch permission mode
+                    if text.starts_with("/mode") {
+                        let arg = text.strip_prefix("/mode").unwrap_or("").trim().to_lowercase();
+                        let current = permission_mode_for_loop.read().await.clone();
+
+                        if arg.is_empty() {
+                            let display = match current.as_str() {
+                                "plan" => "🛡 计划模式 (plan) — AI 执行操作前需要审批",
+                                "auto" => "⚡ 自动模式 (auto) — 安全操作自动执行，敏感操作需审批",
+                                "fullAgency" => "🚀 全自主模式 (fullAgency) — 所有操作自动执行",
+                                _ => "❓ 未知模式",
+                            };
+                            let _ = adapter_for_reply.send_message(
+                                &chat_id,
+                                &format!(
+                                    "🔐 当前权限模式\n\n{}\n\n\
+                                     可选模式：\n\
+                                     • plan — 计划模式（最安全）\n\
+                                     • auto — 自动模式（推荐）\n\
+                                     • full — 全自主模式\n\n\
+                                     用法: /mode <模式>",
+                                    display,
+                                ),
+                            ).await;
+                        } else {
+                            let new_mode = match arg.as_str() {
+                                "plan" => "plan",
+                                "auto" => "auto",
+                                "full" | "fullagency" => "fullAgency",
+                                _ => {
+                                    let _ = adapter_for_reply.send_message(
+                                        &chat_id,
+                                        "❌ 无效模式，可选: plan / auto / full",
+                                    ).await;
+                                    continue;
+                                }
+                            };
+                            *permission_mode_for_loop.write().await = new_mode.to_string();
+
+                            let display = match new_mode {
+                                "plan" => "🛡 计划模式 — AI 执行操作前需要审批",
+                                "auto" => "⚡ 自动模式 — 安全操作自动执行",
+                                "fullAgency" => "🚀 全自主模式 — 所有操作自动执行",
+                                _ => unreachable!(),
+                            };
+                            ulog_info!("[im] /mode: switched to {} (session={})", new_mode, session_key);
+                            let _ = adapter_for_reply.send_message(
+                                &chat_id,
+                                &format!("✅ 权限模式已切换\n\n{}", display),
+                            ).await;
+                        }
+                        continue;
+                    }
+
                     // ── Text-based approval commands (fallback for platforms without card callbacks) ──
                     let approval_decision = match text.as_str() {
                         "允许" | "同意" | "approve" => Some("allow_once"),
@@ -871,14 +1029,15 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_manager = Arc::clone(&manager_clone);
                     let task_buffer = Arc::clone(&buffer_clone);
                     let task_health = Arc::clone(&health_clone);
-                    let task_perm = permission_mode.clone();
+                    let task_perm = permission_mode_for_loop.read().await.clone();
                     let task_provider_env = Arc::clone(&current_provider_env_for_loop);
                     let task_model = Arc::clone(&current_model_for_loop);
-                    let task_mcp_json = mcp_servers_json_for_loop.clone();
+                    let task_mcp_json = mcp_servers_json_for_loop.read().await.clone();
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
                     let task_locks = Arc::clone(&peer_locks);
                     let task_pending_approvals = Arc::clone(&pending_approvals_for_loop);
+                    let task_bot_id = bot_id_for_loop.clone();
 
                     in_flight.spawn(async move {
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
@@ -966,6 +1125,7 @@ pub async fn start_im_bot<R: Runtime>(
                             penv.as_ref(),
                             images,
                             &task_pending_approvals,
+                            Some(&task_bot_id),
                         )
                         .await
                         {
@@ -1030,6 +1190,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         penv.as_ref(),
                                         None, // buffered messages don't preserve attachments
                                         &task_pending_approvals,
+                                        Some(&task_bot_id),
                                     )
                                     .await
                                     {
@@ -1161,7 +1322,7 @@ pub async fn start_im_bot<R: Runtime>(
     };
 
     let status = ImBotStatus {
-        bot_username: bot_username_for_url,
+        bot_username: bot_username_for_url.clone(),
         status: ImStatus::Online,
         uptime_seconds: 0,
         last_message_at: None,
@@ -1171,6 +1332,39 @@ pub async fn start_im_bot<R: Runtime>(
         buffered_messages: buffer.lock().await.len(),
         bind_url,
         bind_code: bind_code_for_status,
+    };
+
+    // ===== Heartbeat Runner (v0.1.21) =====
+    let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
+        let hb_config = config.heartbeat_config.clone().unwrap_or_default();
+        let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
+        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(
+            hb_config,
+            hb_bot_label,
+            Arc::clone(&current_model),
+            Arc::clone(&mcp_servers_json),
+        );
+        let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
+
+        let hb_shutdown_rx = shutdown_rx.clone();
+        let hb_router = Arc::clone(&router);
+        let hb_sidecar = Arc::clone(sidecar_manager);
+        let hb_adapter = Arc::clone(&adapter);
+        let hb_app = app_handle.clone();
+
+        let handle = tokio::spawn(async move {
+            runner.run_loop(
+                hb_shutdown_rx,
+                wake_rx,
+                hb_router,
+                hb_sidecar,
+                hb_adapter,
+                hb_app,
+            ).await;
+        });
+
+        ulog_info!("[im] Heartbeat runner spawned for bot {}", bot_id);
+        (Some(handle), Some(wake_tx), Some(config_arc))
     };
 
     // Store instance
@@ -1184,8 +1378,22 @@ pub async fn start_im_bot<R: Runtime>(
         buffer,
         started_at,
         process_handle,
+        poll_handle,
+        approval_handle,
+        health_handle,
         bind_code,
         config,
+        heartbeat_handle,
+        heartbeat_wake_tx,
+        heartbeat_config: heartbeat_config_arc,
+        adapter: Arc::clone(&adapter),
+        // Hot-reloadable config (Arc clones shared with processing loop)
+        current_model,
+        current_provider_env,
+        permission_mode,
+        mcp_servers_json,
+        available_providers_json,
+        allowed_users,
     });
 
     Ok(status)
@@ -1205,6 +1413,11 @@ pub async fn stop_im_bot(
         // Signal shutdown to all loops
         let _ = instance.shutdown_tx.send(true);
 
+        // Abort poll_handle to cancel in-flight long-poll HTTP request immediately.
+        // Without this, the old getUpdates request hangs for up to 30s on Telegram servers,
+        // causing 409 Conflict errors if the bot is restarted quickly.
+        instance.poll_handle.abort();
+
         // Wait for in-flight messages to finish (graceful: up to 10s)
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -1216,9 +1429,22 @@ pub async fn stop_im_bot(
             Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
         }
 
+        // Wait for auxiliary tasks to finish (short timeout — already signaled via shutdown_tx)
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
+        if let Some(hb) = instance.heartbeat_handle {
+            // Heartbeat runner may be mid-HTTP-call; wait before releasing Sidecars
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), hb).await;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
+
         // Persist remaining buffered messages to disk
         if let Err(e) = instance.buffer.lock().await.save_to_disk() {
             ulog_warn!("[im] Failed to persist buffer on shutdown: {}", e);
+        }
+
+        // Flush dedup cache to disk (Feishu only — ensures last entries survive restart)
+        if let AnyAdapter::Feishu(ref feishu) = *instance.adapter {
+            feishu.flush_dedup_cache().await;
         }
 
         // Persist active sessions in health state before releasing Sidecars
@@ -1334,6 +1560,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     provider_env: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
     pending_approvals: &PendingApprovals,
+    bot_id: Option<&str>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
     let source = match (&msg.platform, &msg.source_type) {
@@ -1356,6 +1583,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         if !imgs.is_empty() {
             body["images"] = json!(imgs);
         }
+    }
+    if let Some(bid) = bot_id {
+        body["botId"] = json!(bid);
     }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     ulog_info!("[im-stream] POST {} (SSE)", url);
@@ -1382,6 +1612,12 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     let mut draft_id: Option<String> = None;
     let mut last_edit = Instant::now();
     let mut any_text_sent = false;
+
+    // Response-level placeholder state:
+    // - placeholder_id: message ID of "🤖 生成中..." sent when first block is non-text
+    // - first_content_sent: true once user has seen any content (placeholder or real text)
+    let mut placeholder_id: Option<String> = None;
+    let mut first_content_sent = false;
 
     let mut session_id: Option<String> = None;
     const THROTTLE: Duration = Duration::from_millis(1000);
@@ -1415,16 +1651,29 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     if let Some(text) = json_val["text"].as_str() {
                         block_text = text.to_string();
 
-                        // First meaningful text received → send draft message
+                        // First meaningful text in this block → create or adopt draft
                         // Skip whitespace-only blocks (API spacer blocks before thinking)
                         if draft_id.is_none() && !block_text.trim().is_empty() {
-                            match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
-                                Ok(Some(id)) => {
-                                    draft_id = Some(id);
-                                    last_edit = Instant::now();
+                            if let Some(pid) = placeholder_id.take() {
+                                // Adopt the placeholder as draft → edit with real content
+                                draft_id = Some(pid);
+                                let display = format_draft_text(&block_text, adapter.max_message_length());
+                                if let Err(e) = adapter.edit_message(chat_id, draft_id.as_ref().unwrap(), &display).await {
+                                    ulog_warn!("[im] Placeholder→draft edit failed: {}", e);
                                 }
-                                _ => {} // draft creation failed; block-end will send_message directly
+                                last_edit = Instant::now();
+                            } else {
+                                // No placeholder — send real content directly as draft
+                                let display = format_draft_text(&block_text, adapter.max_message_length());
+                                match adapter.send_message_returning_id(chat_id, &display).await {
+                                    Ok(Some(id)) => {
+                                        draft_id = Some(id);
+                                        last_edit = Instant::now();
+                                    }
+                                    _ => {} // draft creation failed; block-end will send_message directly
+                                }
                             }
+                            first_content_sent = true;
                         }
 
                         // Throttled edit (≥1s interval)
@@ -1437,6 +1686,19 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                                 last_edit = Instant::now();
                             }
                         }
+                    }
+                }
+                "activity" => {
+                    // Non-text block started (thinking, tool_use).
+                    // If user hasn't seen any content yet, send a placeholder.
+                    if !first_content_sent {
+                        match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
+                            Ok(Some(id)) => {
+                                placeholder_id = Some(id);
+                            }
+                            _ => {} // placeholder failed; text blocks will create their own message
+                        }
+                        first_content_sent = true;
                     }
                 }
                 "block-end" => {
@@ -1468,6 +1730,10 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         let _ = adapter.delete_message(chat_id, did).await;
                     }
                     if !any_text_sent {
+                        // Clean up orphaned placeholder (e.g. only thinking/tool_use, no text output)
+                        if let Some(ref pid) = placeholder_id {
+                            let _ = adapter.delete_message(chat_id, pid).await;
+                        }
                         let _ = adapter.send_message(chat_id, "(No response)").await;
                     }
                     return Ok(session_id);
@@ -1514,9 +1780,12 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     let error = json_val["error"]
                         .as_str()
                         .unwrap_or("Unknown error");
-                    // Delete current draft if exists
+                    // Delete current draft and placeholder if they exist
                     if let Some(ref did) = draft_id {
                         let _ = adapter.delete_message(chat_id, did).await;
+                    }
+                    if let Some(ref pid) = placeholder_id {
+                        let _ = adapter.delete_message(chat_id, pid).await;
                     }
                     let _ = adapter
                         .send_message(chat_id, &format!("⚠️ {}", error))
@@ -1536,6 +1805,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         let _ = adapter.delete_message(chat_id, did).await;
     }
     if !any_text_sent {
+        if let Some(ref pid) = placeholder_id {
+            let _ = adapter.delete_message(chat_id, pid).await;
+        }
         let _ = adapter.send_message(chat_id, "(No response)").await;
     }
     Ok(session_id)
@@ -1570,20 +1842,20 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
     }
 }
 
-/// Format draft display text (truncate + generating indicator).
+/// Format draft display text (truncate if needed for platform limit).
 /// `max_len` is the platform's message limit (e.g. 4096 for Telegram, 30000 for Feishu).
 fn format_draft_text(text: &str, max_len: usize) -> String {
-    // Reserve space for the suffix
-    let limit = max_len.saturating_sub(100);
+    // Reserve a small margin for the "..." truncation indicator
+    let limit = max_len.saturating_sub(10);
     if text.chars().count() > limit {
         let truncate_at = text
             .char_indices()
             .nth(limit)
             .map(|(i, _)| i)
             .unwrap_or(text.len());
-        format!("{}...\n\n_⏳ 生成中_", &text[..truncate_at])
+        format!("{}...", &text[..truncate_at])
     } else {
-        format!("{}\n\n_⏳ 生成中_", text)
+        text.to_string()
     }
 }
 
@@ -1864,11 +2136,16 @@ pub async fn cmd_start_im_bot(
     platform: Option<String>,
     feishuAppId: Option<String>,
     feishuAppSecret: Option<String>,
+    heartbeatConfigJson: Option<String>,
 ) -> Result<ImBotStatus, String> {
     let im_platform = match platform.as_deref() {
         Some("feishu") => ImPlatform::Feishu,
         _ => ImPlatform::Telegram,
     };
+    let heartbeat_config = heartbeatConfigJson
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "null")
+        .and_then(|s| serde_json::from_str::<types::HeartbeatConfig>(s).ok());
     let config = ImConfig {
         platform: im_platform,
         bot_token: botToken,
@@ -1882,6 +2159,7 @@ pub async fn cmd_start_im_bot(
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
         available_providers_json: availableProvidersJson,
+        heartbeat_config,
     };
 
     start_im_bot(
@@ -1951,4 +2229,170 @@ pub async fn cmd_im_conversations(
     } else {
         Ok(Vec::new())
     }
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_heartbeat_config(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    heartbeatConfigJson: String,
+) -> Result<(), String> {
+    let new_config: types::HeartbeatConfig = serde_json::from_str(&heartbeatConfigJson)
+        .map_err(|e| format!("Invalid heartbeat config JSON: {}", e))?;
+
+    let im_guard = imState.lock().await;
+    if let Some(instance) = im_guard.get(&botId) {
+        if let Some(ref config_arc) = instance.heartbeat_config {
+            let mut cfg = config_arc.write().await;
+            *cfg = new_config;
+            ulog_info!("[im] Heartbeat config updated for bot {}", botId);
+            Ok(())
+        } else {
+            Err(format!("Bot {} has no heartbeat runner", botId))
+        }
+    } else {
+        Err(format!("Bot {} not found", botId))
+    }
+}
+
+/// Hot-update AI config (model + provider env + available providers) for a running bot.
+/// Model is synced to all active Sidecars via POST /api/model/set (SDK hot-switch).
+/// Provider env is updated in memory — next message automatically uses the new value.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_ai_config(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    model: Option<String>,
+    providerEnvJson: Option<String>,
+    availableProvidersJson: Option<String>,
+) -> Result<(), String> {
+    let (router, current_model, current_provider_env, available_providers) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        (
+            Arc::clone(&inst.router),
+            Arc::clone(&inst.current_model),
+            Arc::clone(&inst.current_provider_env),
+            Arc::clone(&inst.available_providers_json),
+        )
+    };
+
+    // Selective update: None = don't change, Some("") = clear, Some(json) = set.
+    // This allows model-only updates without wiping provider config.
+    if let Some(ref m) = model {
+        *current_model.write().await = if m.is_empty() { None } else { Some(m.clone()) };
+    }
+    if let Some(ref s) = providerEnvJson {
+        if s.is_empty() {
+            *current_provider_env.write().await = None;
+        } else {
+            let penv = serde_json::from_str(s).ok();
+            *current_provider_env.write().await = penv;
+        }
+    }
+    if let Some(ref s) = availableProvidersJson {
+        if s.is_empty() {
+            *available_providers.write().await = None;
+        } else {
+            *available_providers.write().await = Some(s.clone());
+        }
+    }
+
+    // Sync model to all active Sidecars (SDK hot-switch, no session restart needed)
+    if model.is_some() {
+        let router = router.lock().await;
+        for port in router.active_sidecar_ports() {
+            router.sync_ai_config(port, model.as_deref(), None).await;
+        }
+    }
+
+    ulog_info!("[im] AI config hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update permission mode for a running bot.
+/// Permission mode is read from memory on each message — update takes effect immediately.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_permission_mode(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    permissionMode: String,
+) -> Result<(), String> {
+    let perm = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.permission_mode)
+    };
+    *perm.write().await = permissionMode;
+    ulog_info!("[im] Permission mode hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update MCP servers for a running bot.
+/// Syncs to all active Sidecars via POST /api/mcp/set — Sidecar internally handles
+/// abort+resume (or deferred restart if a turn is in progress).
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_mcp_servers(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    mcpServersJson: Option<String>,
+) -> Result<(), String> {
+    let (router, mcp_servers) = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        (Arc::clone(&inst.router), Arc::clone(&inst.mcp_servers_json))
+    };
+
+    *mcp_servers.write().await = mcpServersJson.clone();
+
+    // Sync to all active Sidecars — setMcpServers() handles abort+resume internally
+    let router = router.lock().await;
+    for port in router.active_sidecar_ports() {
+        router.sync_ai_config(port, None, mcpServersJson.as_deref()).await;
+    }
+
+    ulog_info!("[im] MCP servers hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update allowed users whitelist for a running bot.
+/// The adapter shares the same Arc — change takes effect immediately on next message auth check.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_allowed_users(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    allowedUsers: Vec<String>,
+) -> Result<(), String> {
+    let users = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.allowed_users)
+    };
+    *users.write().await = allowedUsers;
+    ulog_info!("[im] Allowed users hot-updated for bot {}", botId);
+    Ok(())
+}
+
+/// Hot-update default workspace for a running bot.
+/// Only affects new sessions — existing sessions keep their current workspace.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_update_im_bot_workspace(
+    imState: tauri::State<'_, ManagedImBots>,
+    botId: String,
+    workspacePath: String,
+) -> Result<(), String> {
+    let router = {
+        let bots = imState.lock().await;
+        let inst = bots.get(&botId).ok_or("Bot not found or not running")?;
+        Arc::clone(&inst.router)
+    };
+    router.lock().await.set_default_workspace(PathBuf::from(&workspacePath));
+    ulog_info!("[im] Workspace hot-updated for bot {}: {}", botId, workspacePath);
+    Ok(())
 }
