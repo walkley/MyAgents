@@ -94,14 +94,6 @@ type DialogState = {
   nodes?: DirectoryTreeNode[]; // for delete-multi
 } | null;
 
-// Delay for single-click selection to allow double-click detection
-// Without this delay, React re-render from setSelectedNodes breaks onDoubleClick
-const SINGLE_CLICK_DELAY_MS = 250;
-
-// Double-click detection threshold (ms) - must be greater than SINGLE_CLICK_DELAY_MS
-// We use custom double-click detection because React's onDoubleClick is unreliable
-// when state updates cause re-renders between clicks
-const DOUBLE_CLICK_THRESHOLD_MS = 400;
 
 function getFolderName(path: string): string {
   if (!path) return 'Workspace';
@@ -132,9 +124,6 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   // Multi-selection support
   const [selectedNodes, setSelectedNodes] = useState<DirectoryTreeNode[]>([]);
   const lastClickedNodeRef = useRef<DirectoryTreeNode | null>(null); // Anchor for shift-select
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // Delay single-click to allow double-click
-  // Custom double-click detection (more reliable than React's onDoubleClick during state updates)
-  const lastClickRef = useRef<{ path: string; time: number } | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -195,14 +184,6 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     return () => window.removeEventListener('resize', checkNarrowMode);
   }, []);
 
-  // Cleanup click timer on unmount
-  useEffect(() => {
-    return () => {
-      if (clickTimerRef.current) {
-        clearTimeout(clickTimerRef.current);
-      }
-    };
-  }, []);
 
   const folderName = getFolderName(agentDir);
 
@@ -1148,40 +1129,12 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                     }
                   };
 
-                  // Unified click handler with custom double-click detection
-                  // We implement our own double-click detection because React's onDoubleClick
-                  // is unreliable when state updates cause re-renders between clicks
                   const handleRowClick = (e: React.MouseEvent) => {
-                    const now = Date.now();
-                    const lastClick = lastClickRef.current;
-
-                    // Check if this is a double-click (same path, within threshold)
-                    const isDoubleClick = lastClick &&
-                      lastClick.path === data.path &&
-                      (now - lastClick.time) < DOUBLE_CLICK_THRESHOLD_MS;
-
-                    // Update last click info for next click detection
-                    lastClickRef.current = { path: data.path, time: now };
-
-                    // Clear any pending single-click timer
-                    if (clickTimerRef.current) {
-                      clearTimeout(clickTimerRef.current);
-                      clickTimerRef.current = null;
-                    }
-
-                    // Handle double-click on files (not directories)
-                    if (isDoubleClick && !isDir) {
-                      void executeFilePreview();
-                      return;
-                    }
-
-                    // Handle single-click (selection logic)
                     const isMeta = e.metaKey || e.ctrlKey;
                     const isShift = e.shiftKey;
 
-                    // Multi-select operations are immediate (no delay needed)
                     if (isMeta) {
-                      // Ctrl/Cmd + click: toggle selection
+                      // Ctrl/Cmd + click: toggle multi-select (files & folders)
                       setSelectedNodes(prev =>
                         prev.some(n => n.path === data.path)
                           ? prev.filter(n => n.path !== data.path)
@@ -1196,18 +1149,14 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                         const [from, to] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
                         setSelectedNodes(flattenedNodes.slice(from, to + 1));
                       }
-                    } else if (isSelected && selectedNodes.length === 1) {
-                      // Already selected as single item - no state change needed
+                    } else if (isDir) {
+                      // Directory plain click: select
+                      setSelectedNodes([data]);
                       lastClickedNodeRef.current = data;
                     } else {
-                      // Normal click: immediately clear old selection, delay new selection
-                      // This prevents visual lag when clicking between items
-                      setSelectedNodes([]);
-                      clickTimerRef.current = setTimeout(() => {
-                        setSelectedNodes([data]);
-                        lastClickedNodeRef.current = data;
-                        clickTimerRef.current = null;
-                      }, SINGLE_CLICK_DELAY_MS);
+                      // File plain click: select + preview
+                      // executeFilePreview() already calls setSelectedNodes([data])
+                      void executeFilePreview();
                     }
 
                     // Toggle directory expand/collapse (immediate for better UX)
