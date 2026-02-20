@@ -90,6 +90,11 @@ async function verifyViaSdk(
         maxTurns: 1,
         cwd,
         settingSources: opts.settingSources,
+        // Verification is non-interactive — bypass all permission prompts.
+        // Without this, the SDK enters default interactive mode and blocks on stdin
+        // for permission approval, causing ~27min hangs until SDK internal timeout.
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
         pathToClaudeCodeExecutable: cliPath,
         executable: 'bun',
         env,
