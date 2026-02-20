@@ -109,6 +109,8 @@ pub fn run() {
             commands::cmd_get_device_id,
             // Bundled workspace initialization
             commands::cmd_initialize_bundled_workspace,
+            commands::cmd_create_bot_workspace,
+            commands::cmd_remove_bot_workspace,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,

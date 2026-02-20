@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, Copy, Loader2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Copy, FolderOpen, FolderPlus, Loader2, Plus } from 'lucide-react';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getAllMcpServers, getEnabledMcpServerIds, addOrUpdateImBotConfig, loadAppConfig, removeImBotConfig, updateImBotConfig } from '@/config/configService';
+import { getAllMcpServers, getEnabledMcpServerIds, addOrUpdateImBotConfig, addProject, loadAppConfig, loadProjects, removeImBotConfig, removeProject, updateImBotConfig } from '@/config/configService';
+import { shortenPathForDisplay } from '@/utils/pathDetection';
+import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
 import FeishuCredentialInput from './components/FeishuCredentialInput';
 import BindQrPanel from './components/BindQrPanel';
@@ -68,7 +70,11 @@ export default function ImBotWizard({
     const isMountedRef = useRef(true);
 
     const isFeishu = platform === 'feishu';
-    const totalSteps = isFeishu ? 3 : 2;
+    // Telegram: credentials(1) → workspace(2) → binding(3)
+    // Feishu:   credentials(1) → permissions(2) → workspace(3) → binding(4)
+    const totalSteps = isFeishu ? 4 : 3;
+    const workspaceStep = isFeishu ? 3 : 2;
+    const bindingStep = isFeishu ? 4 : 3;
 
     const [step, setStep] = useState(1);
     // Telegram credentials
@@ -86,15 +92,19 @@ export default function ImBotWizard({
     const [permJsonCopied, setPermJsonCopied] = useState(false);
     const copyTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+    // Workspace step state
+    const [workspaceChoice, setWorkspaceChoice] = useState<'new' | 'existing'>('new');
+    const [selectedExistingPath, setSelectedExistingPath] = useState('');
+    const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+    // Track workspace created during this wizard session (for cleanup on cancel / dedup on back)
+    const createdWorkspacePathRef = useRef<string | undefined>(undefined);
+
     useEffect(() => {
         return () => {
             isMountedRef.current = false;
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
         };
     }, []);
-
-    // The binding step: step 2 for Telegram, step 3 for Feishu
-    const bindingStep = isFeishu ? 3 : 2;
 
     // Poll status when in binding step
     useEffect(() => {
@@ -158,14 +168,138 @@ export default function ImBotWizard({
         ? feishuAppId.trim() && feishuAppSecret.trim()
         : botToken.trim();
 
-    // Step 1 -> Step 2: validate credentials and start bot
+    // Build start params for cmd_start_im_bot (reusable helper)
+    const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
+        const selectedProvider = providers.find(p => p.id === cfg.providerId);
+        let providerEnvJson: string | undefined;
+        if (selectedProvider && selectedProvider.type !== 'subscription') {
+            providerEnvJson = JSON.stringify({
+                baseUrl: selectedProvider.config.baseUrl,
+                apiKey: apiKeys[selectedProvider.id],
+                authType: selectedProvider.authType,
+            });
+        }
+
+        const availableProviders = providers
+            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
+            .map(p => ({
+                id: p.id,
+                name: p.name,
+                primaryModel: p.primaryModel,
+                baseUrl: p.config.baseUrl,
+                authType: p.authType,
+                apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
+            }));
+
+        const allServers = await getAllMcpServers();
+        const globalEnabled = await getEnabledMcpServerIds();
+        const botMcpIds = cfg.mcpEnabledServers ?? [];
+        const enabledMcpDefs = allServers.filter(
+            s => globalEnabled.includes(s.id) && botMcpIds.includes(s.id)
+        );
+
+        return {
+            botId: cfg.id,
+            botToken: cfg.botToken,
+            allowedUsers: cfg.allowedUsers,
+            permissionMode: cfg.permissionMode,
+            workspacePath: cfg.defaultWorkspacePath || '',
+            model: cfg.model || null,
+            providerEnvJson: providerEnvJson || null,
+            mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
+            availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
+            platform: cfg.platform,
+            feishuAppId: cfg.feishuAppId || null,
+            feishuAppSecret: cfg.feishuAppSecret || null,
+            heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
+        };
+    }, [providers, apiKeys]);
+
+    // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
-        // Step 2 -> Step 3 for Feishu (permissions guide -> binding)
+        // Feishu step 2 -> step 3 (permissions guide -> workspace)
         if (isFeishu && step === 2) {
             setStep(3);
             return;
         }
 
+        // Workspace step -> binding step: create/select workspace, restart bot
+        if (step === workspaceStep) {
+            setCreatingWorkspace(true);
+            try {
+                let newWorkspacePath: string;
+
+                if (workspaceChoice === 'new') {
+                    // Reuse previously created workspace if user navigated back then forward
+                    if (createdWorkspacePathRef.current) {
+                        newWorkspacePath = createdWorkspacePathRef.current;
+                    } else if (isTauriEnvironment()) {
+                        // Create a new dedicated workspace for this bot
+                        const wsName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        const result = await invoke<{ path: string; is_new: boolean }>('cmd_create_bot_workspace', {
+                            workspaceName: wsName,
+                        });
+                        newWorkspacePath = result.path;
+                        createdWorkspacePathRef.current = newWorkspacePath;
+                        // Register in projects.json
+                        await addProject(newWorkspacePath);
+                        await refreshConfig();
+                    } else {
+                        // Browser dev mode fallback
+                        const wsName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
+                        newWorkspacePath = `/mock/projects/${wsName}`;
+                    }
+                } else {
+                    // Use selected existing workspace
+                    if (!selectedExistingPath) {
+                        toastRef.current.error('请选择一个工作区');
+                        setCreatingWorkspace(false);
+                        return;
+                    }
+                    newWorkspacePath = selectedExistingPath;
+                }
+
+                // Update bot config with the chosen workspace
+                await updateImBotConfig(botId, { defaultWorkspacePath: newWorkspacePath });
+                await refreshConfig();
+                // Restart bot with the correct workspace so binding step uses it
+                if (isTauriEnvironment()) {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    try {
+                        await invoke('cmd_stop_im_bot', { botId });
+                    } catch {
+                        // Bot might not be running
+                    }
+
+                    // Read latest config from disk for restart
+                    const latestConfig = await loadAppConfig();
+                    const latestBotConfig = (latestConfig.imBotConfigs ?? []).find(c => c.id === botId);
+                    if (latestBotConfig) {
+                        const params = await buildStartParams(latestBotConfig);
+                        const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
+                        if (isMountedRef.current) {
+                            setBotStatus(status);
+                        }
+                    }
+                }
+
+                if (isMountedRef.current) {
+                    setStep(bindingStep);
+                }
+            } catch (err) {
+                if (isMountedRef.current) {
+                    toastRef.current.error(`工作区设置失败: ${err}`);
+                }
+            } finally {
+                if (isMountedRef.current) {
+                    setCreatingWorkspace(false);
+                }
+            }
+            return;
+        }
+
+        // Step 1 -> Step 2: validate credentials and start bot
         if (!hasCredentials) {
             toastRef.current.error(isFeishu ? '请输入 App ID 和 App Secret' : '请输入 Bot Token');
             return;
@@ -189,7 +323,7 @@ export default function ImBotWizard({
         setVerifyStatus('verifying');
 
         try {
-            // Create the bot config
+            // Create the bot config — use mino temporarily for credential verification
             const defaultConfig = isFeishu ? DEFAULT_FEISHU_BOT_CONFIG : DEFAULT_IM_BOT_CONFIG;
             const mino = projects.find(p => p.path.replace(/\\/g, '/').endsWith('/mino'));
             const newConfig: ImBotConfig = {
@@ -217,50 +351,8 @@ export default function ImBotWizard({
 
             // Start the bot (this verifies the credentials)
             const { invoke } = await import('@tauri-apps/api/core');
-
-            // Build start params
-            const selectedProvider = providers.find(p => p.id === newConfig.providerId);
-            let providerEnvJson: string | undefined;
-            if (selectedProvider && selectedProvider.type !== 'subscription') {
-                providerEnvJson = JSON.stringify({
-                    baseUrl: selectedProvider.config.baseUrl,
-                    apiKey: apiKeys[selectedProvider.id],
-                    authType: selectedProvider.authType,
-                });
-            }
-
-            const availableProviders = providers
-                .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
-                .map(p => ({
-                    id: p.id,
-                    name: p.name,
-                    primaryModel: p.primaryModel,
-                    baseUrl: p.config.baseUrl,
-                    authType: p.authType,
-                    apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
-                }));
-
-            const allServers = await getAllMcpServers();
-            const globalEnabled = await getEnabledMcpServerIds();
-            const botMcpIds = newConfig.mcpEnabledServers ?? [];
-            const enabledMcpDefs = allServers.filter(
-                s => globalEnabled.includes(s.id) && botMcpIds.includes(s.id)
-            );
-
-            const status = await invoke<ImBotStatus>('cmd_start_im_bot', {
-                botId,
-                botToken: newConfig.botToken,
-                allowedUsers: newConfig.allowedUsers,
-                permissionMode: newConfig.permissionMode,
-                workspacePath: newConfig.defaultWorkspacePath || '',
-                model: newConfig.model || null,
-                providerEnvJson: providerEnvJson || null,
-                mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
-                availableProvidersJson: availableProviders.length > 0 ? JSON.stringify(availableProviders) : null,
-                platform: newConfig.platform,
-                feishuAppId: newConfig.feishuAppId || null,
-                feishuAppSecret: newConfig.feishuAppSecret || null,
-            });
+            const params = await buildStartParams(newConfig);
+            const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
 
             if (isMountedRef.current) {
                 setVerifyStatus('valid');
@@ -284,7 +376,7 @@ export default function ImBotWizard({
                 setStarting(false);
             }
         }
-    }, [hasCredentials, isFeishu, step, botToken, feishuAppId, feishuAppSecret, botId, platform, config.imBotConfigs, providers, apiKeys, projects, saveBotConfig, refreshConfig]);
+    }, [hasCredentials, isFeishu, step, workspaceStep, bindingStep, botToken, feishuAppId, feishuAppSecret, botId, platform, config.imBotConfigs, projects, saveBotConfig, refreshConfig, workspaceChoice, selectedExistingPath, botUsername, buildStartParams]);
 
     // Complete wizard — merge local users with any Rust-persisted users to avoid
     // overwriting binds that happened while the frontend listener was inactive
@@ -305,7 +397,7 @@ export default function ImBotWizard({
         if (isMountedRef.current) onComplete(botId);
     }, [botId, onComplete, refreshConfig]);
 
-    // Cancel wizard - stop bot and remove config
+    // Cancel wizard - stop bot, remove config, and clean up created workspace
     const handleCancel = useCallback(async () => {
         if (isTauriEnvironment()) {
             try {
@@ -316,9 +408,30 @@ export default function ImBotWizard({
             }
         }
         await removeImBotConfig(botId);
+
+        // Clean up workspace created during this wizard session (registration + disk directory)
+        if (createdWorkspacePathRef.current) {
+            try {
+                const allProjects = await loadProjects();
+                const project = allProjects.find(p => p.path === createdWorkspacePathRef.current);
+                if (project) {
+                    await removeProject(project.id);
+                }
+                // Remove directory from disk (Rust command validates path is under ~/.myagents/projects/)
+                if (isTauriEnvironment()) {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('cmd_remove_bot_workspace', { workspacePath: createdWorkspacePathRef.current });
+                }
+            } catch {
+                // Best-effort cleanup
+            }
+            createdWorkspacePathRef.current = undefined;
+        }
+
+        await refreshConfig();
         // Navigate back to platform-select; ImSettings's goToList will refresh config when list is shown
         if (isMountedRef.current) onCancel();
-    }, [botId, onCancel]);
+    }, [botId, onCancel, refreshConfig]);
 
     const handleCopyPermJson = useCallback(async () => {
         try {
@@ -336,12 +449,18 @@ export default function ImBotWizard({
 
     const stepLabel = (() => {
         if (!isFeishu) {
-            return step === 1 ? '配置 Bot Token' : '绑定你的 Telegram 账号';
+            if (step === 1) return '配置 Bot Token';
+            if (step === 2) return '设置工作区';
+            return '绑定你的 Telegram 账号';
         }
         if (step === 1) return '配置应用凭证';
         if (step === 2) return '配置权限与事件';
+        if (step === 3) return '设置工作区';
         return '绑定你的飞书账号';
     })();
+
+    // Derive workspace display name from bot username
+    const workspaceName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
 
     return (
         <div className="space-y-6">
@@ -568,7 +687,138 @@ export default function ImBotWizard({
                 </div>
             )}
 
-            {/* Binding step: step 2 for Telegram, step 3 for Feishu */}
+            {/* Workspace step */}
+            {step === workspaceStep && (
+                <div className="space-y-6">
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">选择 Bot 工作区</h3>
+                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                            工作区是 Bot 的独立运行环境，包含记忆、配置和巡检清单等文件。建议每个 Bot 使用独立工作区，避免多个 Bot 共用同一工作区导致冲突。
+                        </p>
+
+                        <div className="mt-5 space-y-3">
+                            {/* Option 1: Create new workspace */}
+                            <label
+                                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors ${
+                                    workspaceChoice === 'new'
+                                        ? 'border-[var(--button-primary-bg)] bg-[var(--button-primary-bg)]/5'
+                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                }`}
+                            >
+                                <input
+                                    type="radio"
+                                    name="workspace-choice"
+                                    checked={workspaceChoice === 'new'}
+                                    onChange={() => setWorkspaceChoice('new')}
+                                    className="mt-0.5 accent-[var(--button-primary-bg)]"
+                                />
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <FolderPlus className="h-4 w-4 text-[var(--button-primary-bg)]" />
+                                        <span className="text-sm font-medium text-[var(--ink)]">
+                                            新建工作区 — {workspaceName}
+                                        </span>
+                                        <span className="rounded-full bg-[var(--button-primary-bg)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--button-primary-bg)]">
+                                            推荐
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        为此 Bot 创建专属工作区，拥有独立的记忆和配置
+                                    </p>
+                                    <p className="mt-1 font-mono text-[10px] text-[var(--ink-muted)]">
+                                        ~/.myagents/projects/{workspaceName}/
+                                    </p>
+                                </div>
+                            </label>
+
+                            {/* Option 2: Select existing workspace */}
+                            <label
+                                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors ${
+                                    workspaceChoice === 'existing'
+                                        ? 'border-[var(--button-primary-bg)] bg-[var(--button-primary-bg)]/5'
+                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                }`}
+                            >
+                                <input
+                                    type="radio"
+                                    name="workspace-choice"
+                                    checked={workspaceChoice === 'existing'}
+                                    onChange={() => setWorkspaceChoice('existing')}
+                                    className="mt-0.5 accent-[var(--button-primary-bg)]"
+                                />
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <FolderOpen className="h-4 w-4 text-[var(--ink-muted)]" />
+                                        <span className="text-sm font-medium text-[var(--ink)]">
+                                            选择已有工作区
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        与其他 Bot 或客户端共享现有工作区
+                                    </p>
+
+                                    {workspaceChoice === 'existing' && (
+                                        <div className="mt-3">
+                                            <CustomSelect
+                                                value={selectedExistingPath}
+                                                options={projects.map(p => ({
+                                                    value: p.path,
+                                                    label: shortenPathForDisplay(p.path),
+                                                    icon: <FolderOpen className="h-3.5 w-3.5" />,
+                                                }))}
+                                                onChange={setSelectedExistingPath}
+                                                placeholder="选择工作区"
+                                                triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
+                                                className="w-full"
+                                                footerAction={{
+                                                    label: '选择文件夹...',
+                                                    icon: <Plus className="h-3.5 w-3.5" />,
+                                                    onClick: async () => {
+                                                        if (!isTauriEnvironment()) return;
+                                                        const { open } = await import('@tauri-apps/plugin-dialog');
+                                                        const selected = await open({ directory: true, multiple: false, title: '选择 Bot 工作区' });
+                                                        if (selected && typeof selected === 'string') {
+                                                            if (!projects.find(p => p.path === selected)) {
+                                                                await addProject(selected);
+                                                                await refreshConfig();
+                                                            }
+                                                            setSelectedExistingPath(selected);
+                                                        }
+                                                    },
+                                                }}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex justify-between">
+                        <button
+                            onClick={() => setStep(isFeishu ? 2 : 1)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                        >
+                            上一步
+                        </button>
+                        <button
+                            onClick={handleNext}
+                            disabled={creatingWorkspace || (workspaceChoice === 'existing' && !selectedExistingPath)}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            下一步
+                            {creatingWorkspace ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                                <ArrowRight className="h-4 w-4" />
+                            )}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Binding step */}
             {step === bindingStep && (
                 <div className="space-y-6">
                     {/* Platform-specific binding panel */}
@@ -613,7 +863,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         {isFeishu ? (
                             <button
-                                onClick={() => setStep(2)}
+                                onClick={() => setStep(workspaceStep)}
                                 className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
                             >
                                 上一步
