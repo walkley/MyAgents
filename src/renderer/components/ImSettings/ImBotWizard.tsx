@@ -611,18 +611,27 @@ export default function ImBotWizard({
 
                     {/* Actions */}
                     <div className="flex justify-between">
-                        <button
-                            onClick={handleSkip}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
-                        >
-                            跳过
-                        </button>
+                        {isFeishu ? (
+                            <button
+                                onClick={() => setStep(2)}
+                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            >
+                                上一步
+                            </button>
+                        ) : (
+                            <button
+                                onClick={handleSkip}
+                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            >
+                                跳过
+                            </button>
+                        )}
                         <button
                             onClick={handleComplete}
                             className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                         >
-                            <Check className="h-4 w-4" />
                             完成
+                            <Check className="h-4 w-4" />
                         </button>
                     </div>
                 </div>
