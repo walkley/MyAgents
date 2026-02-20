@@ -697,12 +697,35 @@ pub async fn start_im_bot<R: Runtime>(
                             &chat_id,
                             "👋 你好！我是 MyAgents Bot。\n\n\
                              可用命令：\n\
+                             /help — 查看所有命令\n\
                              /new — 开始新对话\n\
                              /workspace <路径> — 切换工作区\n\
                              /model — 查看或切换 AI 模型\n\
                              /provider — 查看或切换 AI 供应商\n\
+                             /mode — 切换权限模式\n\
                              /status — 查看状态\n\n\
                              直接发消息即可开始对话。",
+                        ).await;
+                        continue;
+                    }
+
+                    if text == "/help" {
+                        let _ = adapter_for_reply.send_message(
+                            &chat_id,
+                            "📖 可用命令\n\n\
+                             /new — 开始新对话（清空当前上下文）\n\
+                             /workspace — 查看当前工作区\n\
+                             /workspace <路径> — 切换工作区目录\n\
+                             /model — 查看当前 AI 模型\n\
+                             /model <名称> — 切换模型（sonnet / opus / haiku）\n\
+                             /provider — 查看可用 AI 供应商\n\
+                             /provider <序号或ID> — 切换供应商\n\
+                             /mode — 查看当前权限模式\n\
+                             /mode <模式> — 切换模式（plan / auto / full）\n\
+                             /status — 查看会话状态\n\
+                             /help — 显示本帮助\n\n\
+                             💬 直接发送文字即可与 AI 对话。\n\
+                             🔒 工具审批：收到权限请求时，回复「允许」「始终允许」或「拒绝」。",
                         ).await;
                         continue;
                     }
@@ -906,6 +929,60 @@ pub async fn start_im_bot<R: Runtime>(
                                     ).await;
                                 }
                             }
+                        }
+                        continue;
+                    }
+
+                    // /mode — show or switch permission mode
+                    if text.starts_with("/mode") {
+                        let arg = text.strip_prefix("/mode").unwrap_or("").trim().to_lowercase();
+                        let current = permission_mode_for_loop.read().await.clone();
+
+                        if arg.is_empty() {
+                            let display = match current.as_str() {
+                                "plan" => "🛡 计划模式 (plan) — AI 执行操作前需要审批",
+                                "auto" => "⚡ 自动模式 (auto) — 安全操作自动执行，敏感操作需审批",
+                                "fullAgency" => "🚀 全自主模式 (fullAgency) — 所有操作自动执行",
+                                _ => "❓ 未知模式",
+                            };
+                            let _ = adapter_for_reply.send_message(
+                                &chat_id,
+                                &format!(
+                                    "🔐 当前权限模式\n\n{}\n\n\
+                                     可选模式：\n\
+                                     • plan — 计划模式（最安全）\n\
+                                     • auto — 自动模式（推荐）\n\
+                                     • full — 全自主模式\n\n\
+                                     用法: /mode <模式>",
+                                    display,
+                                ),
+                            ).await;
+                        } else {
+                            let new_mode = match arg.as_str() {
+                                "plan" => "plan",
+                                "auto" => "auto",
+                                "full" | "fullagency" => "fullAgency",
+                                _ => {
+                                    let _ = adapter_for_reply.send_message(
+                                        &chat_id,
+                                        "❌ 无效模式，可选: plan / auto / full",
+                                    ).await;
+                                    continue;
+                                }
+                            };
+                            *permission_mode_for_loop.write().await = new_mode.to_string();
+
+                            let display = match new_mode {
+                                "plan" => "🛡 计划模式 — AI 执行操作前需要审批",
+                                "auto" => "⚡ 自动模式 — 安全操作自动执行",
+                                "fullAgency" => "🚀 全自主模式 — 所有操作自动执行",
+                                _ => unreachable!(),
+                            };
+                            ulog_info!("[im] /mode: switched to {} (session={})", new_mode, session_key);
+                            let _ = adapter_for_reply.send_message(
+                                &chat_id,
+                                &format!("✅ 权限模式已切换\n\n{}", display),
+                            ).await;
                         }
                         continue;
                     }
