@@ -141,7 +141,7 @@ const streamIndexToToolId: Map<number, string> = new Map();
 const toolResultIndexToId: Map<number, string> = new Map();
 
 // IM Draft Stream: callback for streaming text to Telegram
-type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request', data: string) => void;
+type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
@@ -3340,8 +3340,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         } else if (streamEvent.type === 'content_block_start') {
           // IM stream: track text block indices (non-subagent only)
-          if (imStreamCallback && streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
-            imTextBlockIndices.add(streamEvent.index);
+          if (imStreamCallback && !sdkMessage.parent_tool_use_id) {
+            if (streamEvent.content_block.type === 'text') {
+              imTextBlockIndices.add(streamEvent.index);
+            } else {
+              // Notify non-text block activity (thinking, tool_use) so IM can show placeholder
+              imStreamCallback('activity', streamEvent.content_block.type);
+            }
           }
           if (streamEvent.content_block.type === 'thinking') {
             broadcast('chat:thinking-start', { index: streamEvent.index });

@@ -1513,6 +1513,12 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     let mut last_edit = Instant::now();
     let mut any_text_sent = false;
 
+    // Response-level placeholder state:
+    // - placeholder_id: message ID of "🤖 生成中..." sent when first block is non-text
+    // - first_content_sent: true once user has seen any content (placeholder or real text)
+    let mut placeholder_id: Option<String> = None;
+    let mut first_content_sent = false;
+
     let mut session_id: Option<String> = None;
     const THROTTLE: Duration = Duration::from_millis(1000);
 
@@ -1545,16 +1551,29 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     if let Some(text) = json_val["text"].as_str() {
                         block_text = text.to_string();
 
-                        // First meaningful text received → send draft message
+                        // First meaningful text in this block → create or adopt draft
                         // Skip whitespace-only blocks (API spacer blocks before thinking)
                         if draft_id.is_none() && !block_text.trim().is_empty() {
-                            match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
-                                Ok(Some(id)) => {
-                                    draft_id = Some(id);
-                                    last_edit = Instant::now();
+                            if let Some(pid) = placeholder_id.take() {
+                                // Adopt the placeholder as draft → edit with real content
+                                draft_id = Some(pid);
+                                let display = format_draft_text(&block_text, adapter.max_message_length());
+                                if let Err(e) = adapter.edit_message(chat_id, draft_id.as_ref().unwrap(), &display).await {
+                                    ulog_warn!("[im] Placeholder→draft edit failed: {}", e);
                                 }
-                                _ => {} // draft creation failed; block-end will send_message directly
+                                last_edit = Instant::now();
+                            } else {
+                                // No placeholder — send real content directly as draft
+                                let display = format_draft_text(&block_text, adapter.max_message_length());
+                                match adapter.send_message_returning_id(chat_id, &display).await {
+                                    Ok(Some(id)) => {
+                                        draft_id = Some(id);
+                                        last_edit = Instant::now();
+                                    }
+                                    _ => {} // draft creation failed; block-end will send_message directly
+                                }
                             }
+                            first_content_sent = true;
                         }
 
                         // Throttled edit (≥1s interval)
@@ -1567,6 +1586,19 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                                 last_edit = Instant::now();
                             }
                         }
+                    }
+                }
+                "activity" => {
+                    // Non-text block started (thinking, tool_use).
+                    // If user hasn't seen any content yet, send a placeholder.
+                    if !first_content_sent {
+                        match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
+                            Ok(Some(id)) => {
+                                placeholder_id = Some(id);
+                            }
+                            _ => {} // placeholder failed; text blocks will create their own message
+                        }
+                        first_content_sent = true;
                     }
                 }
                 "block-end" => {
@@ -1598,6 +1630,10 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                         let _ = adapter.delete_message(chat_id, did).await;
                     }
                     if !any_text_sent {
+                        // Clean up orphaned placeholder (e.g. only thinking/tool_use, no text output)
+                        if let Some(ref pid) = placeholder_id {
+                            let _ = adapter.delete_message(chat_id, pid).await;
+                        }
                         let _ = adapter.send_message(chat_id, "(No response)").await;
                     }
                     return Ok(session_id);
@@ -1644,9 +1680,12 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     let error = json_val["error"]
                         .as_str()
                         .unwrap_or("Unknown error");
-                    // Delete current draft if exists
+                    // Delete current draft and placeholder if they exist
                     if let Some(ref did) = draft_id {
                         let _ = adapter.delete_message(chat_id, did).await;
+                    }
+                    if let Some(ref pid) = placeholder_id {
+                        let _ = adapter.delete_message(chat_id, pid).await;
                     }
                     let _ = adapter
                         .send_message(chat_id, &format!("⚠️ {}", error))
@@ -1666,6 +1705,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         let _ = adapter.delete_message(chat_id, did).await;
     }
     if !any_text_sent {
+        if let Some(ref pid) = placeholder_id {
+            let _ = adapter.delete_message(chat_id, pid).await;
+        }
         let _ = adapter.send_message(chat_id, "(No response)").await;
     }
     Ok(session_id)
@@ -1700,20 +1742,20 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
     }
 }
 
-/// Format draft display text (truncate + generating indicator).
+/// Format draft display text (truncate if needed for platform limit).
 /// `max_len` is the platform's message limit (e.g. 4096 for Telegram, 30000 for Feishu).
 fn format_draft_text(text: &str, max_len: usize) -> String {
-    // Reserve space for the suffix
-    let limit = max_len.saturating_sub(100);
+    // Reserve a small margin for the "..." truncation indicator
+    let limit = max_len.saturating_sub(10);
     if text.chars().count() > limit {
         let truncate_at = text
             .char_indices()
             .nth(limit)
             .map(|(i, _)| i)
             .unwrap_or(text.len());
-        format!("{}...\n\n_⏳ 生成中_", &text[..truncate_at])
+        format!("{}...", &text[..truncate_at])
     } else {
-        format!("{}\n\n_⏳ 生成中_", text)
+        text.to_string()
     }
 }
 

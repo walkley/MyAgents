@@ -4659,6 +4659,9 @@ async function main() {
                     sessionId: getSessionId(),
                   });
                   closeStream();
+                } else if (event === 'activity') {
+                  // Non-text block started (thinking, tool_use) — Rust uses this for placeholder
+                  sendEvent({ type: 'activity' });
                 } else if (event === 'error') {
                   sendEvent({ type: 'error', error: data });
                   closeStream();
