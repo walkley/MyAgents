@@ -15,6 +15,8 @@ import telegramBotAddImg from './assets/telegram_bot_add.png';
 import feishuStep1Img from './assets/feishu_step1.png';
 import feishuStep2PermImg from './assets/feishu_step2_permissions.png';
 import feishuStep2EventImg from './assets/feishu_step2_events.png';
+import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
+import feishuStep2PublishImg from './assets/feishu_setp2_6_publish.png';
 
 const FEISHU_PERMISSIONS_JSON = `{
   "scopes": {
@@ -515,6 +517,34 @@ export default function ImBotWizard({
                         <img
                             src={feishuStep2EventImg}
                             alt="飞书事件与回调 - 事件配置"
+                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                        />
+                    </div>
+
+                    {/* Add bot capability */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 添加应用能力 - 机器人</h3>
+                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span></li>
+                            <li>找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击下方的 <span className="font-medium text-[var(--ink)]">配置</span> 按钮添加</li>
+                        </ol>
+                        <img
+                            src={feishuStep2AddBotImg}
+                            alt="飞书添加应用能力 - 机器人"
+                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                        />
+                    </div>
+
+                    {/* Publish version */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
+                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建版本</span>，填写版本信息后提交发布</li>
+                        </ol>
+                        <img
+                            src={feishuStep2PublishImg}
+                            alt="飞书版本管理与发布"
                             className="mt-4 w-full rounded-lg border border-[var(--line)]"
                         />
                     </div>
