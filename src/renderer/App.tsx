@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, resetGlobalSidecarReadyPromise, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, sessionHasPersistentOwners } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomTitleBar from '@/components/CustomTitleBar';
 import TabBar from '@/components/TabBar';
@@ -492,19 +492,23 @@ export default function App() {
   }, []);
 
   // Close tab with confirmation if generating (shows custom dialog)
-  const closeTabWithConfirmation = useCallback((tabId: string) => {
+  // Exception: if a persistent owner (CronTask / ImBot) keeps the Sidecar alive,
+  // closing the Tab just releases the Tab owner — no work is lost, so skip confirmation.
+  const closeTabWithConfirmation = useCallback(async (tabId: string) => {
     const tab = tabsRef.current.find(t => t.id === tabId);
 
-    // If generating, show confirmation dialog
-    if (tab?.isGenerating) {
-      setCloseConfirmState({
-        tabId,
-        tabTitle: tab.title
-      });
+    if (tab?.isGenerating && tab.sessionId) {
+      // Ask Rust if the Sidecar has background owners that survive this Tab closing
+      const hasBgOwner = await sessionHasPersistentOwners(tab.sessionId);
+      if (hasBgOwner) {
+        void performCloseTab(tabId);
+        return;
+      }
+
+      setCloseConfirmState({ tabId, tabTitle: tab.title });
       return;
     }
 
-    // Otherwise, close directly
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
@@ -523,7 +527,7 @@ export default function App() {
     }
 
     // Multiple tabs OR last tab is chat/settings: use the unified confirmation logic
-    closeTabWithConfirmation(currentActiveTabId);
+    void closeTabWithConfirmation(currentActiveTabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
@@ -1127,7 +1131,7 @@ export default function App() {
       return;
     }
 
-    closeTabWithConfirmation(tabId);
+    void closeTabWithConfirmation(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 

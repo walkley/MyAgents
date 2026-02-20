@@ -734,6 +734,15 @@ impl SidecarManager {
         upgraded
     }
 
+    /// Check if a session's Sidecar has persistent background owners (CronTask or ImBot)
+    /// that will keep it alive after a Tab releases its ownership.
+    pub fn session_has_persistent_owners(&self, session_id: &str) -> bool {
+        self.sidecars
+            .get(session_id)
+            .map(|s| s.owners.iter().any(|o| matches!(o, SidecarOwner::CronTask(_) | SidecarOwner::ImBot(_))))
+            .unwrap_or(false)
+    }
+
 }
 
 impl Default for SidecarManager {
@@ -1958,6 +1967,18 @@ pub fn cmd_upgrade_session_id(
 ) -> Result<bool, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
     Ok(manager.upgrade_session_id(&oldSessionId, &newSessionId))
+}
+
+/// Check if a session's Sidecar has persistent background owners (CronTask or ImBot)
+/// Used by frontend to decide whether closing a tab needs confirmation.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_session_has_persistent_owners(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> bool {
+    let manager = state.lock().unwrap_or_else(|e| e.into_inner());
+    manager.session_has_persistent_owners(&sessionId)
 }
 
 // ============= Background Session Completion =============
