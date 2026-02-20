@@ -390,13 +390,6 @@ export default function ImBotWizard({
         if (isMountedRef.current) onComplete(botId);
     }, [botId, allowedUsers, onComplete, refreshConfig]);
 
-    // Skip binding step
-    const handleSkip = useCallback(async () => {
-        await updateImBotConfig(botId, { setupCompleted: true });
-        await refreshConfig();
-        if (isMountedRef.current) onComplete(botId);
-    }, [botId, onComplete, refreshConfig]);
-
     // Cancel wizard - stop bot, remove config, and clean up created workspace
     const handleCancel = useCallback(async () => {
         if (isTauriEnvironment()) {
@@ -538,6 +531,16 @@ export default function ImBotWizard({
                         </div>
                     ) : (
                         <>
+                            {/* Token input */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <BotTokenInput
+                                    value={botToken}
+                                    onChange={setBotToken}
+                                    verifyStatus={verifyStatus}
+                                    botUsername={botUsername}
+                                />
+                            </div>
+
                             {/* BotFather tutorial */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-sm font-medium text-[var(--ink)]">
@@ -554,19 +557,9 @@ export default function ImBotWizard({
                                         <li>2. 发送 <code className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-xs">/newbot</code> 创建新 Bot</li>
                                         <li>3. 按提示设置 Bot 名称和用户名</li>
                                         <li>4. 复制返回的 <span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
-                                        <li>5. 粘贴到下方的 Bot Token 输入框</li>
+                                        <li>5. 粘贴到上方的 Bot Token 输入框</li>
                                     </ol>
                                 </div>
-                            </div>
-
-                            {/* Token input */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <BotTokenInput
-                                    value={botToken}
-                                    onChange={setBotToken}
-                                    verifyStatus={verifyStatus}
-                                    botUsername={botUsername}
-                                />
                             </div>
                         </>
                     )}
@@ -861,21 +854,12 @@ export default function ImBotWizard({
 
                     {/* Actions */}
                     <div className="flex justify-between">
-                        {isFeishu ? (
-                            <button
-                                onClick={() => setStep(workspaceStep)}
-                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
-                            >
-                                上一步
-                            </button>
-                        ) : (
-                            <button
-                                onClick={handleSkip}
-                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
-                            >
-                                跳过
-                            </button>
-                        )}
+                        <button
+                            onClick={() => setStep(workspaceStep)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                        >
+                            上一步
+                        </button>
                         <button
                             onClick={handleComplete}
                             className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
