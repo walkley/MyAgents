@@ -381,9 +381,10 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
         response = await fetch(endpoint);
       }
       const blob = await response.blob();
-      const dataUrl = await new Promise<string>((resolve) => {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(blob);
       });
       openPreview(dataUrl, node.name);
@@ -1094,12 +1095,15 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
 
                   // Helper to execute file preview (extracted for reuse)
                   const executeFilePreview = async () => {
-                    // Select the file immediately
+                    // Update selection immediately for visual feedback, even if preview is loading
                     setSelectedNodes([data]);
                     lastClickedNodeRef.current = data;
 
+                    if (isPreviewLoading) return;
+
                     // Preview based on file type
                     if (isImageFile(data.name)) {
+                      setIsPreviewLoading(true);
                       try {
                         // Use Tab-scoped fetch to ensure correct Sidecar in multi-Tab scenarios
                         const endpoint = `/agent/download?path=${encodeURIComponent(data.path)}`;
@@ -1111,15 +1115,18 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                           response = await fetch(endpoint);
                         }
                         const blob = await response.blob();
-                        const dataUrl = await new Promise<string>((resolve) => {
+                        const dataUrl = await new Promise<string>((resolve, reject) => {
                           const reader = new FileReader();
                           reader.onload = () => resolve(reader.result as string);
+                          reader.onerror = () => reject(reader.error);
                           reader.readAsDataURL(blob);
                         });
                         openPreview(dataUrl, data.name);
                       } catch (err) {
                         console.error('[DirectoryPanel] Failed to load image:', err);
                         toast.error('图片加载失败');
+                      } finally {
+                        setIsPreviewLoading(false);
                       }
                     } else if (isPreviewable(data.name)) {
                       void handlePreview(data);

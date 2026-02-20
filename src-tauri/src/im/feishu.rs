@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use prost::Message as ProstMessage;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::types::{ImConfig, ImMessage, ImPlatform, ImSourceType};
 use super::ApprovalCallback;
@@ -216,19 +216,36 @@ fn markdown_to_feishu_post(md: &str) -> Value {
                     paragraphs.push(std::mem::take(&mut current_line));
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 if !current_line.is_empty() {
                     paragraphs.push(std::mem::take(&mut current_line));
                 }
                 in_code_block = true;
                 code_block_buf.clear();
+                // Extract language hint if present (take first word, ignore metadata)
+                if let CodeBlockKind::Fenced(lang) = kind {
+                    let lang_str = lang.split_whitespace().next().unwrap_or("").to_string();
+                    if !lang_str.is_empty() {
+                        code_block_buf.push_str(&format!("[{}]\n", lang_str));
+                    }
+                }
             }
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
-                // Each line of code block becomes a separate paragraph
                 let buf = std::mem::take(&mut code_block_buf);
-                for line in buf.lines() {
-                    paragraphs.push(vec![json!({"tag": "text", "text": line})]);
+                if buf.trim().is_empty() {
+                    // Skip empty code blocks
+                } else {
+                    // Wrap code block with visual separator (Feishu Post has no native code block)
+                    paragraphs.push(vec![json!({"tag": "text", "text": "─── ✦ ───"})]);
+                    for line in buf.lines() {
+                        paragraphs.push(vec![json!({
+                            "tag": "text",
+                            "text": format!("  {}", line),
+                            "style": ["italic"],
+                        })]);
+                    }
+                    paragraphs.push(vec![json!({"tag": "text", "text": "─── ✦ ───"})]);
                 }
             }
             Event::Text(text) => {
@@ -276,13 +293,17 @@ fn markdown_to_feishu_post(md: &str) -> Value {
                 }
             }
             Event::Code(code) => {
-                // Inline code: preserve backticks as plain text
-                let text = format!("`{}`", code);
+                // Inline code: map to bold+italic (Feishu has no inline code style)
+                let code_text = code.to_string();
                 if let Some(prefix) = item_prefix.take() {
-                    current_line.push(json!({"tag": "text", "text": format!("{}{}", prefix, text)}));
-                } else {
-                    current_line.push(json!({"tag": "text", "text": text}));
+                    // Emit prefix as plain text, then code as styled
+                    current_line.push(json!({"tag": "text", "text": prefix}));
                 }
+                current_line.push(json!({
+                    "tag": "text",
+                    "text": code_text,
+                    "style": ["bold", "italic"],
+                }));
             }
             Event::SoftBreak => {
                 // Flush current line as a paragraph
@@ -320,6 +341,107 @@ fn markdown_to_feishu_post(md: &str) -> Value {
             "content": paragraphs
         }
     })
+}
+
+// ── Feishu Post → plain text converter (receive direction) ──
+
+/// Extract plain text from a Feishu Post rich-text content JSON.
+///
+/// Post content structure (received):
+/// ```json
+/// { "title": "...", "content": [[{"tag":"text","text":"..."}, ...], ...] }
+/// ```
+/// Or wrapped in a locale key:
+/// ```json
+/// { "zh_cn": { "title": "...", "content": [[...]] } }
+/// ```
+fn feishu_post_to_text(content: &Value) -> String {
+    // Post content may be wrapped in a locale key (zh_cn / en_us / etc.)
+    // Direct structure: {"title": "...", "content": [[...]]}
+    // Locale-wrapped:  {"zh_cn": {"title": "...", "content": [[...]]}}
+    let post = if let Some(obj) = content.as_object() {
+        if obj.get("content").map_or(false, |v| v.is_array()) {
+            // Direct structure — "content" is the paragraph array
+            content
+        } else {
+            // Locale-wrapped — prefer zh_cn, fallback to first available
+            obj.get("zh_cn")
+                .or_else(|| obj.get("en_us"))
+                .or_else(|| obj.values().next())
+                .unwrap_or(content)
+        }
+    } else {
+        content
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Optional title
+    if let Some(title) = post["title"].as_str() {
+        if !title.is_empty() {
+            lines.push(title.to_string());
+        }
+    }
+
+    // Paragraphs: [[element, ...], ...]
+    if let Some(paragraphs) = post["content"].as_array() {
+        for para in paragraphs {
+            if let Some(elements) = para.as_array() {
+                let mut line_parts: Vec<String> = Vec::new();
+                for elem in elements {
+                    let tag = elem["tag"].as_str().unwrap_or("");
+                    match tag {
+                        "text" => {
+                            if let Some(t) = elem["text"].as_str() {
+                                line_parts.push(t.to_string());
+                            }
+                        }
+                        "a" => {
+                            // Hyperlink: show text + URL
+                            let text = elem["text"].as_str().unwrap_or("");
+                            let href = elem["href"].as_str().unwrap_or("");
+                            if !href.is_empty() && text != href {
+                                line_parts.push(format!("{} ({})", text, href));
+                            } else if !text.is_empty() {
+                                line_parts.push(text.to_string());
+                            } else {
+                                line_parts.push(href.to_string());
+                            }
+                        }
+                        "at" => {
+                            let name = elem["user_name"].as_str().unwrap_or("@someone");
+                            line_parts.push(format!("@{}", name));
+                        }
+                        "img" | "media" => {
+                            line_parts.push("[附件]".to_string());
+                        }
+                        "code_block" => {
+                            // Undocumented but may appear; try to extract text/code
+                            if let Some(t) = elem["text"].as_str().or(elem["code"].as_str()) {
+                                line_parts.push(format!("```\n{}\n```", t));
+                            } else {
+                                ulog_debug!("[feishu] code_block element has no text/code: {}", elem);
+                            }
+                        }
+                        "emotion" => {
+                            let emoji = elem["emoji_type"].as_str().unwrap_or("emoji");
+                            line_parts.push(format!("[{}]", emoji));
+                        }
+                        other => {
+                            // Unknown tag — best effort: extract text field if present
+                            ulog_debug!("[feishu] Unknown post element tag: '{}', elem: {}", other, elem);
+                            if let Some(t) = elem["text"].as_str() {
+                                line_parts.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                lines.push(line_parts.join(""));
+            }
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// Feishu Bot API adapter
@@ -710,19 +832,40 @@ impl FeishuAdapter {
         let message_id = message["message_id"].as_str()?.to_string();
         let msg_type = message["message_type"].as_str()?;
 
-        // Only handle text messages for MVP
-        if msg_type != "text" {
-            ulog_debug!("[feishu] Ignoring non-text message type: {}", msg_type);
+        let content_str = message["content"].as_str()?;
+        let content: Value = match serde_json::from_str(content_str) {
+            Ok(v) => v,
+            Err(e) => {
+                ulog_warn!("[feishu] Failed to parse message content JSON: {}", e);
+                return None;
+            }
+        };
+
+        let text = match msg_type {
+            "text" => {
+                content["text"].as_str().unwrap_or("").to_string()
+            }
+            "post" => {
+                feishu_post_to_text(&content)
+            }
+            _ => {
+                ulog_debug!("[feishu] Ignoring unsupported message type: {}", msg_type);
+                return None;
+            }
+        };
+
+        if text.trim().is_empty() {
+            ulog_debug!("[feishu] Ignoring empty {} message", msg_type);
             return None;
         }
 
-        let content_str = message["content"].as_str()?;
-        let content: Value = serde_json::from_str(content_str).ok()?;
-        let text = content["text"].as_str().unwrap_or("").to_string();
-
-        let sender_id = sender["sender_id"]["open_id"].as_str()
-            .unwrap_or("")
-            .to_string();
+        let sender_id = match sender["sender_id"]["open_id"].as_str() {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                ulog_warn!("[feishu] Missing sender open_id in message {}", message_id);
+                return None;
+            }
+        };
 
         // Sender type: "user" for users
         let sender_type = sender["sender_type"].as_str().unwrap_or("user");

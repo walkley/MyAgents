@@ -132,7 +132,7 @@ export interface Message {
   attachments?: MessageAttachment[];
   /** Message source metadata (IM integration) */
   metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group';
+    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
     sourceId?: string;
     senderName?: string;
   };
