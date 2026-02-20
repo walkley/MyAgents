@@ -102,6 +102,7 @@ import {
   clearSystemPromptConfig,
   rewindSession,
   getPendingInteractiveRequests,
+  stripPlaywrightResults,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
@@ -691,7 +692,11 @@ async function main() {
         const state = getAgentState();
         client.send('chat:init', state);
         getMessages().forEach((message) => {
-          client.send('chat:message-replay', { message });
+          // Strip Playwright tool results from replay to avoid sending large base64 data to frontend
+          const stripped = typeof message.content !== 'string'
+            ? { ...message, content: stripPlaywrightResults(message.content) }
+            : message;
+          client.send('chat:message-replay', { message: stripped });
         });
         client.send('chat:logs', { lines: getLogLines() });
         const systemInitInfo = getSystemInitInfo();
@@ -1378,7 +1383,7 @@ async function main() {
               .map(m => ({
                 id: m.id,
                 role: m.role,
-                content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+                content: typeof m.content === 'string' ? m.content : JSON.stringify(stripPlaywrightResults(m.content)),
                 timestamp: m.timestamp,
                 sdkUuid: m.sdkUuid,
                 attachments: m.attachments?.map(a => ({

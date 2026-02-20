@@ -54,6 +54,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     agentDir,
     sessionId,
     messages,
+    historyMessages,
+    streamingMessage,
     isLoading,
     sessionState,
     unifiedLogs,
@@ -1211,7 +1213,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
           >
             <MessageList
-              messages={messages}
+              historyMessages={historyMessages}
+              streamingMessage={streamingMessage}
               isLoading={isLoading}
               containerRef={messagesContainerRef}
               bottomPadding={140}

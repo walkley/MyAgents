@@ -1205,10 +1205,14 @@ function persistMessagesToStorage(
 ): void {
   const sessionMessages: SessionMessage[] = messages.map((msg, index) => {
     const isLastAssistant = index === messages.length - 1 && msg.role === 'assistant';
+    // Strip Playwright tool results from disk persistence (keep in-memory data for SDK context)
+    const contentForDisk = typeof msg.content === 'string'
+      ? msg.content
+      : JSON.stringify(stripPlaywrightResults(msg.content));
     return {
       id: msg.id,
       role: msg.role,
-      content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+      content: contentForDisk,
       timestamp: msg.timestamp,
       sdkUuid: msg.sdkUuid,
       attachments: msg.attachments?.map((att) => ({
@@ -1928,6 +1932,36 @@ function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
   return null;
 }
 
+/** Sentinel value for stripped Playwright tool results (truthy, so ProcessRow sees tool as complete) */
+const PLAYWRIGHT_RESULT_SENTINEL = '[playwright_result_stripped]';
+
+/** Set of tool_use IDs whose results are stripped from frontend broadcast in the current turn */
+const strippedToolResultIds = new Set<string>();
+
+function isPlaywrightTool(toolUseId: string): boolean {
+  const toolBlock = findToolBlockById(toolUseId);
+  return toolBlock?.tool.name.startsWith('mcp__playwright__') ?? false;
+}
+
+/**
+ * Strip Playwright tool results from ContentBlock[] for frontend/persistence.
+ * Replaces tool.result with a sentinel so ProcessRow still sees the tool as complete.
+ * Keeps in-memory SDK data intact for conversation context.
+ */
+export function stripPlaywrightResults(content: ContentBlock[]): ContentBlock[] {
+  return content.map(block => {
+    if (
+      block.type === 'tool_use' &&
+      block.tool?.name.startsWith('mcp__playwright__') &&
+      block.tool.result &&
+      block.tool.result !== PLAYWRIGHT_RESULT_SENTINEL
+    ) {
+      return { ...block, tool: { ...block.tool, result: PLAYWRIGHT_RESULT_SENTINEL } };
+    }
+    return block;
+  });
+}
+
 function appendToolResultDelta(toolUseId: string, delta: string): void {
   if (appendSubagentToolResultDelta(toolUseId, delta)) {
     return;
@@ -2175,6 +2209,7 @@ function clearMessageState(): void {
   toolResultIndexToId.clear();
   childToolToParent.clear();
   imTextBlockIndices.clear();
+  strippedToolResultIds.clear();
   isStreamingMessage = false;
   messageSequence = 0;
   pendingConfigRestart = false;
@@ -3287,10 +3322,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   delta: streamEvent.delta.text
                 });
               } else {
-                broadcast('chat:tool-result-delta', {
-                  toolUseId: sdkMessage.parent_tool_use_id,
-                  delta: streamEvent.delta.text
-                });
+                // Skip broadcasting delta for stripped Playwright tools (keep in-memory data intact)
+                if (!strippedToolResultIds.has(sdkMessage.parent_tool_use_id)) {
+                  broadcast('chat:tool-result-delta', {
+                    toolUseId: sdkMessage.parent_tool_use_id,
+                    delta: streamEvent.delta.text
+                  });
+                }
               }
               appendToolResultDelta(sdkMessage.parent_tool_use_id, streamEvent.delta.text);
             } else {
@@ -3440,9 +3478,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   isError: toolResultBlock.is_error || false
                 });
               } else {
+                // Strip Playwright tool results from frontend broadcast
+                const shouldStripResult = isPlaywrightTool(toolResultBlock.tool_use_id);
+                if (shouldStripResult) {
+                  strippedToolResultIds.add(toolResultBlock.tool_use_id);
+                }
                 broadcast('chat:tool-result-start', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  content: shouldStripResult ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
               }
@@ -3559,9 +3602,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 });
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
+                const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
                 });
               }
               handleToolResultComplete(toolResultBlock.tool_use_id, contentStr);
@@ -3626,9 +3670,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const text = formatAssistantContent(assistantMessage.content);
           if (text) {
             const next = appendToolResultContent(sdkMessage.parent_tool_use_id, text);
+            const stripped = strippedToolResultIds.has(sdkMessage.parent_tool_use_id) || isPlaywrightTool(sdkMessage.parent_tool_use_id);
             broadcast('chat:tool-result-complete', {
               toolUseId: sdkMessage.parent_tool_use_id,
-              content: next
+              content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : next
             });
           }
         }
@@ -3686,9 +3731,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   isError: toolResultBlock.is_error || false
                 });
               } else {
+                const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
               }

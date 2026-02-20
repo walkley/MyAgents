@@ -33,7 +33,9 @@ export interface TabState {
     sessionId: string | null;
 
     // Chat state
-    messages: Message[];
+    messages: Message[];           // Combined view (history + streaming) for backward compat
+    historyMessages: Message[];    // Immutable during streaming — zero re-render for history
+    streamingMessage: Message | null;  // Only this updates during streaming
     isLoading: boolean;
     sessionState: SessionState;
 
@@ -122,6 +124,8 @@ const defaultContextValue: TabContextValue = {
     agentDir: '',
     sessionId: null,
     messages: [],
+    historyMessages: [],
+    streamingMessage: null,
     isLoading: false,
     sessionState: 'idle',
     logs: [],

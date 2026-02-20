@@ -52,23 +52,22 @@ const FILE_MODIFYING_TOOLS = new Set([
 const isToolBlock = (b: ContentBlock): boolean => b.type === 'tool_use' || b.type === 'server_tool_use';
 
 /**
- * Helper to update subagent calls in a parent tool
- * Reduces code duplication across subagent event handlers
+ * Helper to update subagent calls in a message's content blocks
+ * Returns the updated message, or null if no matching tool block found.
  */
-function updateSubagentCallsInMessages(
-    prev: Message[],
+function applySubagentCallsUpdate(
+    msg: Message,
     parentToolUseId: string,
     updater: (calls: SubagentToolCall[], tool: ToolUseSimple) => { calls: SubagentToolCall[]; stats?: TaskStats }
-): Message[] {
-    const last = prev[prev.length - 1];
-    if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
+): Message | null {
+    if (msg.role !== 'assistant' || typeof msg.content === 'string') return null;
 
-    const contentArray = last.content;
+    const contentArray = msg.content;
     const idx = contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === parentToolUseId);
-    if (idx === -1) return prev;
+    if (idx === -1) return null;
 
     const block = contentArray[idx];
-    if (block.type !== 'tool_use' || !block.tool) return prev;
+    if (block.type !== 'tool_use' || !block.tool) return null;
 
     const { calls, stats } = updater(block.tool.subagentCalls || [], block.tool);
     const updated = [...contentArray];
@@ -80,7 +79,7 @@ function updateSubagentCallsInMessages(
             ...(stats !== undefined && { taskStats: stats })
         }
     };
-    return [...prev.slice(0, -1), { ...last, content: updated }];
+    return { ...msg, content: updated };
 }
 
 interface TabProviderProps {
@@ -211,7 +210,48 @@ export default function TabProvider({
     const apiPutJson = useMemo(() => createApiPutJson(tabId, currentSessionIdRef), [tabId]);
     const apiDeleteJson = useMemo(() => createApiDelete(tabId, currentSessionIdRef), [tabId]);
 
-    const [messages, setMessages] = useState<Message[]>([]);
+    // ── Split message state: history (stable during streaming) + streaming (updates on every SSE event)
+    const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
+    const [streamingMessage, rawSetStreamingMessage] = useState<Message | null>(null);
+    const streamingMessageRef = useRef<Message | null>(null);
+
+    // Wrapper setter that keeps ref in sync (functional updates read latest via ref)
+    const setStreamingMessage = useCallback((action: React.SetStateAction<Message | null>) => {
+        rawSetStreamingMessage(prev => {
+            const next = typeof action === 'function' ? action(prev) : action;
+            streamingMessageRef.current = next;
+            return next;
+        });
+    }, []);
+
+    // Combined view for backward compat (used by Chat.tsx messagesRef, rewind, error handling)
+    const messages = useMemo<Message[]>(
+        () => streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
+        [historyMessages, streamingMessage]
+    );
+
+    // Compat wrapper: setMessages operates on combined array, drains streaming into history.
+    // Note: The functional-update path has side effects (clearing streamingMessage) inside
+    // setHistoryMessages updater — technically impure, but safe because: (1) StrictMode is off,
+    // (2) callers (rewind, error) only invoke this when NOT streaming (streamingMessage is already null).
+    const setMessages = useCallback((action: React.SetStateAction<Message[]>) => {
+        if (typeof action === 'function') {
+            setHistoryMessages(prevHistory => {
+                const combined = streamingMessageRef.current
+                    ? [...prevHistory, streamingMessageRef.current]
+                    : prevHistory;
+                const next = action(combined);
+                streamingMessageRef.current = null;
+                rawSetStreamingMessage(null);
+                return next;
+            });
+        } else {
+            streamingMessageRef.current = null;
+            rawSetStreamingMessage(null);
+            setHistoryMessages(action);
+        }
+    }, []);
+
     const [isLoading, setIsLoading] = useState(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [logs, setLogs] = useState<string[]>([]);
@@ -275,7 +315,8 @@ export default function TabProvider({
         console.log(`[TabProvider ${tabId}] resetSession: starting...`);
 
         // 1. Clear frontend state immediately for responsive UI
-        setMessages([]);
+        setHistoryMessages([]);
+        setStreamingMessage(null);
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
         isStreamingRef.current = false;
@@ -311,7 +352,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] resetSession error:`, error);
             return false;
         }
-    }, [tabId, postJson]);
+    }, [tabId, postJson, setStreamingMessage]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -377,44 +418,52 @@ export default function TabProvider({
         };
     }, [appendUnifiedLog]);
 
-    // Helper: Mark all incomplete thinking/tool blocks as finished (stopped or failed)
-    const markIncompleteBlocksAsFinished = useCallback((status: 'completed' | 'stopped' | 'failed') => {
-        setMessages(prev => {
-            const last = prev[prev.length - 1];
-            if (!last || last.role !== 'assistant' || typeof last.content === 'string') return prev;
-            const hasIncomplete = last.content.some(b =>
+    /**
+     * Move the current streaming message into history, marking incomplete blocks as finished.
+     * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
+     */
+    const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
+        const current = streamingMessageRef.current;
+        if (!current) return;
+
+        let finalMsg = current;
+        if (current.role === 'assistant' && Array.isArray(current.content)) {
+            const statusFlags = status === 'stopped' ? { isStopped: true }
+                : status === 'failed' ? { isFailed: true }
+                    : {};
+            const hasIncomplete = current.content.some(b =>
                 (b.type === 'thinking' && !b.isComplete) ||
                 (b.type === 'tool_use' && b.tool?.isLoading)
             );
-            if (!hasIncomplete) return prev;
-            // 'completed' = normal finish (no extra flags)
-            // 'stopped'  = user interrupted (isStopped: true, yellow icon)
-            // 'failed'   = error occurred (isFailed: true, red icon)
-            const statusFlags = status === 'stopped' ? { isStopped: true }
-                : status === 'failed' ? { isFailed: true }
-                : {};
-            const updatedContent = last.content.map(block => {
-                if (block.type === 'thinking' && !block.isComplete) {
-                    return {
-                        ...block,
-                        isComplete: true,
-                        ...statusFlags,
-                        thinkingDurationMs: block.thinkingStartedAt
-                            ? Date.now() - block.thinkingStartedAt
-                            : undefined
-                    };
-                }
-                if (block.type === 'tool_use' && block.tool?.isLoading) {
-                    return {
-                        ...block,
-                        tool: { ...block.tool, isLoading: false, ...statusFlags }
-                    };
-                }
-                return block;
-            });
-            return [...prev.slice(0, -1), { ...last, content: updatedContent }];
-        });
-    }, []);
+            if (hasIncomplete) {
+                finalMsg = {
+                    ...current,
+                    content: current.content.map(block => {
+                        if (block.type === 'thinking' && !block.isComplete) {
+                            return {
+                                ...block,
+                                isComplete: true,
+                                ...statusFlags,
+                                thinkingDurationMs: block.thinkingStartedAt
+                                    ? Date.now() - block.thinkingStartedAt
+                                    : undefined
+                            };
+                        }
+                        if (block.type === 'tool_use' && block.tool?.isLoading) {
+                            return {
+                                ...block,
+                                tool: { ...block.tool, isLoading: false, ...statusFlags }
+                            };
+                        }
+                        return block;
+                    }),
+                };
+            }
+        }
+
+        setHistoryMessages(prev => [...prev, finalMsg]);
+        setStreamingMessage(null);
+    }, [setStreamingMessage]);
     // Handle SSE events
     const handleSseEvent = useCallback((eventName: string, data: unknown) => {
         switch (eventName) {
@@ -427,7 +476,8 @@ export default function TabProvider({
                     break;
                 }
                 seenIdsRef.current.clear();
-                setMessages([]);
+                setHistoryMessages([]);
+                setStreamingMessage(null);
                 setAgentError(null);
 
                 // Sync isLoading with backend state on SSE connect/reconnect
@@ -464,7 +514,7 @@ export default function TabProvider({
                     pendingAttachmentsRef.current = null; // Clear after use
                 }
 
-                setMessages(prev => [...prev, {
+                setHistoryMessages(prev => [...prev, {
                     ...msg,
                     timestamp: new Date(msg.timestamp),
                     attachments,
@@ -474,15 +524,20 @@ export default function TabProvider({
 
             case 'chat:message-sdk-uuid': {
                 // Backend assigns sdkUuid after SDK echoes messages — update React state
+                // Check streaming message first (most likely target), then history
                 const payload = data as { messageId: string; sdkUuid: string } | null;
                 if (payload?.messageId && payload?.sdkUuid) {
-                    setMessages(prev => {
-                        const idx = prev.findIndex(m => m.id === payload.messageId);
-                        if (idx < 0 || prev[idx].sdkUuid) return prev;
-                        const updated = [...prev];
-                        updated[idx] = { ...updated[idx], sdkUuid: payload.sdkUuid };
-                        return updated;
-                    });
+                    if (streamingMessageRef.current?.id === payload.messageId && !streamingMessageRef.current.sdkUuid) {
+                        setStreamingMessage(prev => prev ? { ...prev, sdkUuid: payload.sdkUuid } : prev);
+                    } else {
+                        setHistoryMessages(prev => {
+                            const idx = prev.findIndex(m => m.id === payload.messageId);
+                            if (idx < 0 || prev[idx].sdkUuid) return prev;
+                            const updated = [...prev];
+                            updated[idx] = { ...updated[idx], sdkUuid: payload.sdkUuid };
+                            return updated;
+                        });
+                    }
                 }
                 break;
             }
@@ -518,37 +573,34 @@ export default function TabProvider({
                     break;
                 }
 
-                // Directly update message state - React.memo on Message component
-                // ensures only the streaming message re-renders, not history
                 const chunk = data as string;
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role === 'assistant' && isStreamingRef.current) {
-                        if (typeof last.content === 'string') {
-                            return [...prev.slice(0, -1), { ...last, content: last.content + chunk }];
+                setStreamingMessage(prev => {
+                    if (prev?.role === 'assistant' && isStreamingRef.current) {
+                        if (typeof prev.content === 'string') {
+                            return { ...prev, content: prev.content + chunk };
                         }
-                        const contentArray = last.content;
+                        const contentArray = prev.content;
                         const lastBlock = contentArray[contentArray.length - 1];
                         if (lastBlock?.type === 'text') {
-                            return [...prev.slice(0, -1), {
-                                ...last,
+                            return {
+                                ...prev,
                                 content: [...contentArray.slice(0, -1), { type: 'text', text: (lastBlock.text || '') + chunk }]
-                            }];
+                            };
                         }
-                        return [...prev.slice(0, -1), {
-                            ...last,
+                        return {
+                            ...prev,
                             content: [...contentArray, { type: 'text', text: chunk }]
-                        }];
+                        };
                     }
-                    // First chunk - create new assistant message
+                    // First chunk - create new streaming message
                     isStreamingRef.current = true;
                     setIsLoading(true);
-                    return [...prev, {
+                    return {
                         id: Date.now().toString(),
                         role: 'assistant',
                         content: chunk,
                         timestamp: new Date()
-                    }];
+                    };
                 });
                 break;
             }
@@ -560,40 +612,38 @@ export default function TabProvider({
                     break;
                 }
                 const { index } = data as { index: number };
-                setMessages(prev => {
+                setStreamingMessage(prev => {
                     const thinkingBlock: ContentBlock = {
                         type: 'thinking',
                         thinking: '',
                         thinkingStreamIndex: index,
                         thinkingStartedAt: Date.now()
                     };
-                    const last = prev[prev.length - 1];
-                    if (last?.role === 'assistant') {
-                        const content = typeof last.content === 'string'
-                            ? [{ type: 'text' as const, text: last.content }]
-                            : last.content;
-                        return [...prev.slice(0, -1), { ...last, content: [...content, thinkingBlock] }];
+                    if (prev?.role === 'assistant') {
+                        const content = typeof prev.content === 'string'
+                            ? [{ type: 'text' as const, text: prev.content }]
+                            : prev.content;
+                        return { ...prev, content: [...content, thinkingBlock] };
                     }
                     isStreamingRef.current = true;
                     setIsLoading(true);
-                    return [...prev, { id: Date.now().toString(), role: 'assistant', content: [thinkingBlock], timestamp: new Date() }];
+                    return { id: Date.now().toString(), role: 'assistant', content: [thinkingBlock], timestamp: new Date() };
                 });
                 break;
             }
 
             case 'chat:thinking-chunk': {
                 const { index, delta } = data as { index: number; delta: string };
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
-                    const contentArray = last.content;
+                setStreamingMessage(prev => {
+                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    const contentArray = prev.content;
                     const idx = contentArray.findIndex(b => b.type === 'thinking' && b.thinkingStreamIndex === index && !b.isComplete);
                     if (idx === -1) return prev;
                     const block = contentArray[idx];
                     if (block.type !== 'thinking') return prev;
                     const updated = [...contentArray];
                     updated[idx] = { ...block, thinking: (block.thinking || '') + delta };
-                    return [...prev.slice(0, -1), { ...last, content: updated }];
+                    return { ...prev, content: updated };
                 });
                 break;
             }
@@ -613,21 +663,20 @@ export default function TabProvider({
                 const toolSimple: ToolUseSimple = tool.name === 'Task'
                     ? { ...tool, inputJson: '', isLoading: true, taskStartTime: Date.now(), taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 } }
                     : { ...tool, inputJson: '', isLoading: true };
-                setMessages(prev => {
+                setStreamingMessage(prev => {
                     const toolBlock: ContentBlock = {
                         type: 'tool_use',
                         tool: toolSimple
                     };
-                    const last = prev[prev.length - 1];
-                    if (last?.role === 'assistant') {
-                        const content = typeof last.content === 'string'
-                            ? [{ type: 'text' as const, text: last.content }]
-                            : last.content;
-                        return [...prev.slice(0, -1), { ...last, content: [...content, toolBlock] }];
+                    if (prev?.role === 'assistant') {
+                        const content = typeof prev.content === 'string'
+                            ? [{ type: 'text' as const, text: prev.content }]
+                            : prev.content;
+                        return { ...prev, content: [...content, toolBlock] };
                     }
                     isStreamingRef.current = true;
                     setIsLoading(true);
-                    return [...prev, { id: Date.now().toString(), role: 'assistant', content: [toolBlock], timestamp: new Date() }];
+                    return { id: Date.now().toString(), role: 'assistant', content: [toolBlock], timestamp: new Date() };
                 });
                 break;
             }
@@ -651,21 +700,20 @@ export default function TabProvider({
                     parsedInput: tool.input as unknown as ToolInput,
                     isLoading: true
                 };
-                setMessages(prev => {
+                setStreamingMessage(prev => {
                     const toolBlock: ContentBlock = {
                         type: 'server_tool_use',
                         tool: toolSimple
                     };
-                    const last = prev[prev.length - 1];
-                    if (last?.role === 'assistant') {
-                        const content = typeof last.content === 'string'
-                            ? [{ type: 'text' as const, text: last.content }]
-                            : last.content;
-                        return [...prev.slice(0, -1), { ...last, content: [...content, toolBlock] }];
+                    if (prev?.role === 'assistant') {
+                        const content = typeof prev.content === 'string'
+                            ? [{ type: 'text' as const, text: prev.content }]
+                            : prev.content;
+                        return { ...prev, content: [...content, toolBlock] };
                     }
                     isStreamingRef.current = true;
                     setIsLoading(true);
-                    return [...prev, { id: Date.now().toString(), role: 'assistant', content: [toolBlock], timestamp: new Date() }];
+                    return { id: Date.now().toString(), role: 'assistant', content: [toolBlock], timestamp: new Date() };
                 });
                 break;
             }
@@ -674,10 +722,9 @@ export default function TabProvider({
                 // Note: Only handle tool_use, NOT server_tool_use
                 // server_tool_use comes with complete input, no streaming delta needed
                 const { toolId, delta } = data as { index: number; toolId: string; delta: string };
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
-                    const contentArray = last.content;
+                setStreamingMessage(prev => {
+                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    const contentArray = prev.content;
                     const idx = contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === toolId);
                     if (idx === -1) return prev;
                     const block = contentArray[idx];
@@ -689,17 +736,16 @@ export default function TabProvider({
                         ...block,
                         tool: { ...block.tool, inputJson: newInputJson, parsedInput: parsedInput || block.tool.parsedInput }
                     };
-                    return [...prev.slice(0, -1), { ...last, content: updated }];
+                    return { ...prev, content: updated };
                 });
                 break;
             }
 
             case 'chat:content-block-stop': {
                 const { index, toolId } = data as { index: number; toolId?: string };
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
-                    const contentArray = last.content;
+                setStreamingMessage(prev => {
+                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    const contentArray = prev.content;
 
                     // Check thinking block
                     const thinkingIdx = contentArray.findIndex(b =>
@@ -714,7 +760,7 @@ export default function TabProvider({
                                 isComplete: true,
                                 thinkingDurationMs: block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined
                             };
-                            return [...prev.slice(0, -1), { ...last, content: updated }];
+                            return { ...prev, content: updated };
                         }
                     }
 
@@ -733,7 +779,7 @@ export default function TabProvider({
                             }
                             const updated = [...contentArray];
                             updated[toolIdx] = { ...block, tool: { ...block.tool, parsedInput } };
-                            return [...prev.slice(0, -1), { ...last, content: updated }];
+                            return { ...prev, content: updated };
                         }
                     }
                     return prev;
@@ -748,10 +794,9 @@ export default function TabProvider({
                 // Track if we need to trigger workspace refresh (for file-modifying tools)
                 let shouldTriggerRefresh = false;
 
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role !== 'assistant' || typeof last.content === 'string') return prev;
-                    const contentArray = last.content;
+                setStreamingMessage(prev => {
+                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    const contentArray = prev.content;
                     // Find tool block (both tool_use and server_tool_use)
                     const idx = contentArray.findIndex(b => isToolBlock(b) && b.tool?.id === payload.toolUseId);
                     if (idx === -1) return prev;
@@ -784,7 +829,7 @@ export default function TabProvider({
                         }
                     }
 
-                    return [...prev.slice(0, -1), { ...last, content: updated }];
+                    return { ...prev, content: updated };
                 });
 
                 // Trigger workspace refresh after state update (outside setMessages callback)
@@ -797,6 +842,8 @@ export default function TabProvider({
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
                 isStreamingRef.current = false;
+                // Move streaming message to history (marks incomplete blocks as finished)
+                moveStreamingToHistory('completed');
                 // Use flushSync to immediately update UI, bypassing React batching
                 // This prevents UI from getting stuck in loading state during rapid event streams
                 flushSync(() => {
@@ -804,10 +851,6 @@ export default function TabProvider({
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
                 });
-                // Defensively mark any remaining incomplete thinking/tool blocks as complete.
-                // Normally content_block_stop handles this, but third-party providers may not
-                // send it, leaving blocks stuck in loading state.
-                markIncompleteBlocksAsFinished('completed');
 
                 // Send system notification if user is not focused on the app
                 notifyMessageComplete();
@@ -838,6 +881,8 @@ export default function TabProvider({
             case 'chat:message-stopped': {
                 console.log(`[TabProvider ${tabId}] message-stopped received`);
                 isStreamingRef.current = false;
+                // Move streaming message to history (marks incomplete blocks as stopped)
+                moveStreamingToHistory('stopped');
                 // Use flushSync to immediately update UI
                 flushSync(() => {
                     setIsLoading(false);
@@ -849,8 +894,6 @@ export default function TabProvider({
                     clearTimeout(stopTimeoutRef.current);
                     stopTimeoutRef.current = null;
                 }
-                // Mark all incomplete thinking blocks and tool_use blocks as stopped
-                markIncompleteBlocksAsFinished('stopped');
 
                 // Track message_stop event
                 track('message_stop');
@@ -860,6 +903,8 @@ export default function TabProvider({
             case 'chat:message-error': {
                 console.log(`[TabProvider ${tabId}] message-error received`);
                 isStreamingRef.current = false;
+                // Move streaming message to history (marks incomplete blocks as failed)
+                moveStreamingToHistory('failed');
                 // Use flushSync to immediately update UI
                 flushSync(() => {
                     setIsLoading(false);
@@ -871,8 +916,6 @@ export default function TabProvider({
                     clearTimeout(stopTimeoutRef.current);
                     stopTimeoutRef.current = null;
                 }
-                // Mark all incomplete thinking blocks and tool_use blocks as failed
-                markIncompleteBlocksAsFinished('failed');
 
                 // Track message_error event (don't include actual error message for privacy)
                 track('message_error');
@@ -949,79 +992,94 @@ export default function TabProvider({
             // Subagent event handling for nested tool calls (Task tool)
             case 'chat:subagent-tool-use': {
                 const payload = data as { parentToolUseId: string; tool: ToolUse; usage?: { input_tokens?: number; output_tokens?: number } };
-                setMessages(prev => updateSubagentCallsInMessages(prev, payload.parentToolUseId, (calls, tool) => {
-                    const inputJson = JSON.stringify(payload.tool.input ?? {}, null, 2);
-                    const existingIdx = calls.findIndex(c => c.id === payload.tool.id);
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls, tool) => {
+                        const inputJson = JSON.stringify(payload.tool.input ?? {}, null, 2);
+                        const existingIdx = calls.findIndex(c => c.id === payload.tool.id);
 
-                    const updatedCalls: SubagentToolCall[] = existingIdx !== -1
-                        ? calls.map(c => c.id === payload.tool.id
-                            ? { ...c, name: payload.tool.name, input: payload.tool.input ?? {}, inputJson, isLoading: true }
-                            : c)
-                        : [...calls, { id: payload.tool.id, name: payload.tool.name, input: payload.tool.input ?? {}, inputJson, isLoading: true }];
+                        const updatedCalls: SubagentToolCall[] = existingIdx !== -1
+                            ? calls.map(c => c.id === payload.tool.id
+                                ? { ...c, name: payload.tool.name, input: payload.tool.input ?? {}, inputJson, isLoading: true }
+                                : c)
+                            : [...calls, { id: payload.tool.id, name: payload.tool.name, input: payload.tool.input ?? {}, inputJson, isLoading: true }];
 
-                    // Update taskStats with new tool count and token usage
-                    const prevStats = tool.taskStats || { toolCount: 0, inputTokens: 0, outputTokens: 0 };
-                    const newStats: TaskStats = {
-                        toolCount: updatedCalls.length,
-                        inputTokens: prevStats.inputTokens + (payload.usage?.input_tokens || 0),
-                        outputTokens: prevStats.outputTokens + (payload.usage?.output_tokens || 0)
-                    };
+                        // Update taskStats with new tool count and token usage
+                        const prevStats = tool.taskStats || { toolCount: 0, inputTokens: 0, outputTokens: 0 };
+                        const newStats: TaskStats = {
+                            toolCount: updatedCalls.length,
+                            inputTokens: prevStats.inputTokens + (payload.usage?.input_tokens || 0),
+                            outputTokens: prevStats.outputTokens + (payload.usage?.output_tokens || 0)
+                        };
 
-                    return { calls: updatedCalls, stats: newStats };
-                }));
+                        return { calls: updatedCalls, stats: newStats };
+                    }) ?? prev;
+                });
                 break;
             }
 
             case 'chat:subagent-tool-input-delta': {
                 const payload = data as { parentToolUseId: string; toolId: string; delta: string };
-                setMessages(prev => updateSubagentCallsInMessages(prev, payload.parentToolUseId, (calls) => {
-                    const updatedCalls = calls.map(call => {
-                        if (call.id !== payload.toolId) return call;
-                        const nextInputJson = (call.inputJson || '') + payload.delta;
-                        const parsedInput = parsePartialJson<ToolInput>(nextInputJson);
-                        return { ...call, inputJson: nextInputJson, parsedInput: parsedInput || call.parsedInput };
-                    });
-                    return { calls: updatedCalls };
-                }));
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
+                        const updatedCalls = calls.map(call => {
+                            if (call.id !== payload.toolId) return call;
+                            const nextInputJson = (call.inputJson || '') + payload.delta;
+                            const parsedInput = parsePartialJson<ToolInput>(nextInputJson);
+                            return { ...call, inputJson: nextInputJson, parsedInput: parsedInput || call.parsedInput };
+                        });
+                        return { calls: updatedCalls };
+                    }) ?? prev;
+                });
                 break;
             }
 
             case 'chat:subagent-tool-result-start': {
                 const payload = data as { parentToolUseId: string; toolUseId: string; content: string; isError: boolean };
-                setMessages(prev => updateSubagentCallsInMessages(prev, payload.parentToolUseId, (calls) => {
-                    const updatedCalls = calls.map(call =>
-                        call.id === payload.toolUseId
-                            ? { ...call, result: payload.content, isError: payload.isError, isLoading: true }
-                            : call
-                    );
-                    return { calls: updatedCalls };
-                }));
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
+                        const updatedCalls = calls.map(call =>
+                            call.id === payload.toolUseId
+                                ? { ...call, result: payload.content, isError: payload.isError, isLoading: true }
+                                : call
+                        );
+                        return { calls: updatedCalls };
+                    }) ?? prev;
+                });
                 break;
             }
 
             case 'chat:subagent-tool-result-delta': {
                 const payload = data as { parentToolUseId: string; toolUseId: string; delta: string };
-                setMessages(prev => updateSubagentCallsInMessages(prev, payload.parentToolUseId, (calls) => {
-                    const updatedCalls = calls.map(call =>
-                        call.id === payload.toolUseId
-                            ? { ...call, result: (call.result || '') + payload.delta, isLoading: true }
-                            : call
-                    );
-                    return { calls: updatedCalls };
-                }));
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
+                        const updatedCalls = calls.map(call =>
+                            call.id === payload.toolUseId
+                                ? { ...call, result: (call.result || '') + payload.delta, isLoading: true }
+                                : call
+                        );
+                        return { calls: updatedCalls };
+                    }) ?? prev;
+                });
                 break;
             }
 
             case 'chat:subagent-tool-result-complete': {
                 const payload = data as { parentToolUseId: string; toolUseId: string; content: string; isError?: boolean };
-                setMessages(prev => updateSubagentCallsInMessages(prev, payload.parentToolUseId, (calls) => {
-                    const updatedCalls = calls.map(call =>
-                        call.id === payload.toolUseId
-                            ? { ...call, result: payload.content, isError: payload.isError, isLoading: false }
-                            : call
-                    );
-                    return { calls: updatedCalls };
-                }));
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
+                        const updatedCalls = calls.map(call =>
+                            call.id === payload.toolUseId
+                                ? { ...call, result: payload.content, isError: payload.isError, isLoading: false }
+                                : call
+                        );
+                        return { calls: updatedCalls };
+                    }) ?? prev;
+                });
                 break;
             }
 
@@ -1120,7 +1178,7 @@ export default function TabProvider({
                                 }));
                             }
 
-                            setMessages(prev => [...prev, {
+                            setHistoryMessages(prev => [...prev, {
                                 id: msgId,
                                 role: 'user' as const,
                                 content: payload.userMessage!.content,
@@ -1152,7 +1210,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, markIncompleteBlocksAsFinished]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage]);
 
     // Connect SSE
     // Uses Session-centric port lookup via currentSessionIdRef
@@ -1449,7 +1507,8 @@ export default function TabProvider({
             seenIdsRef.current.clear();
             isNewSessionRef.current = false; // Allow SSE replays again
             isStreamingRef.current = false;  // Stop any streaming state
-            setMessages(loadedMessages);
+            setHistoryMessages(loadedMessages);
+            setStreamingMessage(null);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -1629,6 +1688,8 @@ export default function TabProvider({
         agentDir,
         sessionId: currentSessionId,
         messages,
+        historyMessages,
+        streamingMessage,
         isLoading,
         sessionState,
         logs,
@@ -1667,9 +1728,9 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, isLoading, sessionState,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, sessionState,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, toolCompleteCount, queuedMessages, isConnected,
-        appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
