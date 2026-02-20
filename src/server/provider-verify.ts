@@ -3,9 +3,10 @@
  * Verifies API key validity by sending a test request
  */
 
+import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv } from './agent-session';
@@ -68,12 +69,16 @@ async function verifyViaSdk(
   },
 ): Promise<{ success: boolean; error?: string }> {
   const TIMEOUT_MS = 30000;
+  const startTime = Date.now();
   const stderrMessages: string[] = [];
   const { logPrefix, parseError } = opts;
 
   try {
     const cliPath = resolveClaudeCodeCli();
-    const cwd = homedir();
+    // Use ~/.myagents/projects/ as cwd — a dedicated app directory with guaranteed permissions.
+    // Avoids potential permission or .claude/ config issues in home directory.
+    const cwd = join(homedir(), '.myagents', 'projects');
+    mkdirSync(cwd, { recursive: true });
 
     async function* simplePrompt() {
       yield {
@@ -88,11 +93,9 @@ async function verifyViaSdk(
       prompt: simplePrompt(),
       options: {
         maxTurns: 1,
+        sessionId: opts.sessionId,
         cwd,
         settingSources: opts.settingSources,
-        // Verification is non-interactive — bypass all permission prompts.
-        // Without this, the SDK enters default interactive mode and blocks on stdin
-        // for permission approval, causing ~27min hangs until SDK internal timeout.
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         pathToClaudeCodeExecutable: cliPath,
@@ -102,10 +105,13 @@ async function verifyViaSdk(
           console.error(`[${logPrefix}] stderr:`, message);
           stderrMessages.push(message);
         },
+        systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const },
+        includePartialMessages: true,
+        persistSession: false,
+        mcpServers: {},
         ...(opts.model ? { model: opts.model } : {}),
       },
     });
-
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<{ success: false; error: string }>((resolve) => {
       timeoutId = setTimeout(() => {
@@ -118,25 +124,36 @@ async function verifyViaSdk(
 
     const verifyPromise = (async (): Promise<{ success: boolean; error?: string }> => {
       for await (const message of testQuery) {
-        console.log(`[${logPrefix}] SDK message type: ${message.type}`);
+        if (message.type === 'system') continue;
 
-        if (message.type === 'system') {
+        // With includePartialMessages, stream_event arrives before result.
+        // A message_start event means the API accepted our request and is streaming
+        // a response — the API key is valid. Return success immediately.
+        if (message.type === 'stream_event') {
+          const streamMsg = message as { event?: { type?: string } };
+          if (streamMsg.event?.type === 'message_start') {
+            const elapsed = Date.now() - startTime;
+            console.log(`[${logPrefix}] verification successful (${elapsed}ms)`);
+            return { success: true };
+          }
           continue;
         }
 
+        // assistant message also confirms API responded
+        if (message.type === 'assistant') {
+          const elapsed = Date.now() - startTime;
+          console.log(`[${logPrefix}] verification successful (${elapsed}ms)`);
+          return { success: true };
+        }
+
         if (message.type === 'result') {
-          // SDK types: SDKResultSuccess { subtype: 'success', result: string }
-          //            SDKResultError   { subtype: 'error_...', errors: string[] }
-          // Note: is_error can be true even on subtype 'success' (e.g. tool errors
-          // that were handled), so use subtype to determine verification outcome.
           const resultMsg = message as {
             subtype?: string;
             errors?: string[];
           };
 
           if (resultMsg.subtype === 'success') {
-            // API responded = credentials are valid
-            console.log(`[${logPrefix}] SDK verification successful`);
+            console.log(`[${logPrefix}] verification successful`);
             return { success: true };
           }
 
@@ -145,7 +162,7 @@ async function verifyViaSdk(
           const errorText = (errorsArray && errorsArray.length > 0)
             ? errorsArray.join('; ')
             : resultMsg.subtype || '验证失败';
-          console.log(`[${logPrefix}] SDK error result: ${errorText} (subtype: ${resultMsg.subtype})`);
+          console.error(`[${logPrefix}] error: ${errorText} (subtype: ${resultMsg.subtype})`);
           const stderrHint = stderrMessages.length > 0
             ? ` (详情: ${stderrMessages.join('; ').slice(0, 100)})`
             : '';
@@ -165,13 +182,8 @@ async function verifyViaSdk(
       if (timeoutId) clearTimeout(timeoutId);
     }
   } catch (error) {
-    // SDK can throw exceptions (e.g. subprocess crash, pipe errors).
-    // Include all available context for diagnosis.
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[${logPrefix}] SDK exception: ${errorMsg}`);
-    if (error instanceof Error && error.stack) {
-      console.error(`[${logPrefix}] Stack:`, error.stack);
-    }
     const stderrHint = stderrMessages.length > 0
       ? ` (详情: ${stderrMessages.join('; ').slice(0, 200)})`
       : '';
@@ -197,14 +209,13 @@ export async function verifyProviderViaSdk(
   });
   return verifyViaSdk(env, {
     model,
-    sessionId: 'verify-provider-session',
+    sessionId: randomUUID(),
     logPrefix: 'provider/verify',
     parseError: parseProviderError,
+    // Match chat sessions: use 'project' to read .claude/ from cwd.
     // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
-    // enabledPlugins (e.g. rust-analyzer-lsp) that the SDK subprocess will try
-    // to start, causing 30s+ initialization and triggering our timeout.
-    // Chat sessions use ['project'] for the same reason (see buildSettingSources).
-    settingSources: [],
+    // enabledPlugins causing 30s+ initialization and triggering our timeout.
+    settingSources: ['project'],
   });
 }
 
@@ -251,7 +262,7 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
   console.log('[subscription/verify] Starting SDK verification...');
   const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
   return verifyViaSdk(env, {
-    sessionId: 'verify-subscription-session',
+    sessionId: randomUUID(),
     logPrefix: 'subscription/verify',
     parseError: parseSubscriptionError,
     // Subscription needs 'user' to read ~/.claude/ OAuth credentials
