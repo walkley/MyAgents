@@ -45,12 +45,20 @@ pub struct HeartbeatRunner {
     last_push_text: Arc<Mutex<Option<String>>>,
     http_client: reqwest::Client,
     executing: Arc<Mutex<bool>>,
+    // Hot-reloadable config refs — needed to sync AI config when waking up an idle-collected sidecar
+    current_model: Arc<RwLock<Option<String>>>,
+    mcp_servers_json: Arc<RwLock<Option<String>>>,
 }
 
 impl HeartbeatRunner {
     /// Create a new HeartbeatRunner.
-    /// Returns (runner, wake_sender) — caller keeps wake_sender for external wake signals.
-    pub fn new(config: HeartbeatConfig, bot_label: String) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
+    /// Returns (runner, config_arc) — caller keeps config_arc for hot-updating heartbeat config.
+    pub fn new(
+        config: HeartbeatConfig,
+        bot_label: String,
+        current_model: Arc<RwLock<Option<String>>>,
+        mcp_servers_json: Arc<RwLock<Option<String>>>,
+    ) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
         let config = Arc::new(RwLock::new(config));
         let runner = Self {
             bot_label,
@@ -61,6 +69,8 @@ impl HeartbeatRunner {
                 .build()
                 .unwrap_or_default(),
             executing: Arc::new(Mutex::new(false)),
+            current_model,
+            mcp_servers_json,
         };
         (runner, config)
     }
@@ -151,13 +161,15 @@ impl HeartbeatRunner {
     }
 
     /// Execute a single heartbeat cycle.
+    /// Uses the same ensure_sidecar flow as user messages — if the sidecar was
+    /// idle-collected, it will be automatically restarted.
     async fn run_once<R: Runtime>(
         &self,
         reason: WakeReason,
         router: &Arc<Mutex<SessionRouter>>,
-        _sidecar_manager: &ManagedSidecarManager,
+        sidecar_manager: &ManagedSidecarManager,
         adapter: &Arc<AnyAdapter>,
-        _app_handle: &AppHandle<R>,
+        app_handle: &AppHandle<R>,
     ) {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
@@ -188,6 +200,55 @@ impl HeartbeatRunner {
             *executing = true;
         }
 
+        // Find any peer session (even if sidecar was idle-collected).
+        // Unlike the old find_any_active_session which gave up when port=0,
+        // we pick any session and let ensure_sidecar handle the wake-up.
+        let (session_key, source, source_id) = {
+            let router_guard = router.lock().await;
+            match router_guard.find_any_peer_session() {
+                Some(info) => info,
+                None => {
+                    // No peer sessions at all — no one has ever talked to this bot
+                    ulog_debug!("[heartbeat] No peer sessions for {}, skipping", self.bot_label);
+                    *self.executing.lock().await = false;
+                    return;
+                }
+            }
+        };
+
+        // Ensure sidecar is running — same pattern as user message flow (mod.rs:952-981).
+        // If sidecar was idle-collected (port=0), this will restart it automatically.
+        let (port, is_new_sidecar) = {
+            let mut router_guard = router.lock().await;
+            match router_guard.ensure_sidecar(&session_key, app_handle, sidecar_manager).await {
+                Ok(result) => result,
+                Err(e) => {
+                    ulog_warn!("[heartbeat] Failed to ensure sidecar for {}: {}", self.bot_label, e);
+                    *self.executing.lock().await = false;
+                    return;
+                }
+            }
+        };
+
+        // Sync AI config for newly created sidecar (same as user message flow)
+        if is_new_sidecar {
+            let model = self.current_model.read().await.clone();
+            let mcp = self.mcp_servers_json.read().await.clone();
+            router.lock().await
+                .sync_ai_config(port, model.as_deref(), mcp.as_deref())
+                .await;
+            ulog_info!("[heartbeat] Woke up sidecar for {} on port {}", self.bot_label, port);
+        }
+
+        // Touch session activity BEFORE the HTTP call.
+        // ensure_sidecar sets last_active when creating a new sidecar, but NOT when
+        // returning an existing healthy one. We must touch here to prevent idle collection
+        // even if the heartbeat HTTP call times out (which can take up to 5.5 minutes).
+        {
+            let mut router_guard = router.lock().await;
+            router_guard.touch_session_activity(&session_key);
+        }
+
         // Build heartbeat prompt — a FIXED template.
         // The actual checklist lives in HEARTBEAT.md in the workspace root.
         // AI reads the file itself via tool use; we don't inject file content here.
@@ -204,19 +265,6 @@ impl HeartbeatRunner {
              Current time: {}",
             now_text
         );
-
-        // Find a Sidecar port to call (also touches last_active to prevent idle collection)
-        let (port, source, source_id) = {
-            let mut router_guard = router.lock().await;
-            match router_guard.find_any_active_session() {
-                Some((p, src, sid)) => (p, src, sid),
-                None => {
-                    ulog_debug!("[heartbeat] No active session found for {}, skipping", self.bot_label);
-                    *self.executing.lock().await = false;
-                    return;
-                }
-            }
-        };
 
         let ack_max_chars = config.ack_max_chars.unwrap_or(300);
 
@@ -262,7 +310,6 @@ impl HeartbeatRunner {
                     if last_push.as_deref() == Some(text.as_str()) {
                         ulog_debug!("[heartbeat] Dedup suppressed (same content as last push)");
                     } else {
-                        // Extract chat_id from source_id for sending
                         ulog_info!("[heartbeat] Pushing content to IM (len={})", text.len());
                         if let Err(e) = adapter.send_message(&source_id, text).await {
                             ulog_warn!("[heartbeat] Failed to send IM message: {}", e);

@@ -1706,37 +1706,80 @@ async fn deliver_cron_result_to_bot(
         }
     };
 
-    let im_guard = im_state.lock().await;
-    let instance = match im_guard.get(&delivery.bot_id) {
-        Some(i) => i,
+    // Extract Arc refs from instance, then drop im_guard early to avoid
+    // holding the IM lock during potentially slow ensure_sidecar (~2s).
+    let (router, current_model, mcp_servers_json, wake_tx) = {
+        let im_guard = im_state.lock().await;
+        let instance = match im_guard.get(&delivery.bot_id) {
+            Some(i) => i,
+            None => {
+                log::warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+                return;
+            }
+        };
+        (
+            std::sync::Arc::clone(&instance.router),
+            std::sync::Arc::clone(&instance.current_model),
+            std::sync::Arc::clone(&instance.mcp_servers_json),
+            instance.heartbeat_wake_tx.clone(),
+        )
+    }; // im_guard dropped here
+
+    let sidecar_manager = match handle.try_state::<ManagedSidecarManager>() {
+        Some(s) => s,
         None => {
-            log::warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+            log::warn!("[CronTask] Cannot deliver result: SidecarManager state not available");
             return;
         }
     };
 
-    // Find a sidecar port for the bot
-    let port = {
-        let mut router = instance.router.lock().await;
-        router.find_any_active_session().map(|(p, _, _)| p)
+    // 1. Ensure sidecar is running and POST system event.
+    // Same ensure_sidecar pattern as heartbeat — if sidecar was idle-collected, wake it up
+    // so the system event is stored in-process memory before heartbeat drains it.
+    let session_key = {
+        let router_guard = router.lock().await;
+        router_guard.find_any_peer_session().map(|(key, _, _)| key)
     };
 
-    if let Some(port) = port {
-        // POST system event to Bun sidecar
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{}/api/im/system-event", port);
-        let body = serde_json::json!({
-            "event": "cron_complete",
-            "content": summary,
-        });
-        match client.post(&url).json(&body).send().await {
-            Ok(_) => log::info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),
-            Err(e) => log::warn!("[CronTask] Failed to deliver system event: {}", e),
+    if let Some(session_key) = session_key {
+        let (port, is_new_sidecar) = {
+            let mut router_guard = router.lock().await;
+            match router_guard.ensure_sidecar(&session_key, handle, &sidecar_manager).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("[CronTask] Failed to ensure sidecar for bot {}: {}", delivery.bot_id, e);
+                    // Still try to wake heartbeat below
+                    (0, false)
+                }
+            }
+        };
+
+        // Sync AI config for newly created sidecar
+        if is_new_sidecar && port > 0 {
+            let model = current_model.read().await.clone();
+            let mcp = mcp_servers_json.read().await.clone();
+            router.lock().await
+                .sync_ai_config(port, model.as_deref(), mcp.as_deref())
+                .await;
+            log::info!("[CronTask] Woke up sidecar for bot {} on port {}", delivery.bot_id, port);
+        }
+
+        if port > 0 {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{}/api/im/system-event", port);
+            let body = serde_json::json!({
+                "event": "cron_complete",
+                "content": summary,
+            });
+            match client.post(&url).json(&body).send().await {
+                Ok(_) => log::info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),
+                Err(e) => log::warn!("[CronTask] Failed to deliver system event: {}", e),
+            }
         }
     }
 
     // 2. Wake the heartbeat runner
-    if let Some(ref wake_tx) = instance.heartbeat_wake_tx {
+    if let Some(ref wake_tx) = wake_tx {
         let reason = crate::im::types::WakeReason::CronComplete {
             task_id: task_id.to_string(),
             summary: summary.to_string(),
@@ -1747,8 +1790,6 @@ async fn deliver_cron_result_to_bot(
             log::info!("[CronTask] Heartbeat wake sent for bot {}", delivery.bot_id);
         }
     }
-
-    drop(im_guard);
 }
 
 /// Initialize cron task manager with app handle (called during app setup)

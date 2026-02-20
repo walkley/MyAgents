@@ -1224,7 +1224,12 @@ pub async fn start_im_bot<R: Runtime>(
     let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
         let hb_config = config.heartbeat_config.clone().unwrap_or_default();
         let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
-        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(hb_config, hb_bot_label);
+        let (runner, config_arc) = heartbeat::HeartbeatRunner::new(
+            hb_config,
+            hb_bot_label,
+            Arc::clone(&current_model),
+            Arc::clone(&mcp_servers_json),
+        );
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
 
         let hb_shutdown_rx = shutdown_rx.clone();
