@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.21] - 2026-02-21
+
+### Added
+- **Bot 创建向导新增工作区步骤**：创建 Bot 时可直接配置独立工作区路径
+- **飞书 Post 富文本消息支持**：Bot 接收飞书 Post 类型消息（含代码块、加粗、列表等富文本），解析 text/a/at/img/emotion/code_block 元素为纯文本
+- **IM Bot /help 命令**：飞书和 Telegram Bot 均支持 `/help` 查看所有可用命令
+- **IM Bot /mode 命令**：通过 `/mode plan|auto|full` 切换权限模式（计划/自动/全自主）
+- **工作区文件单击预览**：右侧「项目工作区」面板中单击文件直接触发预览（原需双击），Ctrl+单击多选保持不变
+
+### Fixed
+- **飞书 Bot 幽灵消息**：dedup 缓存持久化到磁盘（TTL 72h），App 重启后不再重复处理飞书重传的旧事件
+- **飞书消息静默丢失**：含代码块/加粗等格式的消息（msg_type: post）不再被忽略
+- **IM 来源标签错误**：飞书消息不再显示 "via Telegram 群聊"，改用 SOURCE_LABELS 映射正确显示平台名
+- **Provider API Key 验证超时**：使用 project-level settingSources 和 bypassPermissions 避免用户级插件加载阻塞
+- **文件预览 FileReader 挂起**：添加 onerror/reject 处理，防止 Blob 损坏时 isPreviewLoading 永久卡死
+- **Tab 关闭确认误弹**：持久 Owner 保持 Sidecar 存活时跳过关闭确认
+- **Telegram 向导输入顺序**：修正向导步骤输入框顺序，跳过按钮改为返回按钮
+- **绑定消息误处理**：已绑定用户的 BIND 消息静默忽略，避免重复处理
+
+### Performance
+- **前端流式消息隔离**：Playwright tool.result 从前端剥离，流式消息状态独立管理，减少不必要的重渲染
+
+### Changed
+- **飞书代码块输出样式**：AI 回复中的代码块使用 `─── ✦ ───` 分隔线 + 斜体缩进，内联代码映射为加粗+斜体
+- **IM Bot 热更新**：权限模式、MCP 服务器、Provider 等配置变更无需重启 Bot
+- **Heartbeat 系统提示词**：心跳检查使用独立 system prompt，修复 Bot 停止/重启可靠性
+
+---
+
 ## [0.1.20] - 2026-02-19
 
 ### Added
