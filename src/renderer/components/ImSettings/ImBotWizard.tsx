@@ -278,6 +278,8 @@ export default function ImBotWizard({
                     if (latestBotConfig) {
                         const params = await buildStartParams(latestBotConfig);
                         const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
+                        // Write back providerEnvJson for Rust auto-start
+                        await updateImBotConfig(botId, { providerEnvJson: params.providerEnvJson || undefined });
                         if (isMountedRef.current) {
                             setBotStatus(status);
                         }
@@ -353,6 +355,8 @@ export default function ImBotWizard({
             const { invoke } = await import('@tauri-apps/api/core');
             const params = await buildStartParams(newConfig);
             const status = await invoke<ImBotStatus>('cmd_start_im_bot', params);
+            // Write back providerEnvJson for Rust auto-start
+            await updateImBotConfig(botId, { providerEnvJson: params.providerEnvJson || undefined });
 
             if (isMountedRef.current) {
                 setVerifyStatus('valid');

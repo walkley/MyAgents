@@ -236,6 +236,19 @@ impl SessionRouter {
     ) -> Result<String, String> {
         if let Some(ps) = self.peer_sessions.get(session_key) {
             let old_session_id = ps.session_id.clone();
+
+            // Sidecar not running (restored from disk after app restart, or idle-collected).
+            // Just reset session metadata; next message will start a fresh sidecar with the new ID.
+            if ps.sidecar_port == 0 {
+                let new_session_id = uuid::Uuid::new_v4().to_string();
+                if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+                    ps.session_id = new_session_id.clone();
+                    ps.message_count = 0;
+                    ps.last_active = Instant::now();
+                }
+                return Ok(new_session_id);
+            }
+
             let url = format!("http://127.0.0.1:{}/api/im/session/new", ps.sidecar_port);
             let resp = self
                 .http_client

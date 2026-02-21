@@ -179,7 +179,7 @@ export default function ImBotList({
                 if (isMountedRef.current) {
                     setStatuses(prev => ({ ...prev, [botId]: newStatus }));
                     toastRef.current.success(`${cfg.name} 已启动`);
-                    await updateImBotConfig(botId, { enabled: true });
+                    await updateImBotConfig(botId, { enabled: true, providerEnvJson: params.providerEnvJson || undefined });
                 }
             }
         } catch (err) {
