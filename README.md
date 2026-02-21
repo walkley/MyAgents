@@ -8,6 +8,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13.0+-black.svg)](https://www.apple.com/macos/)
+[![Windows](https://img.shields.io/badge/Windows-10+-blue.svg)](https://www.microsoft.com/windows/)
 [![Website](https://img.shields.io/badge/Website-myagents.io-green.svg)](https://myagents.io)
 
 **官网**: [https://myagents.io](https://myagents.io)
@@ -22,55 +23,51 @@
 
 ## 中文
 
-MyAgents 基于 Claude Agent SDK 运行的**桌面端通用 Agent 产品**，将强大的 Agent 能力带到桌面端，通过直观的图形界面，让每个人都能轻松驾驭 AI 的力量。无需命令行，无需编程经验，只需对话，即可完成复杂任务。
+MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强大 Agent 能力和灵活的 IM Bot 交互——二合一，一键安装零门槛。
 
 截止 2026 年 1 月，AI 的智能飞速提升，已经让软件开发者首先变成了十倍百倍生产力的人。而 2026 年注定是智能丰裕的元年，我们希望这股 AI 的力量能被更多的人所掌握，无论你是学生、内容创作者、教育工作者、各种行业专家、产品经理等任何一个「想要去做些什么的人」。我们希望「MyAgents」能为你的电脑注入灵魂，让他成为你的思维放大器，将你的品味、想法变成现实对世界产生更大的影响。
 
-因此 MyAgents 最核心的功能，**图形界面零门槛、多模型供应商随意选、数据本地存储、产品开源免费。**
-
 ### 快速体验
 - 直接访问 https://myagents.io 点击下载安装包
-- Mac 版本 支持 Apple Silicon 和 Intel 芯片
-- Win 版本即将支持
+- Mac 版本支持 Apple Silicon 和 Intel 芯片
+- Win 版本支持 Windows 10 及以上
 
-### 功能特性
+### 核心能力
 
-- **原生桌面应用** - macOS 原生体验，Chrome 风格无边框窗口
-- **多标签页** - 同时管理多个项目会话，支持拖拽排序
-- **多实例并发** - 每个 Tab 独立 Sidecar，真正的并行工作
-- **智能对话** - 基于 Claude Agent SDK，最高质量的框架策略
-- **多项目管理** - 在不同代码仓库间切换
-- **本地运行** - 数据不离开本机
-- **静默自动更新** - Chrome 风格后台更新，就绪后一键重启
-- **Slash Commands** - 支持内置和自定义快捷指令
-- **多模型切换** - 支持 Anthropic 及第三方供应商
-- **快捷键支持** - Cmd+T 新建 Tab，Cmd+W 关闭 Tab
-- **MCP 集成** - 支持 STDIO/HTTP/SSE 三种传输协议
-- **工具权限管理** - 三种权限模式（行动/规划/自主行动）
-- **配置管理** - 可视化编辑 CLAUDE.md、Skills 和 Commands
+- **图形界面零门槛** - Chrome 风格多标签页，每个 Tab 独立运行一个 Agent，真正的并行工作流
+- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山引擎、OpenRouter 等 9+ 供应商，按需选择，成本可控
+- **Skills 技能系统** - 内置和自定义技能，一键触发常用操作，让 Agent 越用越懂你
+- **MCP 工具集成** - 内置 MCP 协议支持（STDIO/HTTP/SSE），连接外部工具和数据源，Agent 能力可无限扩展
+- **自定义 Agent** - 配置独立的 Prompt、工具、模型，打造专属 Agent
+- **IM 聊天机器人** - 接入 Telegram / 飞书，多 Bot 管理、交互式权限审批、多媒体消息、定时任务
+- **智能权限管理** - 行动/规划/自主三种模式，安全可控
+- **本地数据，持续进化** - 所有对话、文件、记忆都存在本地，隐私有保障，API 直连供应商。随着使用积累，你的 AI 会越来越懂你
+- **完全开源免费** - Apache-2.0 协议，代码完全公开
 
 ### 支持的模型供应商
 
 | 供应商 | 模型 | 类型 |
 |--------|------|------|
-| Anthropic | Claude Sonnet/Haiku/Opus 4.5 | 订阅/API |
+| Anthropic | Claude Sonnet 4.6, Opus 4.6, Haiku 4.5 | 订阅/API |
 | DeepSeek | DeepSeek Chat, Reasoner | API |
-| Moonshot | Kimi K2 | API |
-| 智谱 AI | GLM 4.7, 4.5 Air | API |
-| MiniMax | M2.1, M2.1 Lightning | API |
-| 火山引擎 | ark-code-latest, Doubao-Seed-Code | API |
-| OpenRouter | GPT-5.2, Gemini 3 等多模型 | API |
+| Moonshot | Kimi K2.5, K2 Thinking, K2 | API |
+| 智谱 AI | GLM 5, 4.7, 4.5 Air | API |
+| MiniMax | M2.5, M2.5 Lightning, M2.1, M2.1 Lightning | API |
+| 火山引擎 | Ark Code Latest, Doubao Seed Code | API |
+| ZenMux | ZenMux Auto, Gemini 3.1 Pro, Claude 4.6, Doubao Seed 2.0 等 | API |
+| 硅基流动 | Kimi K2.5, GLM 4.7, DeepSeek V3.2, Step 3.5 Flash 等 | API |
+| OpenRouter | GPT-5.2 Codex, GPT-5.2 Pro, Gemini 3 等多模型 | API |
 
 ### 系统要求
 
 #### 最终用户
 
-- **macOS 13.0 (Ventura)** 或更高版本
-- 支持 Apple Silicon 和 Intel 芯片
+- **macOS 13.0 (Ventura)** 或更高版本，支持 Apple Silicon 和 Intel 芯片
+- **Windows 10** 或更高版本
 
 #### 开发者
 
-- macOS 13.0+
+- macOS 13.0+ / Windows 10+
 - [Node.js](https://nodejs.org) (v18+)
 - [Bun](https://bun.sh) - 开发时需要，最终用户无需安装
 - [Rust](https://rustup.rs)
@@ -93,6 +90,9 @@ cd MyAgents
 
 # 生产构建 (macOS DMG)
 ./build_macos.sh
+
+# 生产构建 (Windows NSIS)
+# PowerShell: .\build_windows.ps1
 ```
 
 ### 技术栈
@@ -107,24 +107,30 @@ cd MyAgents
 
 ### 架构
 
-多实例 Sidecar 架构：每个 Tab 拥有独立的后端进程和 SSE 连接。
+**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、IM Bot 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；内置 Bun 运行时，用户无需安装任何依赖。
 
 ```
-┌─────────────────────────────────────────────┐
-│  Tab1 (WS-A)    Tab2 (WS-B)    Settings     │
-│      │              │              │        │
-│      ▼              ▼              ▼        │
-│  Sidecar:31415  Sidecar:31416  Global:31417 │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                        Tauri Desktop App                       │
+├────────────────────────────────────────────────────────────────┤
+│  React Frontend                                                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │
+│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │  IM Settings  │ │
+│  │  Tab SSE │  │  Tab SSE │  │ 全局 API  │  │ 多 Bot 管理    │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬───────┘ │
+│       │              │             │                │          │
+├───────┼──────────────┼─────────────┼────────────────┼──────────┤
+│  Rust │              │             │                │          │
+│  ┌────┴──────────────┴───┐  ┌─────┴─────┐  ┌──────┴───────┐ │
+│  │   SidecarManager     │  │  Global   │  │ ManagedImBots│ │
+│  │  Session:Sidecar 1:1 │  │  Sidecar  │  │ Telegram/飞书 │ │
+│  └────┬──────────┬───────┘  └───────────┘  └──────┬───────┘ │
+│       ▼          ▼                                 ▼         │
+│  Sidecar:31415  Sidecar:31416              Bot API Adapters  │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-所有 HTTP/SSE 流量通过 Rust 代理层，完全绕过 WebView CORS 限制：
-
-```
-前端 ──(invoke)──> Rust Proxy ──(reqwest)──> Bun Sidecar
-         <──(emit sse:tabId:event)──
-```
-
+> 完整架构说明、Session 切换机制、Owner 生命周期等详见 [技术架构文档](specs/tech_docs/architecture.md)。
 
 ### 贡献
 
@@ -140,55 +146,51 @@ cd MyAgents
 
 ## English
 
-MyAgents is a **desktop general-purpose Agent product** powered by Claude Agent SDK, bringing powerful Agent capabilities to your desktop. Through an intuitive graphical interface, anyone can harness the power of AI. No command line, no programming experience needed — just chat and accomplish complex tasks.
+MyAgents is an open-source desktop AI Agent that combines the powerful Agent capabilities of "Claude Code" with flexible IM Bot interaction — two-in-one, one-click install, zero barrier.
 
-As of January 2026, AI intelligence has advanced rapidly, turning software developers into people with 10x or even 100x productivity. 2026 is destined to be the first year of intelligence abundance. We hope this AI power can be harnessed by more people — whether you're a student, content creator, educator, industry expert, product manager, or anyone who "wants to make something happen." We hope MyAgents can breathe a soul into your computer, turning it into your thought amplifier, transforming your taste and ideas into reality to make a greater impact on the world.
-
-Therefore, MyAgents' core principles are: **zero-barrier GUI, flexible model provider choices, local data storage, and open-source freedom.**
+For content creators, product managers, students, researchers, indie developers, AI enthusiasts — anyone who wants AI to get things done.
 
 ### Quick Download
 - Visit https://myagents.io to download the installer
 - Mac version supports both Apple Silicon and Intel chips
-- Windows version coming soon
+- Windows version supports Windows 10 and above
 
-### Features
+### Core Capabilities
 
-- **Native Desktop App** - macOS native experience with Chrome-style frameless window
-- **Multi-Tab Support** - Manage multiple project sessions simultaneously with drag-and-drop sorting
-- **Multi-Instance Concurrency** - Each tab has its own Sidecar process for true parallel work
-- **Smart Conversations** - Powered by Claude Agent SDK with best-in-class framework strategies
-- **Multi-Project Management** - Switch between different code repositories
-- **Local Execution** - Your data never leaves your machine
-- **Silent Auto-Update** - Chrome-style background updates, restart when ready
-- **Slash Commands** - Built-in and custom shortcut commands
-- **Multi-Model Support** - Anthropic and third-party providers
-- **Keyboard Shortcuts** - Cmd+T for new tab, Cmd+W to close tab
-- **MCP Integration** - STDIO/HTTP/SSE transport protocols
-- **Tool Permissions** - Three permission modes (Act/Plan/Auto)
-- **Config Management** - Visual editing for CLAUDE.md, Skills, and Commands
+- **Zero-Barrier GUI** - Chrome-style multi-tab interface, each Tab runs an independent Agent for true parallel workflows
+- **Multi-Model Freedom** - Anthropic, DeepSeek, Moonshot, Zhipu, MiniMax, Volcengine, OpenRouter and 9+ providers, choose by need, control your cost
+- **Skills System** - Built-in and custom skills, trigger common operations with one click, your Agent learns your habits
+- **MCP Tool Integration** - Built-in MCP protocol support (STDIO/HTTP/SSE), connect external tools and data sources for unlimited extensibility
+- **Custom Agents** - Configure dedicated prompts, tools, and models to build your own Agents
+- **IM Chatbots** - Connect Telegram / Feishu (Lark), multi-bot management, interactive permission approval, multimedia messages, scheduled tasks
+- **Smart Permissions** - Act / Plan / Auto modes for safety and control
+- **Local Data, Continuous Evolution** - All conversations, files, and memories stay on your machine. API connects directly to providers. Your AI grows smarter the more you use it
+- **Fully Open Source** - Apache-2.0 license, code fully open
 
 ### Supported Model Providers
 
 | Provider | Models | Type |
 |----------|--------|------|
-| Anthropic | Claude Sonnet/Haiku/Opus 4.5 | Subscription/API |
+| Anthropic | Claude Sonnet 4.6, Opus 4.6, Haiku 4.5 | Subscription/API |
 | DeepSeek | DeepSeek Chat, Reasoner | API |
-| Moonshot | Kimi K2 | API |
-| Zhipu AI | GLM 4.7, 4.5 Air | API |
-| MiniMax | M2.1, M2.1 Lightning | API |
-| Volcengine | ark-code-latest, Doubao-Seed-Code | API |
-| OpenRouter | GPT-5.2, Gemini 3 and more | API |
+| Moonshot | Kimi K2.5, K2 Thinking, K2 | API |
+| Zhipu AI | GLM 5, 4.7, 4.5 Air | API |
+| MiniMax | M2.5, M2.5 Lightning, M2.1, M2.1 Lightning | API |
+| Volcengine | Ark Code Latest, Doubao Seed Code | API |
+| ZenMux | ZenMux Auto, Gemini 3.1 Pro, Claude 4.6, Doubao Seed 2.0 and more | API |
+| SiliconFlow | Kimi K2.5, GLM 4.7, DeepSeek V3.2, Step 3.5 Flash and more | API |
+| OpenRouter | GPT-5.2 Codex, GPT-5.2 Pro, Gemini 3 and more | API |
 
 ### System Requirements
 
 #### End Users
 
-- **macOS 13.0 (Ventura)** or later
-- Apple Silicon and Intel supported
+- **macOS 13.0 (Ventura)** or later, Apple Silicon and Intel supported
+- **Windows 10** or later
 
 #### Developers
 
-- macOS 13.0+
+- macOS 13.0+ / Windows 10+
 - [Node.js](https://nodejs.org) (v18+)
 - [Bun](https://bun.sh) - Required for development only
 - [Rust](https://rustup.rs)
@@ -211,6 +213,9 @@ cd MyAgents
 
 # Production build (macOS DMG)
 ./build_macos.sh
+
+# Production build (Windows NSIS)
+# PowerShell: .\build_windows.ps1
 ```
 
 ### Tech Stack
@@ -225,23 +230,30 @@ cd MyAgents
 
 ### Architecture
 
-Multi-instance Sidecar architecture: each tab owns an independent backend process and SSE connection.
+**Session-Centric multi-instance Sidecar architecture** — each session owns an isolated Agent process with strict 1:1 mapping; a multi-owner mechanism lets Tabs, scheduled tasks, and IM Bots safely share the same Sidecar; the Rust proxy layer handles all traffic with zero CORS issues; Bun runtime is bundled — users install nothing.
 
 ```
-┌─────────────────────────────────────────────┐
-│  Tab1 (WS-A)    Tab2 (WS-B)    Settings     │
-│      │              │              │        │
-│      ▼              ▼              ▼        │
-│  Sidecar:31415  Sidecar:31416  Global:31417 │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                        Tauri Desktop App                       │
+├────────────────────────────────────────────────────────────────┤
+│  React Frontend                                                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │
+│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │  IM Settings  │ │
+│  │  Tab SSE │  │  Tab SSE │  │Global API│  │ Multi-Bot Mgmt│ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬───────┘ │
+│       │              │             │                │          │
+├───────┼──────────────┼─────────────┼────────────────┼──────────┤
+│  Rust │              │             │                │          │
+│  ┌────┴──────────────┴───┐  ┌─────┴─────┐  ┌──────┴───────┐ │
+│  │   SidecarManager     │  │  Global   │  │ ManagedImBots│ │
+│  │  Session:Sidecar 1:1 │  │  Sidecar  │  │ TG / Feishu  │ │
+│  └────┬──────────┬───────┘  └───────────┘  └──────┬───────┘ │
+│       ▼          ▼                                 ▼         │
+│  Sidecar:31415  Sidecar:31416              Bot API Adapters  │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-All HTTP/SSE traffic goes through Rust proxy layer, completely bypassing WebView CORS restrictions:
-
-```
-Frontend ──(invoke)──> Rust Proxy ──(reqwest)──> Bun Sidecar
-            <──(emit sse:tabId:event)──
-```
+> For full details on session switching, owner lifecycle, and communication flow, see the [Architecture Documentation](specs/tech_docs/architecture.md).
 
 ### Contributing
 
