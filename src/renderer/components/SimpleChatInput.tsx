@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Image, Loader, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
+import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -766,13 +766,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files) {
-      Array.from(files).forEach(addImage);
+    if (files && files.length > 0) {
+      void processDroppedFiles(Array.from(files));
     }
     // Reset input so same file can be selected again
     e.target.value = '';
     setShowPlusMenu(false);
-  }, [addImage]);
+  }, [processDroppedFiles]);
 
   // Handle paste for images and files
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
@@ -1402,8 +1402,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       }}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                     >
-                      <Image className="h-4 w-4" />
-                      上传图片
+                      <Paperclip className="h-4 w-4" />
+                      上传文件
                     </button>
                   </div>
                 )}
@@ -1413,7 +1413,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               <input
                 ref={fileInputRef}
                 type="file"
-                accept={ALLOWED_IMAGE_MIME_TYPES.join(',')}
                 multiple
                 className="hidden"
                 onChange={handleFileChange}
