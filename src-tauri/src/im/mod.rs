@@ -1155,11 +1155,20 @@ pub async fn start_im_bot<R: Runtime>(
                                 if e.should_buffer() {
                                     task_buffer.lock().await.push(&msg);
                                 }
-                                // SSE "error" events are handled inside stream_to_telegram,
-                                // but early failures (connection refused, non-200 status) need
-                                // explicit notification here.
+                                // Format user-friendly error: SSE errors from Bun are already
+                                // localized via localizeImError, extract the inner message
+                                // instead of wrapping with "处理消息时出错" again.
+                                // RouteError::Response displays as "Sidecar returned {status}: {body}"
+                                let e_str = format!("{}", e);
+                                let user_msg = if e_str.starts_with("Sidecar returned ") {
+                                    // Extract body after "Sidecar returned NNN: "
+                                    let inner = e_str.splitn(2, ": ").nth(1).unwrap_or(&e_str);
+                                    format!("⚠️ {}", inner)
+                                } else {
+                                    format!("⚠️ {}", e)
+                                };
                                 let _ = task_adapter
-                                    .send_message(&chat_id, &format!("⚠️ 处理消息时出错: {}", e))
+                                    .send_message(&chat_id, &user_msg)
                                     .await;
                                 task_adapter.ack_clear(&chat_id, &message_id).await;
                                 return;
@@ -1802,9 +1811,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     if let Some(ref pid) = placeholder_id {
                         let _ = adapter.delete_message(chat_id, pid).await;
                     }
-                    let _ = adapter
-                        .send_message(chat_id, &format!("⚠️ {}", error))
-                        .await;
+                    // Don't send_message here — outer handler will do it
                     return Err(RouteError::Response(500, error.to_string()));
                 }
                 _ => {} // Ignore unknown types

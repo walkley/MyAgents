@@ -143,6 +143,8 @@ const toolResultIndexToId: Map<number, string> = new Map();
 // IM Draft Stream: callback for streaming text to Telegram
 type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
 let imStreamCallback: ImStreamCallback | null = null;
+// Flag: auto-reset session after image content pollutes conversation history
+let shouldResetSessionAfterError = false;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
 const childToolToParent: Map<string, string> = new Map();
@@ -231,7 +233,7 @@ function abortPersistentSession(): void {
   shouldAbortSession = true;
   // Notify IM stream callback before abort
   if (imStreamCallback) {
-    imStreamCallback('error', 'Session aborted');
+    imStreamCallback('error', '会话已中断，请重新发送');
     imStreamCallback = null;
   }
   // 唤醒被阻塞的 generator（waitForMessage）
@@ -1238,6 +1240,45 @@ export function getSessionId(): string {
   return sessionId;
 }
 
+/** Localize SDK/system error messages for IM end-users */
+function localizeImError(rawError: string): string {
+  if (!rawError) return '模型处理消息时出错';
+
+  // Image content not supported by model
+  if (rawError.includes('unknown variant') && rawError.includes('image')) {
+    return '当前模型不支持图片，请发送文字消息';
+  }
+  // SDK subprocess crashed (Windows: anti-virus, OOM, etc.)
+  if (rawError.includes('process exited with code') || rawError.includes('process terminated')) {
+    return 'AI 引擎异常退出，正在自动恢复，请稍后重试';
+  }
+  // API authentication errors
+  if (rawError.includes('authentication') || rawError.includes('unauthorized') || rawError.includes('401')) {
+    return 'API 认证失败，请检查 API Key 配置';
+  }
+  // Rate limiting
+  if (rawError.includes('rate_limit') || rawError.includes('429')) {
+    return 'API 请求频率超限，请稍后重试';
+  }
+  // Billing errors
+  if (rawError.includes('billing') || rawError.includes('insufficient_quota') || rawError.includes('quota_exceeded')) {
+    return 'API 余额不足，请充值后重试';
+  }
+  // Server overloaded
+  if (rawError.includes('overloaded') || rawError.includes('503')) {
+    return 'AI 服务繁忙，请稍后重试';
+  }
+  // Callback replaced
+  if (rawError.includes('Replaced by a newer') || rawError.includes('消息处理被新请求取代')) {
+    return '消息处理被新请求取代，请重新发送';
+  }
+  // Default: truncate long API errors for readability
+  if (rawError.length > 100) {
+    return rawError.substring(0, 100) + '...';
+  }
+  return rawError;
+}
+
 export function setImStreamCallback(cb: ImStreamCallback | null): void {
   // Defense-in-depth: if there's already an active callback when setting a new one,
   // notify the old callback with an error so its SSE stream terminates cleanly.
@@ -1246,7 +1287,7 @@ export function setImStreamCallback(cb: ImStreamCallback | null): void {
   if (cb !== null && imStreamCallback !== null) {
     console.warn('[agent] setImStreamCallback: replacing active callback — notifying old stream');
     try {
-      imStreamCallback('error', 'Replaced by a newer IM request');
+      imStreamCallback('error', '消息处理被新请求取代');
     } catch { /* old stream may already be closed */ }
   }
   imStreamCallback = cb;
@@ -1893,9 +1934,9 @@ function handleMessageStopped(): void {
 
 function handleMessageError(error: string): void {
   isStreamingMessage = false;
-  // Notify IM stream: error
+  // Notify IM stream: localized error
   if (imStreamCallback) {
-    imStreamCallback('error', error);
+    imStreamCallback('error', localizeImError(error));
     imStreamCallback = null;
   }
   setSessionState('idle');
@@ -3763,6 +3804,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // This is the authoritative source for token statistics
         const resultMessage = sdkMessage as {
           type: 'result';
+          is_error?: boolean;
+          result?: string;
+          errors?: string[];
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -3776,6 +3820,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             cacheCreationInputTokens?: number;
           }>;
         };
+
+        // Forward SDK error results to IM callback (prevents "(No Response)")
+        if (resultMessage.is_error) {
+          const rawError = resultMessage.result || resultMessage.errors?.join('; ') || '';
+          // Detect image content error — reset session to clear polluted history
+          // (applies to both IM and desktop: prevents all subsequent messages from failing)
+          if (rawError.includes('unknown variant') && rawError.includes('image')) {
+            shouldResetSessionAfterError = true;
+          }
+          if (imStreamCallback) {
+            const errorText = localizeImError(rawError);
+            console.warn('[agent] SDK result is_error, forwarding to IM:', errorText);
+            imStreamCallback('error', errorText);
+            imStreamCallback = null;
+          }
+        }
 
         // Prefer modelUsage (per-model breakdown), fallback to aggregate usage
         if (resultMessage.modelUsage) {
@@ -3852,6 +3912,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         });
         handleMessageComplete();
         signalTurnComplete();  // 解锁 generator 进入下一轮
+
+        // Auto-reset session if image content polluted conversation history
+        if (shouldResetSessionAfterError) {
+          shouldResetSessionAfterError = false;
+          console.warn('[agent] Auto-resetting session due to image content error in history');
+          resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
+        }
 
         // Deferred config restart: MCP/Agents changed during this turn but we didn't
         // abort mid-response. Now that the turn completed naturally, restart the session
