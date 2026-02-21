@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.23] - 2026-02-22
+
+### Fixed
+- **IM Bot 第三方模型 auto-start 失败**：`providerEnvJson`（含 baseUrl/apiKey/authType）只在前端手动启动时构建，Rust auto-start 从磁盘读不到 → 第三方供应商（DeepSeek、Moonshot 等）报 "所选模型不可用"。现在前端在启动/切换 Provider 时持久化 `providerEnvJson` 到 config.json
+- **IM Bot auto-start 向前兼容迁移**：Rust 侧新增 `migrate_provider_env()`，对旧配置（无 `providerEnvJson` 字段）从 `providerApiKeys` + 预设供应商 baseUrl 映射自动重建，确保升级后首次 auto-start 即可用
+- **IM Bot `/new` 命令 port 0 崩溃**：App 重启后恢复的 session `sidecar_port` 为 0，`/new` 发起 HTTP 请求到 `127.0.0.1:0` 导致报错。现在检测 port 0 时本地重置 session 元数据
+- **IM Bot SDK 错误透传与本地化**：SDK `is_error` 标志正确透传到 IM 端、图片历史污染自动重置 session、新增 6 类错误中文本地化（认证失败、频率限制、余额不足、模型不可用等）
+- **更新检查 Toast 重复**：后台下载进行中时重复弹出"正在下载更新"提示
+
+---
+
 ## [0.1.22] - 2026-02-22
 
 ### Added
