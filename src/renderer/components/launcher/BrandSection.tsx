@@ -1,7 +1,7 @@
 /**
  * BrandSection - Left panel of the Launcher page
  * Layout: Logo+Slogan pinned to upper area, input box anchored to lower area
- * with floating workspace selector above it
+ * with workspace selector integrated into the input toolbar
  */
 
 import { memo, useCallback } from 'react';
@@ -78,20 +78,8 @@ export default memo(function BrandSection({
                 </p>
             </div>
 
-            {/* Lower area: Workspace selector (floating pill) + Input box */}
+            {/* Lower area: Input box with workspace selector in toolbar */}
             <div className="mt-10 w-full max-w-[640px] pb-[12vh]">
-                {/* Floating workspace selector — small pill above input */}
-                <div className="mb-3 flex justify-start">
-                    <WorkspaceSelector
-                        projects={projects}
-                        selectedProject={selectedProject}
-                        defaultWorkspacePath={defaultWorkspacePath}
-                        onSelect={onSelectWorkspace}
-                        onAddFolder={onAddFolder}
-                    />
-                </div>
-
-                {/* Input box */}
                 <div className="relative w-full">
                     <SimpleChatInput
                         mode="launcher"
@@ -111,6 +99,15 @@ export default memo(function BrandSection({
                         mcpServers={mcpServers}
                         onWorkspaceMcpToggle={onWorkspaceMcpToggle}
                         onRefreshProviders={onRefreshProviders}
+                        toolbarPrefix={
+                            <WorkspaceSelector
+                                projects={projects}
+                                selectedProject={selectedProject}
+                                defaultWorkspacePath={defaultWorkspacePath}
+                                onSelect={onSelectWorkspace}
+                                onAddFolder={onAddFolder}
+                            />
+                        }
                     />
                 </div>
             </div>

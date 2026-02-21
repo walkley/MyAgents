@@ -90,6 +90,8 @@ interface SimpleChatInputProps {
   onInputChange?: (text: string) => void;
   /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
   mode?: 'chat' | 'launcher';
+  /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
+  toolbarPrefix?: React.ReactNode;
   // Queued messages props
   queuedMessages?: QueuedMessageInfo[];
   onCancelQueued?: (queueId: string) => void;
@@ -160,6 +162,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronStop,
   onInputChange,
   mode = 'chat',
+  toolbarPrefix,
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
@@ -1324,6 +1327,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           <div className="toolbar-menus flex items-center justify-between px-3 pb-2 pt-1">
             {/* Left side - action buttons */}
             <div className="flex items-center gap-1">
+              {/* Optional prefix (e.g., workspace selector in launcher mode) */}
+              {toolbarPrefix}
+
               {/* Plus menu */}
               <div className="relative">
                 <button

@@ -65,9 +65,9 @@ export default function WorkspaceSelector({
         return (
             <button
                 onClick={onAddFolder}
-                className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-[var(--line)] px-3 py-1.5 text-xs text-[var(--ink-muted)] shadow-sm transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--accent)]"
             >
-                <Plus className="h-3 w-3" />
+                <Plus className="h-3.5 w-3.5" />
                 <span>选择工作区</span>
             </button>
         );
@@ -75,16 +75,16 @@ export default function WorkspaceSelector({
 
     return (
         <div ref={containerRef} className="relative inline-block">
-            {/* Trigger pill — compact floating style */}
+            {/* Trigger — toolbar-compatible style */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="inline-flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3.5 py-1.5 text-left shadow-sm transition-all hover:shadow-md"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
             >
-                <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
-                <span className="max-w-[160px] truncate text-[13px] font-medium text-[var(--ink)]">
+                <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                <span className="max-w-[120px] truncate">
                     {selectedProject ? getFolderName(selectedProject.path) : '选择工作区'}
                 </span>
-                <ChevronUp className={`h-3 w-3 shrink-0 text-[var(--ink-muted)] transition-transform ${isOpen ? '' : 'rotate-180'}`} />
+                <ChevronUp className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
             </button>
 
             {/* Dropdown - opens upward */}
