@@ -102,6 +102,8 @@ pub struct ImConfig {
     pub feishu_app_secret: Option<String>,
     // ===== AI config =====
     #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub provider_env_json: Option<String>,
@@ -130,6 +132,7 @@ impl Default for ImConfig {
             enabled: false,
             feishu_app_id: None,
             feishu_app_secret: None,
+            provider_id: None,
             model: None,
             provider_env_json: None,
             mcp_servers_json: None,

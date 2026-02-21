@@ -1930,6 +1930,9 @@ struct PartialAppConfig {
     im_bot_config: Option<PartialBotEntry>,
     /// Multi-bot configs (v0.1.19+)
     im_bot_configs: Option<Vec<PartialBotEntry>>,
+    /// API keys keyed by provider ID (for migrating providerEnvJson)
+    #[serde(default)]
+    provider_api_keys: std::collections::HashMap<String, String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2022,9 +2025,10 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
 }
 
 /// Extract (bot_id, config) pairs from parsed config.
+/// Migrates missing `provider_env_json` from `provider_api_keys` + preset baseUrl map.
 fn parse_bot_entries(app_config: PartialAppConfig) -> Vec<(String, ImConfig)> {
-    // Prefer multi-bot configs, fall back to legacy single-bot
-    if let Some(bots) = app_config.im_bot_configs {
+    let api_keys = app_config.provider_api_keys;
+    let mut entries: Vec<(String, ImConfig)> = if let Some(bots) = app_config.im_bot_configs {
         bots.into_iter()
             .map(|entry| {
                 let id = entry.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -2036,7 +2040,64 @@ fn parse_bot_entries(app_config: PartialAppConfig) -> Vec<(String, ImConfig)> {
         vec![(id, entry.config)]
     } else {
         Vec::new()
+    };
+
+    // Migration: rebuild providerEnvJson for bots that have providerId but no providerEnvJson
+    for (_id, config) in &mut entries {
+        migrate_provider_env(config, &api_keys);
     }
+
+    entries
+}
+
+/// Backward-compat migration: if a bot has `provider_id` set but `provider_env_json` is missing,
+/// reconstruct it from `providerApiKeys` + preset provider baseUrl map.
+/// This handles existing configs created before providerEnvJson persistence was added.
+fn migrate_provider_env(
+    config: &mut ImConfig,
+    api_keys: &std::collections::HashMap<String, String>,
+) {
+    if config.provider_env_json.is_some() {
+        return; // Already set
+    }
+    let provider_id = match &config.provider_id {
+        Some(id) if !id.is_empty() && !id.contains("sub") => id.clone(),
+        _ => return, // Subscription or no provider
+    };
+    let api_key = match api_keys.get(&provider_id) {
+        Some(key) if !key.is_empty() => key,
+        _ => return, // No API key available
+    };
+    let base_url = match provider_id.as_str() {
+        "anthropic-api" => "https://api.anthropic.com",
+        "deepseek" => "https://api.deepseek.com/anthropic",
+        "moonshot" => "https://api.moonshot.cn/anthropic",
+        "zhipu" => "https://open.bigmodel.cn/api/anthropic",
+        "minimax" => "https://api.minimaxi.com/anthropic",
+        "volcengine" => "https://ark.cn-beijing.volces.com/api/coding",
+        "siliconflow" => "https://api.siliconflow.cn/",
+        "zenmux" => "https://zenmux.ai/api/anthropic",
+        "openrouter" => "https://openrouter.ai/api",
+        _ => {
+            ulog_warn!(
+                "[im] Cannot migrate providerEnvJson for unknown provider '{}' — manual restart required",
+                provider_id
+            );
+            return;
+        }
+    };
+    config.provider_env_json = Some(
+        serde_json::json!({
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "authType": "api-key",
+        })
+        .to_string(),
+    );
+    ulog_info!(
+        "[im] Migrated providerEnvJson for provider '{}' from providerApiKeys",
+        provider_id
+    );
 }
 
 /// Persist a newly bound user to `~/.myagents/config.json`.
@@ -2177,6 +2238,7 @@ pub async fn cmd_start_im_bot(
         enabled: true,
         feishu_app_id: feishuAppId,
         feishu_app_secret: feishuAppSecret,
+        provider_id: None, // Not needed here — frontend passes providerEnvJson directly
         model,
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
