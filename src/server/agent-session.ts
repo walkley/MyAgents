@@ -1239,6 +1239,16 @@ export function getSessionId(): string {
 }
 
 export function setImStreamCallback(cb: ImStreamCallback | null): void {
+  // Defense-in-depth: if there's already an active callback when setting a new one,
+  // notify the old callback with an error so its SSE stream terminates cleanly.
+  // This should not happen when peer_locks are properly used, but guards against
+  // silent callback replacement that would leave the old SSE stream hanging.
+  if (cb !== null && imStreamCallback !== null) {
+    console.warn('[agent] setImStreamCallback: replacing active callback — notifying old stream');
+    try {
+      imStreamCallback('error', 'Replaced by a newer IM request');
+    } catch { /* old stream may already be closed */ }
+  }
   imStreamCallback = cb;
 }
 
