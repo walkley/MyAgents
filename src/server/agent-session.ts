@@ -1248,6 +1248,10 @@ function localizeImError(rawError: string): string {
   if (rawError.includes('unknown variant') && rawError.includes('image')) {
     return '当前模型不支持图片，请发送文字消息';
   }
+  // Model validation error (SDK rejects unknown model for the configured provider)
+  if (rawError.includes('issue with the selected model')) {
+    return '所选模型不可用，请检查 IM Bot 的模型和供应商配置';
+  }
   // SDK subprocess crashed (Windows: anti-virus, OOM, etc.)
   if (rawError.includes('process exited with code') || rawError.includes('process terminated')) {
     return 'AI 引擎异常退出，正在自动恢复，请稍后重试';

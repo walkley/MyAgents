@@ -251,7 +251,7 @@ export default function ImBotDetail({
                 await invoke('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
                     toastRef.current.success('Bot 已启动');
-                    await saveBotField({ enabled: true });
+                    await saveBotField({ enabled: true, providerEnvJson: params.providerEnvJson || undefined });
                 }
             }
         } catch (err) {
@@ -554,9 +554,8 @@ export default function ImBotDetail({
                 onProviderChange={async (providerId) => {
                     const provider = providers.find(p => p.id === providerId);
                     const newModel = provider ? provider.primaryModel : undefined;
-                    await saveBotField({ providerId: providerId || undefined, model: newModel });
-                    // Hot-update: build provider env and sync to running bot
-                    let providerEnvJson: string | null = null;
+                    // Build provider env for both persistence and hot-update
+                    let providerEnvJson: string | undefined;
                     if (provider && provider.type !== 'subscription') {
                         providerEnvJson = JSON.stringify({
                             baseUrl: provider.config.baseUrl,
@@ -564,6 +563,8 @@ export default function ImBotDetail({
                             authType: provider.authType,
                         });
                     }
+                    // Persist providerId + model + providerEnvJson (undefined clears old value)
+                    await saveBotField({ providerId: providerId || undefined, model: newModel, providerEnvJson });
                     const availableProvidersList = providers
                         .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
                         .map(p => ({
