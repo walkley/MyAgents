@@ -17,6 +17,7 @@ use crate::sidecar::{
     shutdown_for_update,
 };
 use crate::logger;
+use crate::{ulog_info, ulog_warn};
 
 // ============= Legacy Commands (for backward compatibility) =============
 
@@ -364,12 +365,22 @@ pub fn cmd_initialize_bundled_workspace<R: Runtime>(
         .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
     let mino_src = resource_dir.join("mino");
-    if !mino_src.exists() {
-        return Err("Bundled mino not found in resources".to_string());
+    if !mino_src.exists() || !mino_src.join("CLAUDE.md").exists() {
+        return Err(format!(
+            "Bundled mino not found or incomplete in resources: {:?}",
+            mino_src
+        ));
     }
 
+    ulog_info!("[workspace] Initializing bundled workspace from {:?}", mino_src);
     copy_dir_recursive(&mino_src, &mino_dest)
         .map_err(|e| format!("Failed to copy mino workspace: {}", e))?;
+
+    // Validate the copy produced a valid workspace
+    if !mino_dest.join("CLAUDE.md").exists() {
+        let _ = fs::remove_dir_all(&mino_dest);
+        return Err("Bundled mino copy produced incomplete workspace".to_string());
+    }
 
     Ok(InitBundledWorkspaceResult {
         path: mino_dest.to_string_lossy().to_string(),
@@ -379,6 +390,7 @@ pub fn cmd_initialize_bundled_workspace<R: Runtime>(
 
 /// Command: Create a dedicated workspace for an IM Bot by copying bundled mino template.
 /// Sanitizes the name for path safety and auto-appends numeric suffix on collision.
+/// Falls back to local mino copy if bundled resources are incomplete.
 /// Returns the created workspace path.
 #[tauri::command]
 pub fn cmd_create_bot_workspace<R: Runtime>(
@@ -397,19 +409,37 @@ pub fn cmd_create_bot_workspace<R: Runtime>(
     // Find available path (handle collisions with numeric suffix)
     let dest = find_available_workspace_path(&projects_dir, &sanitized);
 
-    // Copy mino template from bundled resources
+    // Primary: copy from bundled resources
     let resource_dir = app_handle
         .path()
         .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
     let mino_src = resource_dir.join("mino");
-    if !mino_src.exists() {
-        return Err("Bundled mino template not found in resources".to_string());
+
+    if mino_src.exists() && mino_src.join("CLAUDE.md").exists() {
+        ulog_info!("[workspace] Copying bundled mino from {:?} to {:?}", mino_src, dest);
+        copy_dir_recursive(&mino_src, &dest)
+            .map_err(|e| format!("Failed to copy workspace template: {}", e))?;
     }
 
-    copy_dir_recursive(&mino_src, &dest)
-        .map_err(|e| format!("Failed to copy workspace template: {}", e))?;
+    // Validate: CLAUDE.md must exist in destination (marker file for a valid mino template)
+    if !dest.join("CLAUDE.md").exists() {
+        // Fallback: copy from the local mino created on first launch
+        let local_mino = projects_dir.join("mino");
+        if local_mino.exists() && local_mino.join("CLAUDE.md").exists() {
+            ulog_warn!("[workspace] Bundled mino incomplete, falling back to local {:?}", local_mino);
+            // Clean up the potentially empty dest before fallback copy
+            let _ = fs::remove_dir_all(&dest);
+            copy_dir_recursive(&local_mino, &dest)
+                .map_err(|e| format!("Failed to copy from local mino: {}", e))?;
+        } else {
+            // Clean up the empty dest
+            let _ = fs::remove_dir_all(&dest);
+            return Err("Mino template not found: bundled resources incomplete and no local copy available".to_string());
+        }
+    }
 
+    ulog_info!("[workspace] Bot workspace created: {:?}", dest);
     Ok(InitBundledWorkspaceResult {
         path: dest.to_string_lossy().to_string(),
         is_new: true,
