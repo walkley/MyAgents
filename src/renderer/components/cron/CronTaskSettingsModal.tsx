@@ -1,6 +1,6 @@
 // Cron Task Settings Modal - Configure scheduled task parameters
 import { X, HeartPulse, Calendar, AlertCircle, Bell } from 'lucide-react';
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import type { CronEndConditions, CronRunMode, CronTaskConfig } from '@/types/cronTask';
 import { CRON_INTERVAL_PRESETS, MIN_CRON_INTERVAL, formatCronInterval } from '@/types/cronTask';
 
@@ -241,12 +241,30 @@ function CronTaskSettingsForm({
     });
   }, [isValid, prompt, intervalMinutes, runMode, notifyEnabled, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, onConfirm]);
 
+  // Only close on genuine clicks (mousedown + mouseup both on backdrop).
+  // Prevents closing when user drags a text selection out of the modal.
+  // The backdrop (absolute inset-0) is below the modal (relative z-10) so mousedown
+  // on modal content never fires on the backdrop — no extra reset needed.
+  const mouseDownOnBackdropRef = useRef(false);
+
+  const handleBackdropMouseDown = useCallback(() => {
+    mouseDownOnBackdropRef.current = true;
+  }, []);
+
+  const handleBackdropClick = useCallback(() => {
+    if (mouseDownOnBackdropRef.current) {
+      onClose();
+    }
+    mouseDownOnBackdropRef.current = false;
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/50"
-        onClick={onClose}
+        onMouseDown={handleBackdropMouseDown}
+        onClick={handleBackdropClick}
       />
 
       {/* Modal */}
