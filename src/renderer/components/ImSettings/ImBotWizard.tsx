@@ -508,7 +508,7 @@ export default function ImBotWizard({
                                     showGuide={false}
                                 />
                             </div>
-                            {/* Step 1 guide: only items 1 & 2 + image */}
+                            {/* Step 1 guide: items 1–3 (create app, get credentials, add bot capability) */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <p className="text-sm font-medium text-[var(--ink)]">如何获取飞书应用凭证？</p>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
@@ -521,10 +521,16 @@ export default function ImBotWizard({
                                         飞书开放平台
                                     </a>并创建自建应用</li>
                                     <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret</li>
+                                    <li>3. 左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击 <span className="font-medium text-[var(--ink)]">配置</span> 按钮添加</li>
                                 </ol>
                                 <img
                                     src={feishuStep1Img}
                                     alt="飞书开放平台 - 凭证与基础信息"
+                                    className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                                />
+                                <img
+                                    src={feishuStep2AddBotImg}
+                                    alt="飞书添加应用能力 - 机器人"
                                     className="mt-4 w-full rounded-lg border border-[var(--line)]"
                                 />
                             </div>
@@ -593,7 +599,7 @@ export default function ImBotWizard({
                 <div className="space-y-6">
                     {/* Permissions guide */}
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">3. 配置权限</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 配置权限</h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
                             <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
                             <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
@@ -620,7 +626,7 @@ export default function ImBotWizard({
 
                     {/* Events guide */}
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 配置事件订阅</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置事件订阅</h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
                             <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
                             <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
@@ -629,20 +635,6 @@ export default function ImBotWizard({
                         <img
                             src={feishuStep2EventImg}
                             alt="飞书事件与回调 - 事件配置"
-                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
-                        />
-                    </div>
-
-                    {/* Add bot capability */}
-                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 添加应用能力 - 机器人</h3>
-                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span></li>
-                            <li>找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击下方的 <span className="font-medium text-[var(--ink)]">配置</span> 按钮添加</li>
-                        </ol>
-                        <img
-                            src={feishuStep2AddBotImg}
-                            alt="飞书添加应用能力 - 机器人"
                             className="mt-4 w-full rounded-lg border border-[var(--line)]"
                         />
                     </div>
