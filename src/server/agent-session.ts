@@ -385,9 +385,8 @@ const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     description: '浏览器自动化能力，支持网页浏览、截图、表单填写等',
     type: 'stdio',
     command: 'npx',
-    // Use --isolated to avoid conflicts with existing Chrome browser sessions
-    // Each session will use a fresh profile in memory
-    args: ['@playwright/mcp@latest', '--isolated'],
+    // --user-data-dir is configured by user via config.mcpServerArgs for browser state persistence
+    args: ['@playwright/mcp@latest'],
     env: {},
     isBuiltin: true,
   },
@@ -426,11 +425,13 @@ function loadMcpServersFromConfig(): McpServerDefinition[] {
     // Filter to only globally enabled servers
     const enabledServers = allServers.filter(s => globalEnabledIds.includes(s.id));
 
-    // Also apply server-specific env overrides if any
+    // Apply server-specific args and env overrides
+    const serverArgsConfig: Record<string, string[]> = config.mcpServerArgs ?? {};
     const serverEnvConfig: Record<string, Record<string, string>> = config.mcpServerEnv ?? {};
 
     return enabledServers.map(server => ({
       ...server,
+      args: [...(server.args ?? []), ...(serverArgsConfig[server.id] ?? [])],
       env: { ...server.env, ...(serverEnvConfig[server.id] ?? {}) }
     }));
   } catch (error) {
