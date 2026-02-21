@@ -9,6 +9,7 @@ pub mod heartbeat;
 pub mod router;
 pub mod telegram;
 pub mod types;
+mod util;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
