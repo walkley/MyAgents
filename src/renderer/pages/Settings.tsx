@@ -51,7 +51,6 @@ import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
-import { compareVersions } from '../../shared/utils';
 
 // Settings sub-sections
 type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'about';
@@ -323,89 +322,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         };
     }, [activeSection]);
 
-    // Manual update state (Developer section)
-    type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'no-update' | 'error';
-    const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
-    const [remoteVersion, setRemoteVersion] = useState<string>('');
-    const [updateError, setUpdateError] = useState<string>('');
-
-    // Check for updates (fetch remote version info)
-    const handleCheckUpdate = useCallback(async () => {
-        if (!isTauriEnvironment()) {
-            toast.error('此功能仅在桌面应用中可用');
-            return;
-        }
-
-        setUpdateStatus('checking');
-        setUpdateError('');
-
-        try {
-            const { invoke } = await import('@tauri-apps/api/core');
-
-            // First, test connectivity and get remote version
-            const result = await invoke('test_update_connectivity') as string;
-            console.log('[Settings] Update check result:', result);
-
-            // Parse version from result
-            const versionMatch = result.match(/version:\s*([^\n]+)/);
-            if (versionMatch) {
-                const remote = versionMatch[1].trim();
-                setRemoteVersion(remote);
-
-                // Compare versions using semantic versioning
-                const comparison = compareVersions(remote, appVersion);
-
-                if (comparison === 0) {
-                    setUpdateStatus('no-update');
-                    toast.info('当前已是最新版本');
-                } else if (comparison < 0) {
-                    setUpdateStatus('no-update');
-                    toast.info('当前版本比服务器版本更新');
-                } else {
-                    // New version available, start download
-                    setUpdateStatus('downloading');
-                    toast.info(`发现新版本 v${remote}，正在下载...`);
-
-                    const downloaded = await invoke('check_and_download_update') as boolean;
-                    if (downloaded) {
-                        setUpdateStatus('ready');
-                        toastRef.current.success('下载完成，可以重启更新');
-                    } else {
-                        setUpdateStatus('no-update');
-                        toastRef.current.info('没有可用更新');
-                    }
-                }
-            } else {
-                throw new Error('无法解析远程版本信息');
-            }
-        } catch (err) {
-            console.error('[Settings] Update check failed:', err);
-            setUpdateStatus('error');
-            setUpdateError(String(err));
-            toastRef.current.error(`检查更新失败: ${err}`);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef is stable
-    }, [appVersion]);
-
-    // Restart to apply update
-    const handleRestartUpdate = useCallback(async () => {
-        if (!isTauriEnvironment()) return;
-
-        try {
-            const { invoke } = await import('@tauri-apps/api/core');
-            // Shut down all child processes first to prevent file-lock errors
-            // (Windows NSIS installer fails if bun.exe is still held by SDK/MCP processes)
-            try {
-                await invoke('cmd_shutdown_for_update');
-            } catch (err) {
-                console.warn('[Settings] Pre-restart cleanup failed:', err);
-            }
-            await invoke('restart_app');
-        } catch (err) {
-            console.error('[Settings] Restart failed:', err);
-            toastRef.current.error(`重启失败: ${err}`);
-        }
-    }, []);
 
     // Collect React and Rust logs for Settings page (since we don't have TabProvider)
     // Limit to 3000 logs to prevent memory issues (matches UnifiedLogsPanel MAX_DISPLAY_LOGS)
@@ -2013,10 +1929,11 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                     const result = await onCheckForUpdate();
                                                     if (result === 'up-to-date') {
                                                         toast.info('当前已是最新版本');
+                                                    } else if (result === 'downloading') {
+                                                        toast.info('发现新版本，正在下载...');
                                                     } else if (result === 'error') {
                                                         toast.error('检查更新失败，请稍后重试');
                                                     }
-                                                    // 'downloading' — UI already shows download progress, no toast needed
                                                 }}
                                                 disabled={updateChecking}
                                                 className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
@@ -2174,64 +2091,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                     );
                                                 })()}
                                             </div>
-                                        </div>
-
-                                        {/* Manual Update */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                            <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">手动更新</h3>
-
-                                            {/* Version comparison */}
-                                            <div className="mb-4 space-y-2 text-xs">
-                                                <div className="flex justify-between">
-                                                    <span className="text-[var(--ink-muted)]">当前版本</span>
-                                                    <span className="font-mono text-[var(--ink)]">v{appVersion}</span>
-                                                </div>
-                                                {remoteVersion && (
-                                                    <div className="flex justify-between">
-                                                        <span className="text-[var(--ink-muted)]">最新版本</span>
-                                                        <span className={`font-mono ${(updateStatus === 'ready' || updateStatus === 'downloading') ? 'text-[var(--success)]' : 'text-[var(--ink)]'}`}>
-                                                            v{remoteVersion}
-                                                        </span>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Status message */}
-                                            {updateStatus === 'no-update' && (
-                                                <p className="mb-3 text-xs text-[var(--ink-muted)]">
-                                                    ✓ 当前已是最新版本
-                                                </p>
-                                            )}
-                                            {updateStatus === 'ready' && (
-                                                <p className="mb-3 text-xs text-[var(--success)]">
-                                                    ✓ 新版本已下载完成，点击下方按钮重启更新
-                                                </p>
-                                            )}
-                                            {updateStatus === 'error' && (
-                                                <p className="mb-3 text-xs text-[var(--error)]">
-                                                    ✗ {updateError || '检查更新失败'}
-                                                </p>
-                                            )}
-
-                                            {/* Action button */}
-                                            {updateStatus === 'ready' ? (
-                                                <button
-                                                    onClick={handleRestartUpdate}
-                                                    className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
-                                                >
-                                                    重启并更新
-                                                </button>
-                                            ) : (
-                                                <button
-                                                    onClick={handleCheckUpdate}
-                                                    disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
-                                                    className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
-                                                >
-                                                    {updateStatus === 'checking' && '检查中...'}
-                                                    {updateStatus === 'downloading' && '下载中...'}
-                                                    {(updateStatus === 'idle' || updateStatus === 'no-update' || updateStatus === 'error') && '检查更新'}
-                                                </button>
-                                            )}
                                         </div>
 
                                         {/* Cron Task Debug Panel */}

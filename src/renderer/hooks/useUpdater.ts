@@ -79,9 +79,8 @@ export function useUpdater(): UseUpdaterResult {
             return 'error';
         }
         // Use refs for guards — immune to stale closure on rapid clicks
-        if (updateReadyRef.current || checkingRef.current || downloadingRef.current) {
-            return 'up-to-date';
-        }
+        if (updateReadyRef.current) return 'up-to-date';  // Already ready, no need to check
+        if (checkingRef.current || downloadingRef.current) return 'downloading';  // In progress
 
         checkingRef.current = true;
         setChecking(true);
