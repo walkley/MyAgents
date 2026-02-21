@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.22] - 2026-02-22
+
+### Added
+- **飞书 Bot 多媒体接收**：支持接收图片、文件、音频、视频附件，图片走 SDK Vision，文件保存到工作区
+- **MCP 内置服务器 args/env 配置**：内置 MCP 服务器支持自定义启动参数和环境变量
+- **download-anything 内置 Skill**：新增文件下载 bundled skill
+- **Mermaid 图表预览/代码切换**：Mermaid 代码块新增预览/源码切换按钮和复制按钮
+- **YAML Frontmatter 代码高亮**：文件预览中 YAML frontmatter 渲染为语法高亮代码块
+- **上传文件功能升级**：Plus 菜单「上传图片」升级为「上传文件」，支持更多文件类型
+
+### Fixed
+- **心跳/IM 消息竞态条件**：心跳 runner 未获取 peer_lock 导致与用户消息并发访问 imStreamCallback，造成响应丢失和双重 "(No response)"。现在心跳与用户消息通过 peer_lock 串行化，Bun 侧增加纵深防御
+- **Monaco 编辑器 CJK 输入法**：修复中日韩输入法组合输入时的闪烁和异常行为（两轮修复）
+- **Mermaid 图表加载卡死**：多图表场景下 Mermaid 渲染卡在 loading 状态
+- **模态框拖拽误关闭**：拖拽选中文本到遮罩层时不再误触发关闭
+- **Bot 工作区复制校验**：从 bundled mino 复制工作区时增加校验和 fallback
+- **飞书向导步骤优化**：「添加应用能力-机器人」提前到 Step 1，减少配置遗漏
+
+### Changed
+- **Launcher 工作区选择器**：从输入框上方浮动 pill 移入输入框工具栏内，布局更紧凑
+- **README 更新**：同步当前功能列表、支持的供应商和架构说明
+
+---
+
 ## [0.1.21] - 2026-02-21
 
 ### Added

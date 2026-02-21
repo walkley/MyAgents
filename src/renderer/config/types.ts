@@ -234,6 +234,9 @@ export interface AppConfig {
   mcpEnabledServers?: string[];
   // Environment variables for MCP servers that require config (e.g., API keys)
   mcpServerEnv?: Record<string, Record<string, string>>;
+  // Extra args for MCP servers (appended to preset args)
+  // undefined = never customized, [] = user explicitly cleared
+  mcpServerArgs?: Record<string, string[]>;
 
   // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests

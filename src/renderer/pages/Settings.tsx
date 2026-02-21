@@ -2,6 +2,7 @@ import { Check, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, Alert
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
+import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
@@ -25,6 +26,7 @@ import {
     SUBSCRIPTION_PROVIDER_ID,
     PROXY_DEFAULTS,
     isValidProxyHost,
+    getPresetMcpServer,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -32,6 +34,10 @@ import {
     toggleMcpServerEnabled,
     addCustomMcpServer,
     deleteCustomMcpServer,
+    saveMcpServerArgs,
+    getMcpServerArgs,
+    getMcpServerEnv,
+    atomicModifyConfig,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { useAutostart } from '@/hooks/useAutostart';
@@ -191,6 +197,13 @@ const ModelTagList = React.memo(function ModelTagList({
         </>
     );
 });
+
+/** Default args for Playwright MCP: persistent browser profile to preserve login state */
+async function getPlaywrightDefaultArgs(): Promise<string[]> {
+    const home = await homeDir();
+    const profilePath = await join(home, '.playwright-mcp-profile');
+    return [`--user-data-dir=${profilePath}`];
+}
 
 export default function Settings({ initialSection, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
@@ -499,6 +512,15 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         runtimeName?: string;
         downloadUrl?: string;
     }>({ show: false });
+    // Builtin MCP settings dialog state
+    const [builtinMcpSettings, setBuiltinMcpSettings] = useState<{
+        server: McpServerDefinition;
+        extraArgs: string[];
+        newArg: string;
+        env: Record<string, string>;
+        newEnvKey: string;
+    } | null>(null);
+
     const [mcpForm, setMcpForm] = useState<{
         id: string;
         name: string;
@@ -589,6 +611,22 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 // Enable the MCP
                 await toggleMcpServerEnabled(server.id, true);
                 setMcpEnabledIds(prev => [...prev, server.id]);
+
+                // Auto-init default args for Playwright on first enable
+                if (server.id === 'playwright') {
+                    const existingArgs = await getMcpServerArgs('playwright');
+                    if (existingArgs === undefined) {
+                        try {
+                            const defaultArgs = await getPlaywrightDefaultArgs();
+                            await saveMcpServerArgs('playwright', defaultArgs);
+                            const servers = await getAllMcpServers();
+                            setMcpServersState(servers);
+                        } catch (e) {
+                            console.warn('[Settings] Failed to init default Playwright args:', e);
+                        }
+                    }
+                }
+
                 toast.success('MCP 已启用');
             } else if (result.error) {
                 // Handle different error types
@@ -618,6 +656,52 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
             env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
         });
+    };
+
+    // Edit builtin MCP server settings (extra args + env)
+    const handleEditBuiltinMcp = async (server: McpServerDefinition) => {
+        const savedArgs = await getMcpServerArgs(server.id);
+        const savedEnv = await getMcpServerEnv(server.id);
+
+        let extraArgs: string[];
+        if (savedArgs !== undefined) {
+            extraArgs = savedArgs;
+        } else if (server.id === 'playwright') {
+            // Playwright-specific default: persistent browser profile
+            try {
+                extraArgs = await getPlaywrightDefaultArgs();
+            } catch {
+                extraArgs = [];
+            }
+        } else {
+            extraArgs = [];
+        }
+
+        setBuiltinMcpSettings({
+            server,
+            extraArgs,
+            newArg: '',
+            env: { ...savedEnv },
+            newEnvKey: '',
+        });
+    };
+
+    const handleSaveBuiltinMcp = async () => {
+        if (!builtinMcpSettings) return;
+        const { server, extraArgs, env } = builtinMcpSettings;
+        try {
+            await atomicModifyConfig(config => ({
+                ...config,
+                mcpServerArgs: { ...(config.mcpServerArgs ?? {}), [server.id]: extraArgs },
+                mcpServerEnv: { ...(config.mcpServerEnv ?? {}), [server.id]: env },
+            }));
+            const servers = await getAllMcpServers();
+            setMcpServersState(servers);
+            setBuiltinMcpSettings(null);
+            toast.success('设置已保存');
+        } catch {
+            toast.error('保存失败');
+        }
     };
 
     // Edit custom MCP server - populate form and open modal
@@ -1553,15 +1637,13 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                 </p>
                                             </div>
                                             <div className="flex shrink-0 items-center gap-2">
-                                                {!server.isBuiltin && (<>
-                                                    <button
-                                                        onClick={() => handleEditMcp(server)}
-                                                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                                                        title="编辑"
-                                                    >
-                                                        <Settings2 className="h-4 w-4" />
-                                                    </button>
-                                                </>)}
+                                                <button
+                                                    onClick={() => server.isBuiltin ? handleEditBuiltinMcp(server) : handleEditMcp(server)}
+                                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                    title="设置"
+                                                >
+                                                    <Settings2 className="h-4 w-4" />
+                                                </button>
                                                 <button
                                                     onClick={() => handleMcpToggle(server, !isEnabled)}
                                                     disabled={isEnabling}
@@ -2183,6 +2265,164 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
                 </div>
             </div>
+
+            {/* Builtin MCP Settings Modal */}
+            {builtinMcpSettings && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
+                            <button onClick={() => setBuiltinMcpSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+                            {/* Preset command (read-only) */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">预设命令</label>
+                                <div className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
+                                    {builtinMcpSettings.server.command} {(getPresetMcpServer(builtinMcpSettings.server.id)?.args ?? []).join(' ')}
+                                </div>
+                            </div>
+
+                            {/* Extra Args */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">额外参数</label>
+                                <p className="text-[10px] text-[var(--ink-muted)] mb-2">以下参数将追加到预设命令之后</p>
+                                <div className="space-y-2">
+                                    {builtinMcpSettings.extraArgs.map((arg, idx) => (
+                                        <div key={idx} className="flex items-center gap-2">
+                                            <span className="flex-1 rounded-lg bg-[var(--paper-contrast)] px-3 py-1.5 font-mono text-xs text-[var(--ink)] break-all">
+                                                {arg}
+                                            </span>
+                                            <button
+                                                onClick={() => setBuiltinMcpSettings(prev => prev ? {
+                                                    ...prev,
+                                                    extraArgs: prev.extraArgs.filter((_, i) => i !== idx),
+                                                } : null)}
+                                                className="shrink-0 rounded p-1 text-[var(--error)] hover:bg-[var(--error-bg)]"
+                                            >
+                                                <X className="h-3.5 w-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            value={builtinMcpSettings.newArg}
+                                            onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newArg: e.target.value } : null)}
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter' && builtinMcpSettings.newArg.trim()) {
+                                                    setBuiltinMcpSettings(prev => prev ? {
+                                                        ...prev,
+                                                        extraArgs: [...prev.extraArgs, prev.newArg.trim()],
+                                                        newArg: '',
+                                                    } : null);
+                                                }
+                                            }}
+                                            placeholder="输入参数，如 --headless"
+                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                if (builtinMcpSettings.newArg.trim()) {
+                                                    setBuiltinMcpSettings(prev => prev ? {
+                                                        ...prev,
+                                                        extraArgs: [...prev.extraArgs, prev.newArg.trim()],
+                                                        newArg: '',
+                                                    } : null);
+                                                }
+                                            }}
+                                            disabled={!builtinMcpSettings.newArg.trim()}
+                                            className="shrink-0 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+                                        >
+                                            <Plus className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Environment Variables */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">环境变量</label>
+                                <div className="space-y-2">
+                                    {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
+                                        <div key={key} className="flex items-center gap-2">
+                                            <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-2 py-1 font-mono text-[10px] text-[var(--ink)]">
+                                                {key}
+                                            </span>
+                                            <input
+                                                type="text"
+                                                value={value}
+                                                onChange={e => setBuiltinMcpSettings(prev => prev ? {
+                                                    ...prev,
+                                                    env: { ...prev.env, [key]: e.target.value },
+                                                } : null)}
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1 font-mono text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                                            />
+                                            <button
+                                                onClick={() => setBuiltinMcpSettings(prev => {
+                                                    if (!prev) return null;
+                                                    const newEnv = { ...prev.env };
+                                                    delete newEnv[key];
+                                                    return { ...prev, env: newEnv };
+                                                })}
+                                                className="shrink-0 rounded p-1 text-[var(--error)] hover:bg-[var(--error-bg)]"
+                                            >
+                                                <X className="h-3.5 w-3.5" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            value={builtinMcpSettings.newEnvKey}
+                                            onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvKey: e.target.value } : null)}
+                                            placeholder="变量名"
+                                            className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                const key = builtinMcpSettings.newEnvKey.trim();
+                                                if (key && !(key in builtinMcpSettings.env)) {
+                                                    setBuiltinMcpSettings(prev => prev ? {
+                                                        ...prev,
+                                                        env: { ...prev.env, [key]: '' },
+                                                        newEnvKey: '',
+                                                    } : null);
+                                                }
+                                            }}
+                                            disabled={!builtinMcpSettings.newEnvKey.trim() || builtinMcpSettings.newEnvKey.trim() in builtinMcpSettings.env}
+                                            className="shrink-0 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+                                        >
+                                            <Plus className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
+                            <button
+                                onClick={() => setBuiltinMcpSettings(null)}
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={handleSaveBuiltinMcp}
+                                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
+                            >
+                                保存
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Add MCP Modal */}
             {showMcpForm && (

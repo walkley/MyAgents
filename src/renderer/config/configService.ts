@@ -436,12 +436,25 @@ export async function deleteProviderVerifyStatus(providerId: string): Promise<vo
 import { type McpServerDefinition, PRESET_MCP_SERVERS } from './types';
 
 /**
- * Get all available MCP servers (preset + custom)
+ * Get all available MCP servers (preset + custom), with user-configured args/env merged in
  */
 export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
     const config = await loadAppConfig();
     const customServers = config.mcpServers ?? [];
-    return [...PRESET_MCP_SERVERS, ...customServers];
+    const allServers = [...PRESET_MCP_SERVERS, ...customServers];
+    const serverArgsConfig = config.mcpServerArgs ?? {};
+    const serverEnvConfig = config.mcpServerEnv ?? {};
+
+    return allServers.map(server => {
+        const extraArgs = serverArgsConfig[server.id];
+        const extraEnv = serverEnvConfig[server.id];
+        if (extraArgs === undefined && !extraEnv) return server;
+        return {
+            ...server,
+            ...(extraArgs !== undefined && { args: [...(server.args ?? []), ...extraArgs] }),
+            ...(extraEnv && { env: { ...server.env, ...extraEnv } }),
+        };
+    });
 }
 
 /**
@@ -531,6 +544,28 @@ export async function saveMcpServerEnv(serverId: string, env: Record<string, str
 export async function getMcpServerEnv(serverId: string): Promise<Record<string, string>> {
     const config = await loadAppConfig();
     return config.mcpServerEnv?.[serverId] ?? {};
+}
+
+/**
+ * Save extra args for an MCP server (appended to preset args)
+ */
+export async function saveMcpServerArgs(serverId: string, args: string[]): Promise<void> {
+    return withConfigLock(async () => {
+        const config = await loadAppConfig();
+        const mcpServerArgs = { ...(config.mcpServerArgs ?? {}) };
+        mcpServerArgs[serverId] = args;
+        await _writeAppConfigLocked({ ...config, mcpServerArgs });
+        console.log('[configService] MCP server args saved:', serverId);
+    });
+}
+
+/**
+ * Get extra args for an MCP server
+ * Returns undefined if never customized, or the saved args array (may be empty if user cleared)
+ */
+export async function getMcpServerArgs(serverId: string): Promise<string[] | undefined> {
+    const config = await loadAppConfig();
+    return config.mcpServerArgs?.[serverId];
 }
 
 /**

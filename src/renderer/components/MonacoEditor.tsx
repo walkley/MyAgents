@@ -149,7 +149,14 @@ export default function MonacoEditor({
         scrollBeyondLastLine: false,
         wordWrap: 'on' as const,
         wrappingStrategy: 'advanced' as const,
+        // Disable accessibility support to fix CJK IME composition issues on WebKit/macOS.
+        // When enabled, Monaco uses a different text measurement path that causes:
+        // - Multi-line: entire line jumps right during pinyin composition
+        // - Single-line: line bounces vertically during composition
+        // See: https://github.com/microsoft/monaco-editor/issues/4270
+        accessibilitySupport: 'off' as const,
         fontSize: 13,
+        lineHeight: 20,
         // Use expanded font stack for Chinese character support in comments
         // Note: Monaco doesn't support CSS variables, so we inline the --font-code equivalent
         fontFamily: "ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'Fira Code', 'PingFang SC', 'Microsoft YaHei', monospace",

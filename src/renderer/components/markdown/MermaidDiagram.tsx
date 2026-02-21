@@ -1,15 +1,19 @@
 /**
- * MermaidDiagram - Renders Mermaid diagrams from code blocks
- * 
+ * MermaidDiagram - Renders Mermaid diagrams with preview/code toggle
+ *
  * Features:
  * - Progressive rendering: keeps last successful render while content updates
  * - Graceful degradation: shows last valid diagram if current content fails to parse
  * - Debounced updates to avoid excessive re-renders during streaming
+ * - Preview/Code toggle: default to rendered preview, switchable to syntax-highlighted source
+ * - Copy button: copies raw Mermaid source in both modes
  */
 
-import { AlertCircle, RefreshCw } from 'lucide-react';
+import { AlertCircle, Check, Code, Copy, Eye, RefreshCw } from 'lucide-react';
 import mermaid from 'mermaid';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 // Track if mermaid is initialized
 let mermaidInitialized = false;
@@ -40,67 +44,107 @@ function initMermaid() {
     mermaidInitialized = true;
 }
 
+// Reuse CodeBlock's theme for consistent code styling
+const codeTheme = {
+    ...oneDark,
+    'pre[class*="language-"]': {
+        ...oneDark['pre[class*="language-"]'],
+        background: '#1e1e1e',
+        borderRadius: 0,
+        padding: '1rem',
+        margin: 0,
+        fontSize: '13px',
+        lineHeight: '1.6',
+    },
+    'code[class*="language-"]': {
+        ...oneDark['code[class*="language-"]'],
+        background: 'transparent',
+        fontSize: '13px',
+        lineHeight: '1.6',
+        fontFamily: 'var(--font-code)',
+    },
+};
+
 interface MermaidDiagramProps {
     children: string;
 }
 
-// Check if mermaid content looks like it could be valid and complete
+// Timeout for stuck renders — prevents permanently blocking mermaid's internal serial queue.
+// mermaid v11 already serializes render() calls internally, so no application-level queue needed.
+const RENDER_TIMEOUT_MS = 15_000;
+
+/** Race a promise against a timeout. Cleans up timer and prevents unhandled rejection on the original. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('Render timeout')), ms);
+        }),
+    ]).finally(() => {
+        clearTimeout(timeoutId!);
+        promise.catch(() => {}); // Swallow if original rejects after timeout
+    });
+}
+
+// Check if streaming content looks complete enough to attempt a mermaid render.
+// Intentionally permissive — this is only called for content already tagged as ```mermaid```,
+// so we just guard against obviously incomplete streaming fragments.
 function looksLikeValidMermaid(content: string): boolean {
     const trimmed = content.trim();
-    if (!trimmed || trimmed.length < 15) return false; // Need more than just "graph TD"
-
-    // Must have at least one newline to be a valid diagram
-    if (!trimmed.includes('\n')) return false;
-
-    const validStarts = [
-        'graph', 'flowchart', 'sequencediagram', 'classdiagram',
-        'statediagram', 'erdiagram', 'journey', 'gantt', 'pie',
-        'mindmap', 'timeline', 'gitgraph', 'c4context'
-    ];
-
-    // Get first line and check if it starts with a valid keyword
-    const firstLine = trimmed.split('\n')[0].trim().toLowerCase();
-    return validStarts.some(start => firstLine.startsWith(start));
+    // Need a diagram type declaration line + at least one definition line
+    return trimmed.length >= 10 && trimmed.includes('\n');
 }
 
 export default function MermaidDiagram({ children }: MermaidDiagramProps) {
-    // Store both current SVG and last successfully rendered SVG
+    // View mode: preview (rendered diagram) or code (syntax highlighted source)
+    const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+    const [copied, setCopied] = useState(false);
+
+    // Store current SVG and rendering state
     const [lastValidSvg, setLastValidSvg] = useState<string>('');
-    const [lastValidContent, setLastValidContent] = useState<string>('');
     const [isRendering, setIsRendering] = useState(false);
     const [parseError, setParseError] = useState<string | null>(null);
 
     const id = useId().replace(/:/g, '_');
     const renderCountRef = useRef(0);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Use ref to avoid re-creating tryRender on every successful render
+    const lastValidContentRef = useRef('');
+
+    const handleCopy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(children.trim());
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Failed to copy:', err);
+        }
+    }, [children]);
 
     const tryRender = useCallback(async (content: string) => {
         const trimmedContent = content.trim();
 
         // Skip if content hasn't changed from last successful render
-        if (trimmedContent === lastValidContent) {
-            return;
-        }
-
+        if (trimmedContent === lastValidContentRef.current) return;
         // Skip if content doesn't look like valid mermaid
-        if (!looksLikeValidMermaid(trimmedContent)) {
-            return;
-        }
+        if (!looksLikeValidMermaid(trimmedContent)) return;
+
+        // Compute renderId before try so it's accessible in finally for DOM cleanup
+        renderCountRef.current += 1;
+        const renderId = `mermaid-${id}-${renderCountRef.current}`;
 
         try {
             initMermaid();
             setIsRendering(true);
             setParseError(null);
 
-            // Unique ID for each render attempt
-            renderCountRef.current += 1;
-            const renderId = `mermaid-${id}-${renderCountRef.current}`;
+            // mermaid v11 has an internal serial queue — no application-level queuing needed.
+            // withTimeout prevents a hung render from permanently blocking that queue.
+            const { svg } = await withTimeout(mermaid.render(renderId, trimmedContent), RENDER_TIMEOUT_MS);
 
-            const { svg } = await mermaid.render(renderId, trimmedContent);
-
-            // Success! Update both the displayed SVG and the last valid content
+            lastValidContentRef.current = trimmedContent;
             setLastValidSvg(svg);
-            setLastValidContent(trimmedContent);
         } catch (err) {
             // Parse failed - this is expected during streaming
             // Keep showing the last valid SVG, just note the error
@@ -108,8 +152,10 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
             setParseError(errorMsg);
         } finally {
             setIsRendering(false);
+            // Clean up orphaned DOM elements mermaid may leave on failure/timeout
+            document.getElementById(renderId)?.remove();
         }
-    }, [id, lastValidContent]);
+    }, [id]); // stable reference — no state dependencies
 
     useEffect(() => {
         // Debounce rendering - wait for content to stabilize
@@ -131,65 +177,149 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
     }, [children, tryRender]);
 
     const handleRetry = () => {
-        setParseError(null);
         tryRender(children);
     };
 
-    // If we have a valid SVG, show it
-    if (lastValidSvg) {
-        return (
-            <div className="my-3 overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)]">
-                {/* Show subtle updating indicator */}
-                {isRendering && (
-                    <div className="flex items-center gap-1.5 border-b border-[var(--line-subtle)] px-3 py-1.5 text-xs text-[var(--ink-muted)]">
-                        <RefreshCw className="size-3 animate-spin" />
-                        <span>更新中...</span>
-                    </div>
-                )}
-                {/* 
-                 * SECURITY: dangerouslySetInnerHTML is safe here because:
-                 * 1. SVG is generated by Mermaid library from validated diagram syntax
-                 * 2. User input is parsed as Mermaid DSL, not directly injected as HTML
-                 * 3. Mermaid is configured with securityLevel: 'loose' which still sanitizes
-                 */}
-                <div
-                    className="flex justify-center p-4 [&>svg]:max-w-full"
-                    dangerouslySetInnerHTML={{ __html: lastValidSvg }}
-                />
-            </div>
-        );
-    }
-
-    // No valid SVG yet - show loading or error state
-    if (parseError && looksLikeValidMermaid(children)) {
-        return (
-            <div className="my-3 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-bg)]/30 p-4">
-                <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2 text-[var(--warning)]">
-                        <AlertCircle className="mt-0.5 size-4 shrink-0" />
-                        <div className="min-w-0">
-                            <p className="text-sm font-medium">图表渲染中...</p>
-                            <p className="mt-1 truncate text-xs opacity-60">{parseError}</p>
-                        </div>
-                    </div>
+    // Header bar with toggle and copy button (shared across all states)
+    const headerBar = (
+        <div className="flex items-center justify-between bg-[#2d2d2d] px-4 py-2 text-xs">
+            <span className="font-mono uppercase tracking-wide text-neutral-400">
+                mermaid
+            </span>
+            <div className="flex items-center gap-2">
+                {/* Preview / Code toggle */}
+                <div className="flex items-center rounded-md bg-neutral-800 p-0.5">
                     <button
-                        onClick={handleRetry}
-                        className="shrink-0 rounded px-2 py-1 text-xs text-[var(--warning)] hover:bg-[var(--warning-bg)]"
+                        type="button"
+                        onClick={() => setViewMode('preview')}
+                        className={`flex items-center gap-1 rounded px-2 py-0.5 transition-colors ${
+                            viewMode === 'preview'
+                                ? 'bg-neutral-600 text-neutral-100'
+                                : 'text-neutral-500 hover:text-neutral-300'
+                        }`}
                     >
-                        重试
+                        <Eye className="size-3" />
+                        <span>预览</span>
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => setViewMode('code')}
+                        className={`flex items-center gap-1 rounded px-2 py-0.5 transition-colors ${
+                            viewMode === 'code'
+                                ? 'bg-neutral-600 text-neutral-100'
+                                : 'text-neutral-500 hover:text-neutral-300'
+                        }`}
+                    >
+                        <Code className="size-3" />
+                        <span>代码</span>
+                    </button>
+                </div>
+                {/* Copy button */}
+                <button
+                    type="button"
+                    onClick={handleCopy}
+                    className="flex items-center gap-1.5 rounded px-2 py-1 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-neutral-200"
+                    title={copied ? '已复制' : '复制代码'}
+                >
+                    {copied ? (
+                        <>
+                            <Check className="size-3.5" />
+                            <span>已复制</span>
+                        </>
+                    ) : (
+                        <>
+                            <Copy className="size-3.5" />
+                            <span>复制</span>
+                        </>
+                    )}
+                </button>
+            </div>
+        </div>
+    );
+
+    // Code view: syntax highlighted Mermaid source
+    const codeView = (
+        <SyntaxHighlighter
+            language="mermaid"
+            style={codeTheme}
+            customStyle={{ margin: 0 }}
+            showLineNumbers={children.trim().split('\n').length > 5}
+            lineNumberStyle={{
+                minWidth: '2.5em',
+                paddingRight: '1em',
+                color: '#4a4a4a',
+                userSelect: 'none',
+            }}
+            wrapLongLines
+        >
+            {children.trim()}
+        </SyntaxHighlighter>
+    );
+
+    // Preview content based on render state
+    const previewContent = (() => {
+        // Has valid SVG
+        if (lastValidSvg) {
+            return (
+                <>
+                    {isRendering && (
+                        <div className="flex items-center gap-1.5 border-b border-neutral-700/50 px-3 py-1.5 text-xs text-neutral-400">
+                            <RefreshCw className="size-3 animate-spin" />
+                            <span>更新中...</span>
+                        </div>
+                    )}
+                    {/*
+                     * SECURITY: dangerouslySetInnerHTML is safe here because:
+                     * 1. SVG is generated by Mermaid library from validated diagram syntax
+                     * 2. User input is parsed as Mermaid DSL, not directly injected as HTML
+                     * 3. Mermaid is configured with securityLevel: 'loose' which still sanitizes
+                     */}
+                    <div
+                        className="flex justify-center bg-[var(--paper-elevated)] p-4 [&>svg]:max-w-full"
+                        dangerouslySetInnerHTML={{ __html: lastValidSvg }}
+                    />
+                </>
+            );
+        }
+
+        // Parse error state (no valid SVG yet)
+        if (parseError && looksLikeValidMermaid(children)) {
+            return (
+                <div className="p-4">
+                    <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2 text-[var(--warning)]">
+                            <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                            <div className="min-w-0">
+                                <p className="text-sm font-medium">图表渲染中...</p>
+                                <p className="mt-1 truncate text-xs opacity-60">{parseError}</p>
+                            </div>
+                        </div>
+                        <button
+                            onClick={handleRetry}
+                            className="shrink-0 rounded px-2 py-1 text-xs text-[var(--warning)] hover:bg-[var(--warning-bg)]"
+                        >
+                            重试
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        // Initial loading state
+        return (
+            <div className="flex h-20 items-center justify-center bg-[var(--paper-contrast)]/50">
+                <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+                    <RefreshCw className="size-4 animate-spin" />
+                    <span>渲染图表...</span>
                 </div>
             </div>
         );
-    }
+    })();
 
-    // Initial loading state
     return (
-        <div className="my-3 flex h-20 items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)]/50">
-            <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
-                <RefreshCw className="size-4 animate-spin" />
-                <span>渲染图表...</span>
-            </div>
+        <div className="my-3 w-full overflow-hidden rounded-lg">
+            {headerBar}
+            {viewMode === 'code' ? codeView : previewContent}
         </div>
     );
 }

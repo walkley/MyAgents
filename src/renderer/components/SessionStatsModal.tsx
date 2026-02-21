@@ -2,7 +2,7 @@
  * SessionStatsModal - Detailed session statistics modal
  */
 import { BarChart2, Clock, Loader2, MessageSquare, Wrench, X } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getSessionStats, type SessionDetailedStats } from '@/api/sessionClient';
 import { formatTokens, formatDuration } from '@/utils/formatTokens';
@@ -49,9 +49,17 @@ export default function SessionStatsModal({
         };
     }, [sessionId]);
 
+    // Only close on genuine clicks (mousedown + mouseup both on backdrop).
+    // Prevents closing when user drags a text selection out of the modal.
+    const mouseDownTargetRef = useRef<EventTarget | null>(null);
+
+    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
+        mouseDownTargetRef.current = e.target;
+    }, []);
+
     const handleBackdropClick = useCallback(
         (e: React.MouseEvent) => {
-            if (e.target === e.currentTarget) {
+            if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
                 onClose();
             }
         },
@@ -63,9 +71,9 @@ export default function SessionStatsModal({
 
     return (
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
             style={{ padding: '4vh 4vw' }}
-            onMouseDown={(e) => e.stopPropagation()}
+            onMouseDown={handleBackdropMouseDown}
             onClick={handleBackdropClick}
         >
             <div

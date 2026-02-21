@@ -2,7 +2,7 @@
  * UnifiedLogsPanel - Fullscreen modal displaying aggregated logs from all sources
  */
 
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { LogEntry, LogLevel, LogSource } from '@/types/log';
 
@@ -177,15 +177,28 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         URL.revokeObjectURL(url);
     }, [filteredLogs]);
 
+    // Only close on genuine clicks (mousedown + mouseup both on backdrop).
+    // Prevents closing when user drags a text selection out of the modal.
+    const mouseDownTargetRef = useRef<EventTarget | null>(null);
+
+    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
+        mouseDownTargetRef.current = e.target;
+    }, []);
+
+    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+            onClose();
+        }
+    }, [onClose]);
+
     if (!isVisible) return null;
 
     // Use portal to render at document root for true fullscreen overlay
     return createPortal(
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={(e) => {
-                if (e.target === e.currentTarget) onClose();
-            }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+            onMouseDown={handleBackdropMouseDown}
+            onClick={handleBackdropClick}
         >
             <div
                 className="flex h-[90vh] w-[95vw] max-w-6xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-2xl"

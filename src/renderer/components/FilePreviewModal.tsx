@@ -208,9 +208,16 @@ export default function FilePreviewModal({
         }
     }, [apiPost, path, editContent, onSaved]);
 
-    // Handle backdrop click
+    // Handle backdrop click — only close on genuine clicks (mousedown + mouseup both on backdrop).
+    // Prevents closing when user drags a text selection out of the modal and releases on the backdrop.
+    const mouseDownTargetRef = useRef<EventTarget | null>(null);
+
+    const handleBackdropMouseDown = useCallback((e: React.MouseEvent) => {
+        mouseDownTargetRef.current = e.target;
+    }, []);
+
     const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget) {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
             handleClose();
         }
     }, [handleClose]);
@@ -293,8 +300,9 @@ export default function FilePreviewModal({
         <>
             {/* Modal backdrop */}
             <div
-                className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+                className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
                 style={{ padding: '2vh 2vw' }}
+                onMouseDown={handleBackdropMouseDown}
                 onClick={handleBackdropClick}
                 onWheel={(e) => e.stopPropagation()}
             >

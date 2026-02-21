@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
 use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError};
+use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
 
@@ -1152,47 +1153,6 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
-}
-
-/// Map MIME type to file extension
-/// Sanitize a filename from Telegram to prevent path traversal attacks.
-/// Strips path separators, `.` and `..` components, and null bytes.
-fn sanitize_filename(name: &str) -> String {
-    // Take only the last path component (strip any directory traversal)
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
-    // Remove null bytes and leading dots (prevent hidden files / `.` / `..`)
-    let cleaned: String = base
-        .chars()
-        .filter(|c| *c != '\0')
-        .collect();
-    let cleaned = cleaned.trim_start_matches('.');
-    if cleaned.is_empty() {
-        "file".to_string()
-    } else {
-        cleaned.to_string()
-    }
-}
-
-fn mime_to_ext(mime: &str) -> &str {
-    match mime {
-        "audio/ogg" => "ogg",
-        "audio/mpeg" => "mp3",
-        "audio/mp4" | "audio/m4a" => "m4a",
-        "video/mp4" => "mp4",
-        "video/quicktime" => "mov",
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-        "application/pdf" => "pdf",
-        _ => {
-            // Handle mime types with parameters (e.g. "audio/ogg; codecs=opus")
-            if mime.starts_with("audio/ogg") {
-                "ogg"
-            } else {
-                "bin"
-            }
-        }
-    }
 }
 
 /// Clean message text: remove @mention and /ask prefix

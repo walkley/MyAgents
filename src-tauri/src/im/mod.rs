@@ -9,6 +9,7 @@ pub mod heartbeat;
 pub mod router;
 pub mod telegram;
 pub mod types;
+mod util;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,6 +45,11 @@ struct PendingApproval {
 }
 
 type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
+
+/// Per-peer locks: serializes requests (IM chat + heartbeat) to the same Sidecar.
+/// Required because /api/im/chat uses a single imStreamCallback; concurrent
+/// requests would conflict. Shared between processing loop and heartbeat runner.
+pub(crate) type PeerLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 use buffer::MessageBuffer;
 use feishu::FeishuAdapter;
@@ -441,6 +447,11 @@ pub async fn start_im_bot<R: Runtime>(
         ulog_info!("[im] Approval handler exited");
     });
 
+    // Per-peer locks: shared between the processing loop and heartbeat runner.
+    // Both must acquire the lock for a session_key before calling Sidecar HTTP APIs,
+    // because /api/im/chat uses a single imStreamCallback — concurrent requests would conflict.
+    let peer_locks: PeerLocks = Arc::new(Mutex::new(HashMap::new()));
+
     // Start message processing loop
     //
     // Concurrency model:
@@ -450,6 +461,7 @@ pub async fn start_im_bot<R: Runtime>(
     //   Lock ordering (per task):
     //     1. Per-peer lock — serializes requests to the same Sidecar (required because
     //        /api/im/chat uses a single imStreamCallback; concurrent requests would conflict).
+    //        Heartbeat runner also acquires this lock to prevent callback conflicts.
     //     2. Global semaphore — limits total concurrent Sidecar I/O across all peers.
     //        Acquired AFTER the peer lock so queued same-peer tasks don't hold permits
     //        while waiting, which would starve other peers.
@@ -487,8 +499,9 @@ pub async fn start_im_bot<R: Runtime>(
 
     // Concurrency primitives (live outside the router for lock-free access)
     let global_semaphore = Arc::new(Semaphore::new(GLOBAL_CONCURRENCY));
-    let peer_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    // peer_locks is created in start_im_bot() and shared with heartbeat runner;
+    // the Arc is cloned here for the processing loop.
+    let peer_locks_for_loop = Arc::clone(&peer_locks);
     let stream_client = create_sidecar_stream_client();
 
     let process_handle = tokio::spawn(async move {
@@ -1035,7 +1048,7 @@ pub async fn start_im_bot<R: Runtime>(
                     let task_mcp_json = mcp_servers_json_for_loop.read().await.clone();
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
-                    let task_locks = Arc::clone(&peer_locks);
+                    let task_locks = Arc::clone(&peer_locks_for_loop);
                     let task_pending_approvals = Arc::clone(&pending_approvals_for_loop);
                     let task_bot_id = bot_id_for_loop.clone();
 
@@ -1351,6 +1364,7 @@ pub async fn start_im_bot<R: Runtime>(
         let hb_sidecar = Arc::clone(sidecar_manager);
         let hb_adapter = Arc::clone(&adapter);
         let hb_app = app_handle.clone();
+        let hb_peer_locks = Arc::clone(&peer_locks);
 
         let handle = tokio::spawn(async move {
             runner.run_loop(
@@ -1360,6 +1374,7 @@ pub async fn start_im_bot<R: Runtime>(
                 hb_sidecar,
                 hb_adapter,
                 hb_app,
+                hb_peer_locks,
             ).await;
         });
 

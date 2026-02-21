@@ -18,7 +18,8 @@ use prost::Message as ProstMessage;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use super::types::{ImConfig, ImMessage, ImPlatform, ImSourceType};
+use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType};
+use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
 use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
 
@@ -412,7 +413,10 @@ fn feishu_post_to_text(content: &Value) -> String {
                             let name = elem["user_name"].as_str().unwrap_or("@someone");
                             line_parts.push(format!("@{}", name));
                         }
-                        "img" | "media" => {
+                        "img" => {
+                            line_parts.push("[图片]".to_string());
+                        }
+                        "media" => {
                             line_parts.push("[附件]".to_string());
                         }
                         "code_block" => {
@@ -442,6 +446,45 @@ fn feishu_post_to_text(content: &Value) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Extract all image_key values from a Feishu Post rich-text content.
+/// Post structure: {"zh_cn": {"content": [[{"tag": "img", "image_key": "img_xxx"}, ...], ...]}}
+fn extract_post_image_keys(content: &Value) -> Vec<String> {
+    let mut keys = Vec::new();
+
+    // Navigate to paragraphs (same locale-unwrapping logic as feishu_post_to_text)
+    let post = if let Some(obj) = content.as_object() {
+        if obj.get("content").map_or(false, |v| v.is_array()) {
+            content
+        } else {
+            obj.get("zh_cn")
+                .or_else(|| obj.get("en_us"))
+                .or_else(|| obj.values().next())
+                .unwrap_or(content)
+        }
+    } else {
+        content
+    };
+
+    if let Some(paragraphs) = post["content"].as_array() {
+        for para in paragraphs {
+            if let Some(elements) = para.as_array() {
+                for elem in elements {
+                    let tag = elem["tag"].as_str().unwrap_or("");
+                    if tag == "img" {
+                        if let Some(key) = elem["image_key"].as_str() {
+                            if !key.is_empty() {
+                                keys.push(key.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    keys
 }
 
 /// Feishu Bot API adapter
@@ -700,6 +743,83 @@ impl FeishuAdapter {
         }
     }
 
+    // ===== Resource download =====
+
+    /// Download a message resource (image/file) from Feishu.
+    /// API: GET /im/v1/messages/{message_id}/resources/{file_key}?type=image|file
+    /// Returns (data, content_type). Retries once on 401 (token expired).
+    async fn download_resource(
+        &self,
+        message_id: &str,
+        file_key: &str,
+        resource_type: &str,
+    ) -> Result<(Vec<u8>, String), String> {
+        /// Maximum file download size (20 MB)
+        const MAX_DOWNLOAD_SIZE: usize = 20 * 1024 * 1024;
+
+        let url = format!(
+            "{}/im/v1/messages/{}/resources/{}?type={}",
+            FEISHU_API_BASE, message_id, file_key, resource_type
+        );
+
+        let mut retries = 0;
+        loop {
+            let token = self.get_token().await?;
+            let resp = self.client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await
+                .map_err(|e| format!("Resource download error: {}", e))?;
+
+            // Handle 401 — refresh token and retry once
+            if resp.status().as_u16() == 401 && retries == 0 {
+                ulog_warn!("[feishu] Resource download got 401, refreshing token");
+                {
+                    let mut cache = self.token_cache.write().await;
+                    *cache = None;
+                }
+                retries += 1;
+                continue;
+            }
+
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "Resource download HTTP {} for {}",
+                    resp.status(), file_key
+                ));
+            }
+
+            // Strip parameters from content-type (e.g. "image/jpeg; charset=utf-8" → "image/jpeg")
+            // Claude API's media_type expects a clean MIME type without parameters.
+            let content_type = resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .split(';')
+                .next()
+                .unwrap_or("application/octet-stream")
+                .trim()
+                .to_string();
+
+            let bytes = resp.bytes().await
+                .map_err(|e| format!("Resource read error: {}", e))?;
+
+            if bytes.len() > MAX_DOWNLOAD_SIZE {
+                return Err(format!(
+                    "Resource too large: {} bytes (max {})",
+                    bytes.len(), MAX_DOWNLOAD_SIZE
+                ));
+            }
+
+            ulog_info!(
+                "[feishu] Downloaded resource: {} ({} bytes, {})",
+                file_key, bytes.len(), content_type
+            );
+            return Ok((bytes.to_vec(), content_type));
+        }
+    }
+
     // ===== Bot info =====
 
     /// Get bot info to verify credentials.
@@ -816,7 +936,8 @@ impl FeishuAdapter {
     }
 
     /// Parse a Feishu IM event into an ImMessage.
-    fn parse_im_event(&self, event: &Value) -> Option<ImMessage> {
+    /// Async because image/file/audio/video messages require downloading resources.
+    async fn parse_im_event(&self, event: &Value) -> Option<ImMessage> {
         let header = event.get("header")?;
         let event_type = header["event_type"].as_str()?;
 
@@ -841,12 +962,116 @@ impl FeishuAdapter {
             }
         };
 
+        // ── Collect attachments + text by message type ──
+        let mut attachments: Vec<ImAttachment> = Vec::new();
+        let mut text_parts: Vec<String> = Vec::new();
+
         let text = match msg_type {
             "text" => {
                 content["text"].as_str().unwrap_or("").to_string()
             }
             "post" => {
-                feishu_post_to_text(&content)
+                let post_text = feishu_post_to_text(&content);
+                // Also extract and download images embedded in post content
+                let image_keys = extract_post_image_keys(&content);
+                for key in &image_keys {
+                    match self.download_resource(&message_id, key, "image").await {
+                        Ok((data, content_type)) => {
+                            let ext = mime_to_ext(&content_type);
+                            attachments.push(ImAttachment {
+                                file_name: format!("{}.{}", key, ext),
+                                mime_type: content_type,
+                                data,
+                                attachment_type: ImAttachmentType::Image,
+                            });
+                        }
+                        Err(e) => ulog_warn!("[feishu] Failed to download post image {}: {}", key, e),
+                    }
+                }
+                post_text
+            }
+            "image" => {
+                // Image message: {"image_key": "img_v3_xxx"}
+                if let Some(image_key) = content["image_key"].as_str() {
+                    match self.download_resource(&message_id, image_key, "image").await {
+                        Ok((data, content_type)) => {
+                            let ext = mime_to_ext(&content_type);
+                            attachments.push(ImAttachment {
+                                file_name: format!("image.{}", ext),
+                                mime_type: content_type,
+                                data,
+                                attachment_type: ImAttachmentType::Image,
+                            });
+                        }
+                        Err(e) => ulog_warn!("[feishu] Failed to download image: {}", e),
+                    }
+                }
+                String::new()
+            }
+            "file" => {
+                // File message: {"file_key": "file_v3_xxx", "file_name": "doc.pdf"}
+                if let Some(file_key) = content["file_key"].as_str() {
+                    let file_name = content["file_name"].as_str().unwrap_or("file");
+                    match self.download_resource(&message_id, file_key, "file").await {
+                        Ok((data, content_type)) => {
+                            attachments.push(ImAttachment {
+                                file_name: sanitize_filename(file_name),
+                                mime_type: content_type,
+                                data,
+                                attachment_type: ImAttachmentType::File,
+                            });
+                            text_parts.push(format!("[文件: {}]", file_name));
+                        }
+                        Err(e) => ulog_warn!("[feishu] Failed to download file: {}", e),
+                    }
+                }
+                String::new()
+            }
+            "audio" => {
+                // Audio message: {"file_key": "file_v3_xxx", "duration": 1000}
+                if let Some(file_key) = content["file_key"].as_str() {
+                    match self.download_resource(&message_id, file_key, "file").await {
+                        Ok((data, content_type)) => {
+                            let ext = mime_to_ext(&content_type);
+                            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                            attachments.push(ImAttachment {
+                                file_name: format!("voice_{}.{}", ts, ext),
+                                mime_type: content_type,
+                                data,
+                                attachment_type: ImAttachmentType::File,
+                            });
+                            text_parts.push("[语音消息]".into());
+                        }
+                        Err(e) => ulog_warn!("[feishu] Failed to download audio: {}", e),
+                    }
+                }
+                String::new()
+            }
+            "media" | "video" => {
+                // Video/media message: {"file_key": "file_v3_xxx", "file_name": "xxx.mp4", "duration": ...}
+                if let Some(file_key) = content["file_key"].as_str() {
+                    let orig_name = content["file_name"].as_str();
+                    match self.download_resource(&message_id, file_key, "file").await {
+                        Ok((data, content_type)) => {
+                            let ext = mime_to_ext(&content_type);
+                            let file_name = orig_name
+                                .map(|n| sanitize_filename(n))
+                                .unwrap_or_else(|| {
+                                    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                                    format!("video_{}.{}", ts, ext)
+                                });
+                            attachments.push(ImAttachment {
+                                file_name,
+                                mime_type: content_type,
+                                data,
+                                attachment_type: ImAttachmentType::File,
+                            });
+                            text_parts.push("[视频]".into());
+                        }
+                        Err(e) => ulog_warn!("[feishu] Failed to download video: {}", e),
+                    }
+                }
+                String::new()
             }
             _ => {
                 ulog_debug!("[feishu] Ignoring unsupported message type: {}", msg_type);
@@ -854,7 +1079,16 @@ impl FeishuAdapter {
             }
         };
 
-        if text.trim().is_empty() {
+        // ── Build final text ──
+        let mut final_text_parts = Vec::new();
+        if !text.is_empty() {
+            final_text_parts.push(text);
+        }
+        final_text_parts.extend(text_parts);
+        let combined_text = final_text_parts.join("\n");
+
+        // Skip if no content at all (no text AND no attachments)
+        if combined_text.trim().is_empty() && attachments.is_empty() {
             ulog_debug!("[feishu] Ignoring empty {} message", msg_type);
             return None;
         }
@@ -883,13 +1117,13 @@ impl FeishuAdapter {
         Some(ImMessage {
             chat_id,
             message_id,
-            text,
+            text: combined_text,
             sender_id,
             sender_name: None, // Feishu events don't always include display name
             source_type,
             platform: ImPlatform::Feishu,
             timestamp: chrono::Utc::now(),
-            attachments: Vec::new(),
+            attachments,
             media_group_id: None,
         })
     }
@@ -1315,7 +1549,7 @@ impl FeishuAdapter {
             return;
         }
 
-        if let Some(msg) = self.parse_im_event(&event) {
+        if let Some(msg) = self.parse_im_event(&event).await {
             // Dedup check: skip if message_id was seen within TTL (72h, disk-persisted)
             let persist_snapshot = {
                 let mut cache = self.dedup_cache.lock().await;

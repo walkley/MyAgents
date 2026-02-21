@@ -16,7 +16,7 @@ use crate::{ulog_info, ulog_warn, ulog_debug};
 use super::adapter::ImAdapter;
 use super::router::SessionRouter;
 use super::types::{ActiveHours, HeartbeatConfig, WakeReason};
-use super::AnyAdapter;
+use super::{AnyAdapter, PeerLocks};
 
 /// Response from Bun /api/im/heartbeat endpoint
 #[derive(Debug, Deserialize)]
@@ -84,6 +84,7 @@ impl HeartbeatRunner {
         sidecar_manager: ManagedSidecarManager,
         adapter: Arc<AnyAdapter>,
         app_handle: AppHandle<R>,
+        peer_locks: PeerLocks,
     ) {
         let initial_interval = {
             let cfg = self.config.read().await;
@@ -128,6 +129,7 @@ impl HeartbeatRunner {
                         &sidecar_manager,
                         &adapter,
                         &app_handle,
+                        &peer_locks,
                     ).await;
                 }
                 Some(reason) = wake_rx.recv() => {
@@ -149,6 +151,7 @@ impl HeartbeatRunner {
                         &sidecar_manager,
                         &adapter,
                         &app_handle,
+                        &peer_locks,
                     ).await;
 
                     // Reset interval timer after wake to avoid rapid fire
@@ -163,6 +166,11 @@ impl HeartbeatRunner {
     /// Execute a single heartbeat cycle.
     /// Uses the same ensure_sidecar flow as user messages — if the sidecar was
     /// idle-collected, it will be automatically restarted.
+    ///
+    /// Acquires the per-peer lock for the target session_key before calling Sidecar
+    /// HTTP APIs. This serializes heartbeat with user messages on the same Sidecar,
+    /// preventing imStreamCallback conflicts that would cause lost responses or
+    /// double "(No response)" messages.
     async fn run_once<R: Runtime>(
         &self,
         reason: WakeReason,
@@ -170,6 +178,7 @@ impl HeartbeatRunner {
         sidecar_manager: &ManagedSidecarManager,
         adapter: &Arc<AnyAdapter>,
         app_handle: &AppHandle<R>,
+        peer_locks: &PeerLocks,
     ) {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
@@ -216,7 +225,22 @@ impl HeartbeatRunner {
             }
         };
 
-        // Ensure sidecar is running — same pattern as user message flow (mod.rs:952-981).
+        // Acquire per-peer lock BEFORE any Sidecar I/O.
+        // Lock ordering: peer_lock → router_lock (same as processing loop, no deadlock).
+        // This ensures heartbeat and user messages to the same Sidecar are serialized,
+        // preventing imStreamCallback from being overwritten while a response is in-flight.
+        let peer_lock = {
+            let mut locks = peer_locks.lock().await;
+            locks
+                .entry(session_key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _peer_guard = peer_lock.lock().await;
+
+        ulog_debug!("[heartbeat] Acquired peer lock for {}", session_key);
+
+        // Ensure sidecar is running — same pattern as user message flow.
         // If sidecar was idle-collected (port=0), this will restart it automatically.
         let (port, is_new_sidecar) = {
             let mut router_guard = router.lock().await;
@@ -268,7 +292,7 @@ impl HeartbeatRunner {
 
         let ack_max_chars = config.ack_max_chars.unwrap_or(300);
 
-        // Call Bun heartbeat endpoint
+        // Call Bun heartbeat endpoint (peer_lock is held — no concurrent IM chat possible)
         let request = HeartbeatRequest {
             prompt,
             source: source.clone(),
@@ -298,7 +322,7 @@ impl HeartbeatRunner {
             }
         };
 
-        // Handle response
+        // Handle response (still under peer_lock — IM message send is safe)
         match result.status.as_str() {
             "silent" => {
                 ulog_debug!("[heartbeat] AI responded HEARTBEAT_OK (silent)");
@@ -326,6 +350,7 @@ impl HeartbeatRunner {
             }
         }
 
+        // Release executing flag (peer_lock is dropped automatically when _peer_guard goes out of scope)
         *self.executing.lock().await = false;
     }
 }
