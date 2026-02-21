@@ -69,23 +69,31 @@ interface MermaidDiagramProps {
     children: string;
 }
 
-// Check if mermaid content looks like it could be valid and complete
+// Timeout for stuck renders — prevents permanently blocking mermaid's internal serial queue.
+// mermaid v11 already serializes render() calls internally, so no application-level queue needed.
+const RENDER_TIMEOUT_MS = 15_000;
+
+/** Race a promise against a timeout. Cleans up timer and prevents unhandled rejection on the original. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('Render timeout')), ms);
+        }),
+    ]).finally(() => {
+        clearTimeout(timeoutId!);
+        promise.catch(() => {}); // Swallow if original rejects after timeout
+    });
+}
+
+// Check if streaming content looks complete enough to attempt a mermaid render.
+// Intentionally permissive — this is only called for content already tagged as ```mermaid```,
+// so we just guard against obviously incomplete streaming fragments.
 function looksLikeValidMermaid(content: string): boolean {
     const trimmed = content.trim();
-    if (!trimmed || trimmed.length < 15) return false; // Need more than just "graph TD"
-
-    // Must have at least one newline to be a valid diagram
-    if (!trimmed.includes('\n')) return false;
-
-    const validStarts = [
-        'graph', 'flowchart', 'sequencediagram', 'classdiagram',
-        'statediagram', 'erdiagram', 'journey', 'gantt', 'pie',
-        'mindmap', 'timeline', 'gitgraph', 'c4context'
-    ];
-
-    // Get first line and check if it starts with a valid keyword
-    const firstLine = trimmed.split('\n')[0].trim().toLowerCase();
-    return validStarts.some(start => firstLine.startsWith(start));
+    // Need a diagram type declaration line + at least one definition line
+    return trimmed.length >= 10 && trimmed.includes('\n');
 }
 
 export default function MermaidDiagram({ children }: MermaidDiagramProps) {
@@ -93,15 +101,16 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
     const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
     const [copied, setCopied] = useState(false);
 
-    // Store both current SVG and last successfully rendered SVG
+    // Store current SVG and rendering state
     const [lastValidSvg, setLastValidSvg] = useState<string>('');
-    const [lastValidContent, setLastValidContent] = useState<string>('');
     const [isRendering, setIsRendering] = useState(false);
     const [parseError, setParseError] = useState<string | null>(null);
 
     const id = useId().replace(/:/g, '_');
     const renderCountRef = useRef(0);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Use ref to avoid re-creating tryRender on every successful render
+    const lastValidContentRef = useRef('');
 
     const handleCopy = useCallback(async () => {
         try {
@@ -117,29 +126,25 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
         const trimmedContent = content.trim();
 
         // Skip if content hasn't changed from last successful render
-        if (trimmedContent === lastValidContent) {
-            return;
-        }
-
+        if (trimmedContent === lastValidContentRef.current) return;
         // Skip if content doesn't look like valid mermaid
-        if (!looksLikeValidMermaid(trimmedContent)) {
-            return;
-        }
+        if (!looksLikeValidMermaid(trimmedContent)) return;
+
+        // Compute renderId before try so it's accessible in finally for DOM cleanup
+        renderCountRef.current += 1;
+        const renderId = `mermaid-${id}-${renderCountRef.current}`;
 
         try {
             initMermaid();
             setIsRendering(true);
             setParseError(null);
 
-            // Unique ID for each render attempt
-            renderCountRef.current += 1;
-            const renderId = `mermaid-${id}-${renderCountRef.current}`;
+            // mermaid v11 has an internal serial queue — no application-level queuing needed.
+            // withTimeout prevents a hung render from permanently blocking that queue.
+            const { svg } = await withTimeout(mermaid.render(renderId, trimmedContent), RENDER_TIMEOUT_MS);
 
-            const { svg } = await mermaid.render(renderId, trimmedContent);
-
-            // Success! Update both the displayed SVG and the last valid content
+            lastValidContentRef.current = trimmedContent;
             setLastValidSvg(svg);
-            setLastValidContent(trimmedContent);
         } catch (err) {
             // Parse failed - this is expected during streaming
             // Keep showing the last valid SVG, just note the error
@@ -147,8 +152,10 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
             setParseError(errorMsg);
         } finally {
             setIsRendering(false);
+            // Clean up orphaned DOM elements mermaid may leave on failure/timeout
+            document.getElementById(renderId)?.remove();
         }
-    }, [id, lastValidContent]);
+    }, [id]); // stable reference — no state dependencies
 
     useEffect(() => {
         // Debounce rendering - wait for content to stabilize
@@ -170,7 +177,6 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
     }, [children, tryRender]);
 
     const handleRetry = () => {
-        setParseError(null);
         tryRender(children);
     };
 
