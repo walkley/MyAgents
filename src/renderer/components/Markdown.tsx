@@ -427,9 +427,23 @@ function preprocessContent(content: string): string {
   return processed;
 }
 
+/**
+ * Convert YAML frontmatter (---\n...\n---) to a fenced yaml code block
+ * so the existing CodeBlock component renders it with syntax highlighting.
+ * Only applied in raw/file-preview mode where skill/agent .md files are displayed.
+ */
+function convertFrontmatter(content: string): string {
+  if (!content) return '';
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+  if (!match) return content;
+  const yamlBlock = '```yaml\n' + match[1] + '\n```\n';
+  return yamlBlock + content.slice(match[0].length);
+}
+
 const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
-  const processedContent = raw ? children : preprocessContent(children);
+  // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering
+  const processedContent = raw ? convertFrontmatter(children) : preprocessContent(children);
 
   // Get tabId for image loading (only needed when basePath is provided)
   const tabApi = useTabApiOptional();
